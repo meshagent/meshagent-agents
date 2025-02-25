@@ -386,7 +386,7 @@ class TaskRunner(SingleRoomAgent):
                             description=tool_json["description"],
                             input_schema=tool_json["input_schema"],
                             thumbnail_url=toolkit_json["thumbnail_url"],
-                            defs=tool_json["defs"]
+                            defs=tool_json.get("defs", None)
                         ))
 
                     context.toolkits.append(Toolkit(
