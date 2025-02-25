@@ -25,12 +25,12 @@ class AgentException(RoomException):
 
 
 class RoomTool(Tool):
-    def __init__(self, *, toolkit_name: str, name, input_schema, title = None, description = None, rules = None, thumbnail_url = None, participant_id: Optional[str] = None, on_behalf_of_id: Optional[str] = None):
+    def __init__(self, *, toolkit_name: str, name, input_schema, title = None, description = None, rules = None, thumbnail_url = None, participant_id: Optional[str] = None, on_behalf_of_id: Optional[str] = None, defs: Optional[dict] = None):
         self._toolkit_name = toolkit_name
         self._participant_id = participant_id
         self._on_behalf_of_id = on_behalf_of_id
 
-        super().__init__(name=name, input_schema=input_schema, title=title, description=description, rules=rules, thumbnail_url=thumbnail_url)
+        super().__init__(name=name, input_schema=input_schema, title=title, description=description, rules=rules, thumbnail_url=thumbnail_url, defs=defs)
 
     async def execute(self, context, **kwargs):
        return await context.room.agents.invoke_tool(
@@ -38,7 +38,8 @@ class RoomTool(Tool):
             tool=self.name,
             participant_id=self._participant_id,
             on_behalf_of_id=self._on_behalf_of_id,
-            arguments=kwargs
+            arguments=kwargs,
+    
         )
     
 class Agent:
@@ -203,7 +204,8 @@ class SingleRoomAgent(Agent):
                             input_schema=tool_description.input_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=participant_id
+                            participant_id=participant_id,
+                            defs = tool_description.defs
                         )
                         room_tools.append(tool)
 
@@ -226,7 +228,8 @@ class SingleRoomAgent(Agent):
                             input_schema=tool_description.input_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=participant_id
+                            participant_id=participant_id,
+                            defs = tool_description.defs
                         )
                         room_tools.append(tool)
 
@@ -383,6 +386,7 @@ class TaskRunner(SingleRoomAgent):
                             description=tool_json["description"],
                             input_schema=tool_json["input_schema"],
                             thumbnail_url=toolkit_json["thumbnail_url"],
+                            defs=tool_json["defs"]
                         ))
 
                     context.toolkits.append(Toolkit(
