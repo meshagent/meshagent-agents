@@ -269,50 +269,53 @@ class SiteIndexer(TaskRunner):
         
         while True:
             message = await context.room.queues.receive(name=queue, create=True, wait=True)
-            try:
-                if message == None:
-                    break
+           
+            if message == None:
+                break
 
-                if message.get("done", False) == True:
-                    break
+            if message.get("type", None) == "crawl.completed":
+                break
             
-                url : str  = message["data"]["metadata"]["url"]
-                text : str = message["data"]["markdown"]
-                title : str  = message["data"]["metadata"]["title"]
-                title_sha : str  = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if "data" in message:
+                for data in message["data"]:
+                    try:
+                        url : str  = data["metadata"]["url"]
+                        text : str = data["markdown"]
+                        title : str  = data["metadata"]["title"]
+                        title_sha : str  = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-                logger.info(f"processing crawled page: {url}")
-                
-                # let's make the title it's own chunk
-                rows.append(
-                        {
-                            "id" : id,
-                            "url" : url,
-                            "text" : title,
-                            "sha" : title_sha,
-                            "embedding" : await lookup_or_embed(sha=title_sha, text=title)
-                        }
-                    )
-                    
-                id = id + 1
-                
-                # the content will be transformed into additional chunks
-                for chunk in await self.chunker.chunk(text=text, max_length = self.embedder.max_length):
-                    logger.info(f"processing chunk from {url}: {chunk.text}")
-                    chunk_sha = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
-                    rows.append(
-                        {
-                            "id" : id,
-                            "url" : url,
-                            "text" : chunk.text,
-                            "embedding" : await lookup_or_embed(sha=chunk_sha, text=chunk.text)
-                        }
-                    )
-                    
-                    id = id + 1
+                        logger.info(f"processing crawled page: {url}")
+                        
+                        # let's make the title it's own chunk
+                        rows.append(
+                                {
+                                    "id" : id,
+                                    "url" : url,
+                                    "text" : title,
+                                    "sha" : title_sha,
+                                    "embedding" : await lookup_or_embed(sha=title_sha, text=title)
+                                }
+                            )
+                            
+                        id = id + 1
+                        
+                        # the content will be transformed into additional chunks
+                        for chunk in await self.chunker.chunk(text=text, max_length = self.embedder.max_length):
+                            logger.info(f"processing chunk from {url}: {chunk.text}")
+                            chunk_sha = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+                            rows.append(
+                                {
+                                    "id" : id,
+                                    "url" : url,
+                                    "text" : chunk.text,
+                                    "embedding" : await lookup_or_embed(sha=chunk_sha, text=chunk.text)
+                                }
+                            )
+                            
+                            id = id + 1
 
-            except Exception as e:
-                logger.error(f"failed to process: {url}", exc_info=e)
+                    except Exception as e:
+                        logger.error(f"failed to process: {url}", exc_info=e)
 
         logger.info(f"saving crawl: {url}")
             
