@@ -66,7 +66,7 @@ class ChatBot(SingleRoomAgent):
             await self.room.messaging.send_message(to=RemoteParticipant(id=participant.id), type="chat", message={ "text" : self._auto_greet_message  })
 
 
-    def finalize_toolkits(self, toolkits) -> list[Toolkit]:
+    async def finalize_toolkits(self, toolkits) -> list[Toolkit]:
 
         toaster = None
         
@@ -147,6 +147,7 @@ class ChatBot(SingleRoomAgent):
                     installed = True
                     await self.install_requirements(participant_id=participant_id)
 
+
                 if received.type == "opened":
                     
                     
@@ -164,7 +165,15 @@ class ChatBot(SingleRoomAgent):
                     if chat_with_participant.id == received.from_participant_id:
                         self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
                 
-                        chat_context.append_user_message(message=received.message["text"])
+                        text = received.message["text"]
+                        attachments = received.message.get("attachments", [])
+
+                        for attachment in attachments:
+
+                            chat_context.append_assistant_message(message=f"the user attached a file '{attachment["filename"]}' with the content: '{attachment["content"]}'")
+                            
+
+                        chat_context.append_user_message(message=text)
                             
 
                     # if user is typing, wait for typing to stop
@@ -187,7 +196,7 @@ class ChatBot(SingleRoomAgent):
                         *await self.get_required_tools(participant_id=chat_with_participant.id)
                     ]
 
-                    toolkits = self.finalize_toolkits(toolkits)
+                    toolkits = await self.finalize_toolkits(toolkits)
 
                     response = await self._llm_adapter.next(
                         context=chat_context,
@@ -249,6 +258,7 @@ class ChatBot(SingleRoomAgent):
     async def start(self, *, room):
 
         await super().start(room=room)
+
 
         await self.room.local_participant.set_attribute("empty_state_title", self._empty_state_title)
 
