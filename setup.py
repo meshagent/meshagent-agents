@@ -19,7 +19,7 @@ setuptools.setup(
     classifiers=[       
     ],
     keywords=[],
-    license="MIT",
+    license="Apache License 2.0",
     packages=setuptools.find_namespace_packages(include=[
         "meshagent.*",
     ]),
@@ -30,6 +30,7 @@ setuptools.setup(
         "pytest-asyncio>=0.24.0",        
         "meshagent-api>=0.0.1",
         "meshagent-tools>=0.0.1",
+        "meshagent-openai>=0.0.1",
         "pydantic>=2.10.4",
         "pydantic-ai>=0.0.23",
     ],
