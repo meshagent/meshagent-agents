@@ -129,7 +129,7 @@ class ChatBot(SingleRoomAgent):
                     "type" : "string"
                 },
                 "finished" : {
-                    "description" : "whether the agent has finished answering the user's last message, also should be set to true if we get stuck in a loop, or if the user did not make a request",
+                    "description" : "whether the agent has finished answering the user's last message. you MUST set this to true if there are no more tool calls to be made or you are stuck in a loop.",
                     "type" : "boolean"
                 }
             }
