@@ -66,10 +66,6 @@ class OpenAIEmbedder(Embedder):
         return (await self._openai.embeddings.create(input=text, model=self._model, encoding_format="float")).data[0].embedding
     
 
-open_ai_embedding_3_small = OpenAIEmbedder(model="text-embedding-3-small", max_length=8191, size=1536)
-open_ai_embedding_3_large = OpenAIEmbedder(model="text-embedding-3-large", max_length=8191, size=3072)
-open_ai_embedding_ada_2 = OpenAIEmbedder(model="text-embedding-ada-002", max_length=8191, size=1536)
-
 
 class RagTool(Tool):
     def __init__(self, *, name = "rag_search", table: str, title = "RAG search", description = "perform a RAG search", rules = None, thumbnail_url = None, embedder: Optional[Embedder] = None):
@@ -120,11 +116,21 @@ class RagTool(Tool):
         }
         
 
+def open_ai_embedding_3_small():
+    return OpenAIEmbedder(model="text-embedding-3-small", max_length=8191, size=1536)
+
+def open_ai_embedding_3_large():
+    return OpenAIEmbedder(model="text-embedding-3-large", max_length=8191, size=3072)
+
+def open_ai_embedding_ada_2():
+    return OpenAIEmbedder(model="text-embedding-ada-002", max_length=8191, size=1536)
+
+
 class RagToolkit(Toolkit):
     def __init__(self, table: str, embedder:Optional[Embedder] = None):
 
         if embedder == None:
-            embedder = open_ai_embedding_3_large
+            embedder = open_ai_embedding_3_large()
 
         super().__init__(
             name="meshagent.rag",
@@ -155,7 +161,7 @@ class SiteIndexer(TaskRunner):
             chunker = ChonkieChunker()
 
         if embedder == None:
-            embedder = open_ai_embedding_3_large
+            embedder = open_ai_embedding_3_large()
 
         self.chunker = chunker
         self.embedder = embedder
