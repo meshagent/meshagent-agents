@@ -34,7 +34,8 @@ setuptools.setup(
         "pydantic>=2.10.4",
         "pydantic-ai>=0.0.23",
         "chonkie>=0.5.1",
-        "chonkie[semantic]>=0.5.1"
+        "chonkie[semantic]>=0.5.1",
+        "chonkie[openai]>=0.5.1"
     ],
     package_data={        
         "meshagent.agents": ["py.typed", "*.pyi", "**/*.pyi",  "**/*.js"],
