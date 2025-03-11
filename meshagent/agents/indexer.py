@@ -1,16 +1,47 @@
-from meshagent.agents import TaskRunner, RequiredToolkit
+from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
 from meshagent.tools import Toolkit, Tool, ToolContext
 from meshagent.api.room_server_client import TextDataType, VectorDataType, FloatDataType, IntDataType
 from openai import AsyncOpenAI
 from typing import Optional
+from meshagent.api.chan import Chan
+
 import hashlib
 import chonkie
 import asyncio
 import logging
 
+from functools import wraps
+
+import os
+
 # TODO: install chonkie, chonkie[semantic], openai
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+
+
+def _async_debounce(wait):
+    def decorator(func):
+        task = None
+
+        @wraps(func)
+        async def debounced(*args, **kwargs):
+            nonlocal task
+
+            async def call_func():
+                await asyncio.sleep(wait)
+                await func(*args, **kwargs)
+
+            if task and not task.done():
+                task.cancel()
+
+            task = asyncio.create_task(call_func())
+            return task
+
+        return debounced
+
+    return decorator
 
 logger = logging.getLogger("indexer")
 logger.setLevel(logging.INFO)
@@ -142,6 +173,186 @@ class RagToolkit(Toolkit):
         )
 
 
+class FileIndexEvent:
+    def __init__(self, *, path: str, deleted: bool):
+        self.path = path
+        self.deleted = deleted
+
+class StorageIndexer(SingleRoomAgent):
+
+    def __init__(
+        self,
+        *,
+        name,
+        title=None,
+        description=None,
+        requires=None,
+        labels = None, 
+        chunker: Optional[Chunker] = None,
+        embedder:Optional[Embedder] = None,
+        table: str = "storage_index",
+      ):
+        super().__init__(name=name, title=title, description=description, requires=requires, labels=labels)
+
+        self._chan = Chan[FileIndexEvent]()
+        
+        if chunker == None:
+            chunker = ChonkieChunker()
+
+        if embedder == None:
+            embedder = open_ai_embedding_3_large()
+
+        self.chunker = chunker
+        self.embedder = embedder
+        self.table = table
+
+    async def read_file(self, *, path: str) -> str | None:
+        pass
+    
+    @_async_debounce(10)
+    async def refresh_index(self):
+        
+        logger.info("refreshing index")
+        try:
+            await self.room.database.create_vector_index(table=self.table, column="embedding")
+        except Exception as e:
+            # Will fail if there aren't enough rows
+            pass
+
+        await self.room.database.create_full_text_search_index(table=self.table, column="text")
+
+
+    async def start(self, *, room):
+        await super().start(room=room)
+
+        room.storage.on("file.updated", self._on_file_updated)
+        room.storage.on("file.deleted", self._on_file_deleted)
+
+        await room.database.create_table_with_schema(
+            name=self.table,
+            schema={
+                "url" : TextDataType(),
+                "text" : TextDataType(),
+                "embedding" : VectorDataType(
+                    size=self.embedder.size,
+                    element_type=FloatDataType()
+                ),
+                "sha" : TextDataType(),
+            },
+            mode="create_if_not_exists",
+            data=None
+        )
+
+      
+        def index_task(task: asyncio.Task):
+
+            try:
+                result = task.result()
+            except Exception as e:
+                logger.error("Index task failed", exc_info=e)
+            
+
+        self._index_task = asyncio.create_task(self._indexer())
+        self._index_task.add_done_callback(index_task)
+
+        await self.install_requirements()
+
+    
+    async def stop(self):
+        await super().stop()
+        await self._chan.close()
+        
+           
+    async def _indexer(self):
+
+        async for e in self._chan:
+
+            try:
+                if e.deleted:
+
+                    # todo: consider using sql_alchemy or a library to do the escaping
+                    def escape_sql_string(value):
+                        if not isinstance(value, str):
+                            raise TypeError("Input must be a string")
+                        return value.replace("'", "''")
+
+                    self.room.developer.log_nowait(f"deleting path from index {e.path}")
+                    await self.room.database.delete(where=f"url='{escape_sql_string(e.path)}'")
+                    
+
+                else:
+
+                    self.room.developer.log_nowait(f"indexing path {e.path}")
+                    
+
+                    async def lookup_or_embed(*, sha: str, text: str) -> list[float]:
+
+                        # if we already indexed this chunk, lets use the existing embedding instead of generating a new one
+                        results = await self.room.database.search(
+                            table=self.table,
+                            where={
+                                "sha" : sha,
+                            },
+                            limit=1
+                        )
+
+                        if len(results) != 0:
+                            logger.info(f"chunk found from {e.path} {sha}: {text}, reusing embedding")
+                            return results[0]["embedding"]
+                            
+                        logger.info(f"chunk not found from {e.path} {sha}: {text}, generating embedding")
+                                
+                        return await self.embedder.embed(text=text)
+
+                    basename = os.path.basename(e.path)
+
+                    chunk_sha = hashlib.sha256(basename.encode("utf-8")).hexdigest()
+
+                    rows = []
+                    # let's make the filename it's own chunk
+                    rows.append(
+                        {
+                            "url" : e.path,
+                            "text" : basename,
+                            "sha" : chunk_sha,
+                            "embedding" : await lookup_or_embed(sha=chunk_sha, text=basename)
+                        }
+                    )
+                        
+                    
+                    text = await self.read_file(path=e.path)
+                    if text != None:
+                        
+                        # the content will be transformed into additional chunks
+                        for chunk in await self.chunker.chunk(text=text, max_length = self.embedder.max_length):
+                            logger.info(f"processing chunk from {e.path}: {chunk.text}")
+                            chunk_sha = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+                            rows.append(
+                                {
+                                    "url" : e.path,
+                                    "text" : chunk.text,
+                                    "embedding" : await lookup_or_embed(sha=chunk_sha, text=chunk.text)
+                                }
+                            )
+                    await self.room.database.insert(table=self.table, records=rows)
+                    await self.refresh_index()
+
+                    
+                
+            except Exception as e:
+                logger.error("error while indexing", exc_info=e)
+
+
+    def _on_file_deleted(self, path: str):
+        self._chan.send_nowait(FileIndexEvent(path=path, deleted=True))
+        
+    def _on_file_updated(self, path: str):
+        self._chan.send_nowait(FileIndexEvent(path=path, deleted=False))
+
+        
+    
+
+
 class SiteIndexer(TaskRunner):
 
     def __init__(self,
@@ -230,11 +441,14 @@ class SiteIndexer(TaskRunner):
             # if we already indexed this chunk, lets use the existing embedding instead of generating a new one
             if exists:
 
-                results = await context.room.database.search(where={
-                    "table" : table,
-                    "sha" : sha,
-                    "limit" : 1
-                })
+                results = await self.room.database.search(
+                    table=self.table,
+                    where={
+                        "sha" : sha,
+                    },
+                    limit=1
+                )
+
 
                 if len(results) != 0:
                     logger.info(f"chunk found from {url} {sha}: {text}, reusing embedding")
