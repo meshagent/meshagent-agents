@@ -211,8 +211,9 @@ class StorageIndexer(SingleRoomAgent):
     
     @_async_debounce(10)
     async def refresh_index(self):
-        
-        logger.info("refreshing index")
+
+        self.room.developer.log_nowait(type="indexer.rebuild", data={})
+       
         try:
             await self.room.database.create_vector_index(table=self.table, column="embedding")
         except Exception as e:
@@ -276,13 +277,13 @@ class StorageIndexer(SingleRoomAgent):
                             raise TypeError("Input must be a string")
                         return value.replace("'", "''")
 
-                    self.room.developer.log_nowait(f"deleting path from index {e.path}")
+                    self.room.developer.log_nowait(type="indexer.delete", data={"path": e.path})
                     await self.room.database.delete(where=f"url='{escape_sql_string(e.path)}'")
                     
 
                 else:
 
-                    self.room.developer.log_nowait(f"indexing path {e.path}")
+                    self.room.developer.log_nowait(type="indexer.index", data={"path": e.path})
                     
 
                     async def lookup_or_embed(*, sha: str, text: str) -> list[float]:
