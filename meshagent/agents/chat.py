@@ -158,8 +158,20 @@ class ChatBot(SingleRoomAgent):
 
                 if installed == False:
                     installed = True
-                    await self.install_requirements(participant_id=participant_id)
+                    try:
+                        await self.install_requirements(participant_id=participant_id)
+                    except Exception as e:
+                        self.room.developer.log_nowait("error", { "text" : f"unable to install requirements: {e}" })
 
+                        error = "I was unable to install the tools I require to operate in the room, I may not function properly."
+                        chat_context.append_user_message(message=error)
+                        await self._room.messaging.send_message(
+                            to=chat_with_participant,
+                            type="chat",
+                            message={
+                                "text": error
+                            }
+                        )
 
                 if received.type == "opened":
                     
