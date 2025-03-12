@@ -129,7 +129,7 @@ logger.setLevel(logging.INFO)
 
 class PlanningWriter(Writer):
     
-    def __init__(self, *, name: str, llm_adapter: LLMAdapter, tool_adapter: ToolResponseAdapter, max_iterations : int = 100, toolkits: Optional[list[Tool]] = None, title: Optional[str] = None, description: Optional[str] = None, rules: Optional[list[str]] | None = None, requires: Optional[list[Requirement]] = None, supports_tools: Optional[bool] = None):
+    def __init__(self, *, name: str, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, max_iterations : int = 100, toolkits: Optional[list[Tool]] = None, title: Optional[str] = None, description: Optional[str] = None, rules: Optional[list[str]] | None = None, requires: Optional[list[Requirement]] = None, supports_tools: Optional[bool] = None):
         
         super().__init__(
             name=name,
@@ -250,7 +250,7 @@ class PlanningWriter(Writer):
  
 class PlanningResponder(TaskRunner):
 
-    def __init__(self, *, name:str, llm_adapter: LLMAdapter, tool_adapter: ToolResponseAdapter, output_schema: dict,  max_iterations : int = 100, toolkits: Optional[list[Toolkit]] = None, title: Optional[str] = None, description: Optional[str] = None, requires: Optional[list[Requirement]] = None, supports_tools : bool = True, input_prompt: bool = True, use_terminate_tool: bool = False, rules: Optional[list[str]] = None, labels: Optional[list[str]] = None):
+    def __init__(self, *, name:str, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, output_schema: dict,  max_iterations : int = 100, toolkits: Optional[list[Toolkit]] = None, title: Optional[str] = None, description: Optional[str] = None, requires: Optional[list[Requirement]] = None, supports_tools : bool = True, input_prompt: bool = True, use_terminate_tool: bool = False, rules: Optional[list[str]] = None, labels: Optional[list[str]] = None):
         if isinstance(output_schema, dict) == False:
             raise Exception("schema must be a dict, got: {type}".format(type=type(output_schema)))
 
@@ -441,7 +441,7 @@ class PlanningResponder(TaskRunner):
 
 class DynamicPlanningResponder(TaskRunner):
 
-    def __init__(self, *, name: str, llm_adapter: LLMAdapter, tool_adapter: ToolResponseAdapter,  max_iterations : int = 100, toolkits: Optional[list[Toolkit]] = None, title: Optional[str] = None, description: Optional[str] = None):
+    def __init__(self, *, name: str, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None,  max_iterations : int = 100, toolkits: Optional[list[Toolkit]] = None, title: Optional[str] = None, description: Optional[str] = None):
         
         super().__init__(
             name=name,

@@ -1,4 +1,3 @@
-import urllib.parse
 from .agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant
@@ -6,12 +5,8 @@ from meshagent.tools import Toolkit
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
 from typing import Optional
-import json
 import logging
 from meshagent.tools import MultiToolkit
-
-from meshagent.openai import OpenAILLMAdapter
-from openai import AsyncOpenAI
 import urllib
 
 logging.basicConfig()
@@ -22,7 +17,7 @@ logger.setLevel(logging.INFO)
 # todo: thread should stop when participant stops?
 
 class ChatBot(SingleRoomAgent):
-    def __init__(self, *, name, title = None, description = None, requires = None,  llm_adapter: LLMAdapter, tool_adapter: ToolResponseAdapter, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, auto_greet_prompt : Optional[str] = None, auto_greet_message : Optional[str] = None,  empty_state_title : Optional[str] = None, labels: Optional[str] = None):
+    def __init__(self, *, name, title = None, description = None, requires = None,  llm_adapter: LLMAdapter, tool_adapter: Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, auto_greet_prompt : Optional[str] = None, auto_greet_message : Optional[str] = None,  empty_state_title : Optional[str] = None, labels: Optional[str] = None):
         super().__init__(
             name=name,
             title=title,

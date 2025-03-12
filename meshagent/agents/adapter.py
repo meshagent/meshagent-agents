@@ -29,7 +29,7 @@ class LLMAdapter(ABC):
         context: AgentChatContext,
         room: RoomClient,
         toolkits: Toolkit,
-        tool_adapter: ToolResponseAdapter,
+        tool_adapter: Optional[ToolResponseAdapter] = None,
         output_schema: Optional[dict] = None,
     ) -> Any:  
         pass

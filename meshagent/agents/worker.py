@@ -17,7 +17,7 @@ logger.setLevel(logging.INFO)
 # todo: thread should stop when participant stops?
 
 class Worker(TaskRunner):
-    def __init__(self, *, name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter: ToolResponseAdapter, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
+    def __init__(self, *, name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
         super().__init__(
             name=name,
             title=title,

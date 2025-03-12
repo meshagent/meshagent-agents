@@ -12,7 +12,7 @@ class PromptAgent(TaskRunner):
         name: str,
         output_schema: dict,
         llm_adapter: LLMAdapter,
-        tool_adapter: ToolResponseAdapter,
+        tool_adapter: Optional[ToolResponseAdapter] = None,
         tools: list[Toolkit] = [],
         rules: list[str] = [],
         title: Optional[str] = None,

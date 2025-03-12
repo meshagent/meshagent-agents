@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 
 class SingleShotWriter(Writer):
 
-    def __init__(self,  name: str,  llm_adapter: LLMAdapter, tool_adapter: ToolResponseAdapter, description: Optional[str], title: Optional[str], rules:Optional[list[str]] = None, requires: Optional[list[Requirement]] = None, toolkits : Optional[list[Toolkit]] = None, supports_tools: Optional[bool] = None, labels: Optional[list[str]] = None, ):
+    def __init__(self,  name: str,  llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, description: Optional[str] = None, title: Optional[str] = None, rules:Optional[list[str]] = None, requires: Optional[list[Requirement]] = None, toolkits : Optional[list[Toolkit]] = None, supports_tools: Optional[bool] = None, labels: Optional[list[str]] = None, ):
         super().__init__(
             name=name,
             description=description,
