@@ -117,6 +117,8 @@ class ChatBot(SingleRoomAgent):
             raise RoomException(f"caller did not have messaging turned on")
         
         messaging = self._room.messaging
+
+        current_file = None
         
         step_schema = {
             "type" : "object",
@@ -141,7 +143,23 @@ class ChatBot(SingleRoomAgent):
             
             while True:
 
+             
+
                 received = await messages.recv()
+
+                
+
+                if current_file != chat_with_participant.get_attribute("current_file"):
+                    logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
+                    current_file = chat_with_participant.get_attribute("current_file")
+                    
+                if current_file != None:
+                    chat_context.append_assistant_message(message=f"the user is currently viewing the file at the path: {current_file}")
+
+                elif current_file != None:
+                    chat_context.append_assistant_message(message=f"the user is not current viewing any files")
+
+
 
                 if installed == False:
                     installed = True
