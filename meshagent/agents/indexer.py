@@ -205,6 +205,8 @@ class StorageIndexer(SingleRoomAgent):
         self.chunker = chunker
         self.embedder = embedder
         self.table = table
+        self._vector_index_created = False
+        self._fts_created = False
 
     async def read_file(self, *, path: str) -> str | None:
         pass
@@ -213,15 +215,41 @@ class StorageIndexer(SingleRoomAgent):
     async def refresh_index(self):
 
         self.room.developer.log_nowait(type="indexer.rebuild", data={})
-       
-        try:
-            await self.room.database.create_vector_index(table=self.table, column="embedding")
-        except Exception as e:
-            # Will fail if there aren't enough rows
-            pass
 
-        await self.room.database.create_full_text_search_index(table=self.table, column="text")
+        indexes = await self.room.database.list_indexes(table=self.table)
 
+        logger.info(f"existing indexes {indexes}")
+        
+        for index in indexes:
+
+            if "embedding" in index["columns"]:
+                self._vector_index_created = True
+                
+            if "text" in index["columns"]:
+                self._fts_created  = True
+
+        if self._vector_index_created == False:
+            try:
+                logger.info("attempting to create embedding index")
+                await self.room.database.create_vector_index(table=self.table, column="embedding", replace=False)
+                self._vector_index_created = True
+            except Exception as e:
+                # Will fail if there aren't enough rows
+                pass
+
+        if self._fts_created == False:
+            try:
+                logger.info("attempting to create fts index")
+                await self.room.database.create_full_text_search_index(table=self.table, column="text", replace=False)
+                self._fts_created = True
+            except Exception as e:
+                # Will fail if there aren't enough rows
+                pass
+
+        if self._fts_created == True or self._vector_index_created == True:
+            logger.info("optimizing existing index")
+            await self.room.database.optimize(table=self.table)
+        
 
     async def start(self, *, room):
         await super().start(room=room)
@@ -278,7 +306,7 @@ class StorageIndexer(SingleRoomAgent):
                         return value.replace("'", "''")
 
                     self.room.developer.log_nowait(type="indexer.delete", data={"path": e.path})
-                    await self.room.database.delete(where=f"url='{escape_sql_string(e.path)}'")
+                    await self.room.database.delete(table=self.table, where=f"url='{escape_sql_string(e.path)}'")
                     
 
                 else:
@@ -298,10 +326,10 @@ class StorageIndexer(SingleRoomAgent):
                         )
 
                         if len(results) != 0:
-                            logger.info(f"chunk found from {e.path} {sha}: {text}, reusing embedding")
+                            logger.info(f"chunk found from {e.path} {sha}, reusing embedding")
                             return results[0]["embedding"]
                             
-                        logger.info(f"chunk not found from {e.path} {sha}: {text}, generating embedding")
+                        logger.info(f"chunk not found from {e.path} {sha}, generating embedding")
                                 
                         return await self.embedder.embed(text=text)
 
@@ -326,16 +354,17 @@ class StorageIndexer(SingleRoomAgent):
                         
                         # the content will be transformed into additional chunks
                         for chunk in await self.chunker.chunk(text=text, max_length = self.embedder.max_length):
-                            logger.info(f"processing chunk from {e.path}: {chunk.text}")
+                            logger.info(f"processing chunk from {e.path}: {chunk.start}")
                             chunk_sha = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
                             rows.append(
                                 {
                                     "url" : e.path,
                                     "text" : chunk.text,
-                                    "embedding" : await lookup_or_embed(sha=chunk_sha, text=chunk.text)
+                                    "embedding" : await lookup_or_embed(sha=chunk_sha, text=chunk.text),
+                                    "sha" : chunk_sha,
                                 }
                             )
-                    await self.room.database.insert(table=self.table, records=rows)
+                    await self.room.database.merge(table=self.table, on="sha", records=rows)
                     await self.refresh_index()
 
                     
@@ -452,10 +481,10 @@ class SiteIndexer(TaskRunner):
 
 
                 if len(results) != 0:
-                    logger.info(f"chunk found from {url} {sha}: {text}, reusing embedding")
+                    logger.info(f"chunk found from {url} {sha}, reusing embedding")
                     return results[0]["embedding"]
                 
-            logger.info(f"chunk not found from {url} {sha}: {text}, generating embedding")
+            logger.info(f"chunk not found from {url} {sha}, generating embedding")
                     
             return await self.embedder.embed(text=text)
             
