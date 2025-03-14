@@ -8,9 +8,7 @@ from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescr
 from meshagent.api.protocol import Protocol
 from meshagent.tools.toolkit import Toolkit, Tool, ToolContext
 from meshagent.api.room_server_client import RoomClient, RoomException
-from meshagent.api.schema_document import Document
 from jsonschema import validate
-from typing import Callable, Awaitable
 from .context import AgentCallContext, AgentChatContext
 from .schema import no_arguments_schema
 import logging

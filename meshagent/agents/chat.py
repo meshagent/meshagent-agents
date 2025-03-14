@@ -61,7 +61,7 @@ class ChatBot(SingleRoomAgent):
             await self.room.messaging.send_message(to=RemoteParticipant(id=participant.id), type="chat", message={ "text" : self._auto_greet_message  })
 
 
-    async def finalize_toolkits(self, toolkits) -> list[Toolkit]:
+    async def finalize_toolkits(self, *, toolkits: list[Toolkit], participant: RemoteParticipant, chat_context: AgentChatContext) -> list[Toolkit]:
 
         toaster = None
         
@@ -86,19 +86,17 @@ class ChatBot(SingleRoomAgent):
             toolkits = list(map(multi_tool, toolkits))
         
         return toolkits
+    
+    async def init_chat_context(self) -> AgentChatContext:
+        context =  self._llm_adapter.create_chat_context()
+        context.append_rules(self._rules)
+        return context
 
     async def _spawn_thread(self, participant_id: str, messages: Chan[RoomMessage]):
 
         
         chat_context = await self.init_chat_context()
         
-
-        chat_context.append_rules(
-            rules=[
-                *self._rules,
-                "think step by step",
-           ]
-        )
 
         opened = False
         chat_with_participant = None
@@ -115,34 +113,14 @@ class ChatBot(SingleRoomAgent):
 
         current_file = None
         
-        step_schema = {
-            "type" : "object",
-            "required" : ["text","finished"],
-            "additionalProperties" : False, 
-            "description" : "execute a step",
-            "properties" : {
-                "text" : {
-                    "description" : "a reply to the user or status to display during an intermediate step",
-                    "type" : "string"
-                },
-                "finished" : {
-                    "description" : "whether the agent has finished answering the user's last message. you MUST set this to true if there are no more tool calls to be made or you are stuck in a loop.",
-                    "type" : "boolean"
-                }
-            }
-        }
-
+        
         installed = False
 
         while True:
             
             while True:
 
-             
-
                 received = await messages.recv()
-
-                
 
                 if current_file != chat_with_participant.get_attribute("current_file"):
                     logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
@@ -214,44 +192,32 @@ class ChatBot(SingleRoomAgent):
         
 
             try:
-                while True:
+               
+                toolkits = [
+                    *self._toolkits,
+                    *await self.get_required_tools(participant_id=chat_with_participant.id)
+                ]
 
-                    toolkits = [
-                        *self._toolkits,
-                        *await self.get_required_tools(participant_id=chat_with_participant.id)
-                    ]
+                toolkits = await self.finalize_toolkits(toolkits=toolkits, participant=chat_with_participant, chat_context=chat_context)
 
-                    toolkits = await self.finalize_toolkits(toolkits)
+                response = await self._llm_adapter.next(
+                    context=chat_context,
+                    room=self._room,
+                    toolkits=toolkits,
+                    tool_adapter=self._tool_adapter,
+                )
 
-                    response = await self._llm_adapter.next(
-                        context=chat_context,
-                        room=self._room,
-                        toolkits=toolkits,
-                        tool_adapter=self._tool_adapter,
-                        output_schema=step_schema,
-                    )
-
-                    text = response["text"]
-                    
-                    
-                    if response["finished"] or len(toolkits) == 0:
-                        await self._room.messaging.send_message(
-                            to=chat_with_participant,
-                            type="chat",
-                            message={
-                                "text": text
-                            }
-                        )
-                        break
-                    else:
-                        await self._room.messaging.send_message(
-                            to=chat_with_participant,
-                            type="status",
-                            message={
-                                "text": text
-                            }
-                        )
-                        chat_context.append_user_message(message="proceed to the next step if you are ready")
+                text = response
+                
+                
+                await self._room.messaging.send_message(
+                    to=chat_with_participant,
+                    type="chat",
+                    message={
+                        "text": text
+                    }
+                )
+                   
                 
             finally:
 

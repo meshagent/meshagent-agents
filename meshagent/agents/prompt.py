@@ -4,6 +4,7 @@ from .schema import prompt_schema
 from .agent import AgentCallContext
 from typing import Optional
 from meshagent.agents import TaskRunner
+from meshagent.api import RequiredToolkit
 
 # An agent that takes a simple prompt and gets the result
 class PromptAgent(TaskRunner):
@@ -16,7 +17,10 @@ class PromptAgent(TaskRunner):
         tools: list[Toolkit] = [],
         rules: list[str] = [],
         title: Optional[str] = None,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        requires: Optional[list[RequiredToolkit]] = None,
+        supports_tools: Optional[bool] = None,
+        labels: Optional[list[str]] = None
     ):
         super().__init__(
             name=name,
@@ -26,7 +30,9 @@ class PromptAgent(TaskRunner):
                 description=description
             ),
             output_schema=output_schema,
-
+            requires=requires,
+            supports_tools=supports_tools,
+            labels=labels
         )
         self.rules = rules
         self.tools = tools
