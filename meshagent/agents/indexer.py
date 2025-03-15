@@ -283,9 +283,6 @@ class StorageIndexer(SingleRoomAgent):
 
         self._index_task = asyncio.create_task(self._indexer())
         self._index_task.add_done_callback(index_task)
-
-        await self.install_requirements()
-
     
     async def stop(self):
         await super().stop()

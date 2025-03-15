@@ -1,6 +1,6 @@
 from .agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
-from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant
+from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element
 from meshagent.tools import Toolkit
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
@@ -8,6 +8,8 @@ from typing import Optional
 import logging
 from meshagent.tools import MultiToolkit
 import urllib
+import uuid
+import datetime
 
 logging.basicConfig()
 logger = logging.getLogger("chat")
@@ -17,7 +19,8 @@ logger.setLevel(logging.INFO)
 # todo: thread should stop when participant stops?
 
 class ChatBot(SingleRoomAgent):
-    def __init__(self, *, name, title = None, description = None, requires = None,  llm_adapter: LLMAdapter, tool_adapter: Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, auto_greet_prompt : Optional[str] = None, auto_greet_message : Optional[str] = None,  empty_state_title : Optional[str] = None, labels: Optional[str] = None):
+    def __init__(self, *, name, title = None, description = None, requires : Optional[list[Requirement]] = None, llm_adapter: LLMAdapter, tool_adapter: Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, auto_greet_message : Optional[str] = None,  empty_state_title : Optional[str] = None, labels: Optional[str] = None):
+        
         super().__init__(
             name=name,
             title=title,
@@ -42,23 +45,54 @@ class ChatBot(SingleRoomAgent):
 
         self._rules = rules
         self._is_typing = dict[str,asyncio.Task]()
-        self._auto_greet_prompt = auto_greet_prompt
         self._auto_greet_message = auto_greet_message
         
         if empty_state_title == None:
             empty_state_title = "How can I help you?"
         self._empty_state_title = empty_state_title
 
+        self._thread_tasks = dict[str,asyncio.Task]()
 
-    async def greet(self, *, chat_context: AgentChatContext, messages: Chan[RoomMessage], participant: RemoteParticipant):
+    def init_requirements(self, requires: list[Requirement]):
+        if requires == None:
 
-        if self._auto_greet_prompt != None:
-            messages.send_nowait(RoomMessage(from_participant_id=participant.id, type="chat",  message={"text": self._auto_greet_prompt }))
+            requires = [
+                RequiredSchema(
+                    name="thread"
+                )
+            ]
+
+        else:
+            
+
+            thread_schema = list(n for n in requires if (isinstance(n, RequiredSchema) and n.name == "thread"))
+            if len(thread_schema) == 0:
+                requires.append(
+                    RequiredSchema(
+                        name="thread"
+                    )
+                )
+
+    async def _send_and_save_chat(self, messages: Element, to: RemoteParticipant, text: str):
+
+        await self.room.messaging.send_message(to=to, type="chat", message={ "text" : text })
+
+        messages.append_child(tag_name="message", attributes={
+            "id" : str(uuid.uuid4()),
+            "text" : text,
+            "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
+            "author_name" : self.room.local_participant.get_attribute("name"),
+        })
         
+     
+    async def greet(self, *, messages: Element, chat_context: AgentChatContext, participant: RemoteParticipant):
+
+
         if self._auto_greet_message != None:
             chat_context.append_user_message(self._auto_greet_message)
             
-            await self.room.messaging.send_message(to=RemoteParticipant(id=participant.id), type="chat", message={ "text" : self._auto_greet_message  })
+            await self._send_and_save_chat(to=RemoteParticipant(id=participant.id), messages=messages, text= self._auto_greet_message)
+           
 
 
     async def finalize_toolkits(self, *, toolkits: list[Toolkit], participant: RemoteParticipant, chat_context: AgentChatContext) -> list[Toolkit]:
@@ -92,24 +126,30 @@ class ChatBot(SingleRoomAgent):
         context.append_rules(self._rules)
         return context
 
-    async def _spawn_thread(self, participant_id: str, messages: Chan[RoomMessage]):
+    async def open_thread(self, *, thread_id: str):
 
-        
+        thread_path = f".threads/{thread_id}.thread"
+
+        return await self.room.sync.open(path=thread_path)
+    
+    async def close_thread(self, *, thread_id: str):
+
+        thread_path = f".threads/{thread_id}.thread"
+
+        return await self.room.sync.close(path=thread_path)
+
+
+    async def _spawn_thread(self, thread_id: str, messages: Chan[RoomMessage]):
+    
         chat_context = await self.init_chat_context()
         
-
         opened = False
-        chat_with_participant = None
+   
+        thread = None
 
-        for participant in self._room.messaging.get_participants():
-            if participant.id == participant_id:
-                chat_with_participant = participant
-                break
-
-        if chat_with_participant == None:
-            raise RoomException(f"caller did not have messaging turned on")
-        
         messaging = self._room.messaging
+
+        doc_messages = None
 
         current_file = None
         
@@ -122,6 +162,16 @@ class ChatBot(SingleRoomAgent):
 
                 received = await messages.recv()
 
+                chat_with_participant = None
+                for participant in self._room.messaging.get_participants():
+                    if participant.id == received.from_participant_id:
+                        chat_with_participant = participant
+                        break
+                    
+                if chat_with_participant == None:
+                    logger.warning("participant does not have messaging enabled, skipping message")
+                    continue
+              
                 if current_file != chat_with_participant.get_attribute("current_file"):
                     logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
                     current_file = chat_with_participant.get_attribute("current_file")
@@ -132,43 +182,55 @@ class ChatBot(SingleRoomAgent):
                 elif current_file != None:
                     chat_context.append_assistant_message(message=f"the user is not current viewing any files")
 
+                if thread == None:
+                    thread = await self.open_thread(thread_id=thread_id)
+                    
+                    for prop in thread.root.get_children():
+                        
+                        if prop.tag_name == "messages":
+
+                            doc_messages = prop
+                            
+                            for element in doc_messages.get_children():
+
+                                if isinstance(element, Element):
+                                    
+                                    msg = element["text"]
+                                    if element["author_name"] == self.room.local_participant.get_attribute("name"):
+                                        chat_context.append_assistant_message(msg)
+                                    else:
+                                        chat_context.append_user_message(msg)
+                    
+                    if doc_messages == None:
+                        raise Exception("thread was not properly initialized")
 
 
-                if installed == False:
-                    installed = True
-                    try:
-                        await self.install_requirements(participant_id=participant_id)
-                    except Exception as e:
-                        self.room.developer.log_nowait("error", { "text" : f"unable to install requirements: {e}" })
-
-                        error = "I was unable to install the tools I require to operate in the room, I may not function properly."
-                        chat_context.append_user_message(message=error)
-                        await self._room.messaging.send_message(
-                            to=chat_with_participant,
-                            type="chat",
-                            message={
-                                "text": error
-                            }
-                        )
 
                 if received.type == "opened":
-                    
                     
                     if opened == False:
                         
                         opened = True
                         
-                        await self.greet(chat_context=chat_context, participant=chat_with_participant, messages=messages)
+                        await self.greet(chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
 
                 if received.type == "chat":
+                    
+                    if thread == None:
+
+                        self.room.developer.log_nowait(type="thread is not open", data={})
+
+                        break
 
 
+                    text = received.message["text"]
+                    
                     await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":True})
-                
+
                     if chat_with_participant.id == received.from_participant_id:
                         self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
                 
-                        text = received.message["text"]
+                      
                         attachments = received.message.get("attachments", [])
 
                         for attachment in attachments:
@@ -209,20 +271,19 @@ class ChatBot(SingleRoomAgent):
 
                 text = response
                 
-                
-                await self._room.messaging.send_message(
+                await self._send_and_save_chat(
+                    messages=doc_messages,
                     to=chat_with_participant,
-                    type="chat",
-                    message={
-                        "text": text
-                    }
+                    text=text, 
                 )
-                   
+  
                 
             finally:
 
                 await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":False})
 
+        if thread != None:
+            await self.close_thread(thread_id=thread_id)
    
 
     def _get_message_channel(self, participant_id: str) -> Chan[RoomMessage]:
@@ -230,22 +291,18 @@ class ChatBot(SingleRoomAgent):
             chan = Chan[RoomMessage]()
             self._message_channels[participant_id] = chan
 
-            def thread_done(task: asyncio.Task):
-
-                self._message_channels.pop(participant_id)
-                try:
-                    task.result()
-                    logger.info("ending chat thread")
-                except Exception as e:
-                    logger.error("chat thread error", exc_info=e)
-
-            task = asyncio.create_task(self._spawn_thread(participant_id=participant_id, messages=chan))
-            task.add_done_callback(thread_done)
-        
         chan = self._message_channels[participant_id]
         
         return chan
     
+    async def stop(self):
+        await super().stop()
+
+        for thread in self._thread_tasks.values():
+            thread.cancel()
+        
+        self._thread_tasks.clear()
+
     async def start(self, *, room):
 
         await super().start(room=room)
@@ -254,13 +311,33 @@ class ChatBot(SingleRoomAgent):
         await self.room.local_participant.set_attribute("empty_state_title", self._empty_state_title)
 
         def on_message(message: RoomMessage):
+            
             messages = self._get_message_channel(participant_id=message.from_participant_id)
             if message.type == "chat" or message.type == "opened":
                 messages.send_nowait(message)
-    
-            elif message.type == "typing":
 
+                thread_id = message.message["thread_id"]
+                logger.info(f"received message for thread {thread_id}")
                 
+                if thread_id not in self._thread_tasks:
+                     
+                    def thread_done(task: asyncio.Task):
+
+                        self._message_channels.pop(message.from_participant_id)
+                        try:
+                            task.result()
+                        except Exception as e:
+                            logger.error(f"The chat thread ended with an error {e}", exc_info=e)
+                    
+                    
+                    task = asyncio.create_task(self._spawn_thread(messages=messages, thread_id=thread_id))
+                    task.add_done_callback(thread_done)
+
+                    self._thread_tasks[thread_id] = task
+                
+                
+    
+            elif message.type == "typing":                
                 def callback(task: asyncio.Task):
                     try:
                         task.result()
@@ -281,7 +358,7 @@ class ChatBot(SingleRoomAgent):
 
         room.messaging.on("message", on_message)
         
-        if self._auto_greet_prompt != None or self._auto_greet_message != None:
+        if self._auto_greet_message != None:
             def on_participant_added(participant:RemoteParticipant):
                 
                 # will spawn the initial thread

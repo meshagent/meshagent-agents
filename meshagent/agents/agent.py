@@ -43,6 +43,7 @@ class RoomTool(Tool):
 class Agent:
 
     def __init__(self, *, name: str, title: Optional[str] = None, description: Optional[str] = None, requires: Optional[list[Requirement]] = None, labels: Optional[list[str]] = None):
+       
         self._name = name
         if title == None:
             title = name
@@ -53,6 +54,8 @@ class Agent:
         self._description = description
         if requires == None:
             requires = []
+
+        self.init_requirements(requires)
         self._requires = requires
         
         if labels == None:
@@ -80,6 +83,8 @@ class Agent:
     def labels(self):
         return self._labels
     
+    def init_requirements(self, requires): ...
+    
     async def init_chat_context(self) -> AgentChatContext:
         return AgentChatContext() 
 
@@ -98,12 +103,16 @@ class SingleRoomAgent(Agent):
         super().__init__(name=name, title=title, description=description, requires=requires, labels=labels)
         self._room = None
 
+
     async def start(self, *, room: RoomClient) -> None:
 
         if self._room != None:
             raise RoomException("room is already started")
         
         self._room = room
+
+        await self.install_requirements()
+
 
     async def stop(self) -> None:
         self._room = None
@@ -119,7 +128,6 @@ class SingleRoomAgent(Agent):
 
         schemas = await self._room.storage.list(path=".schemas")
         
-
         for schema in schemas:
             schemas_by_name[schema.name] = schema
 
@@ -135,6 +143,11 @@ class SingleRoomAgent(Agent):
         for requirement in self.requires:
             
             if isinstance(requirement, RequiredToolkit):
+                
+                if requirement.name == "meshagent.ui":
+                    # TODO: maybe requirements can be marked as non installable?
+                    continue
+                
                 if requirement.name not in toolkits_by_name:
                     
                     installed = True
@@ -365,9 +378,6 @@ class TaskRunner(SingleRoomAgent):
                         role="user",
                         attributes={}
                     )
-
-
-                await self.install_requirements(participant_id=caller.id)
 
 
                 context = AgentCallContext(chat=chat_context, room=self.room, caller=caller)
