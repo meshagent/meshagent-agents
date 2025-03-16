@@ -162,7 +162,7 @@ class ChatBot(SingleRoomAgent):
 
             async for evt in llm_messages:
                 
-                self.room.messaging.send_message(to=chat_with_participant, type="llm.event", message=evt)
+                #await self.room.messaging.send_message(to=chat_with_participant, type="llm.event", message=evt)
 
                 if evt.type == "response.content_part.added":
                     partial = ""
@@ -349,8 +349,7 @@ class ChatBot(SingleRoomAgent):
     async def start(self, *, room):
 
         await super().start(room=room)
-
-
+        
         await self.room.local_participant.set_attribute("empty_state_title", self._empty_state_title)
 
         def on_message(message: RoomMessage):
@@ -362,7 +361,7 @@ class ChatBot(SingleRoomAgent):
                 path = message.message["path"]
                 logger.info(f"received message for thread {path}")
                 
-                if path not in self._thread_tasks:
+                if path not in self._thread_tasks or self._thread_tasks[path].cancelled:
                      
                     def thread_done(task: asyncio.Task):
 

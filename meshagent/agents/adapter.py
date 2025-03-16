@@ -24,6 +24,10 @@ class LLMAdapter[T](ABC):
         return AgentChatContext()
     
     @abstractmethod
+    async def check_for_termination(self, *, context: AgentChatContext, room: RoomClient):
+        return True
+
+    @abstractmethod
     async def next(self, 
         *,
         context: AgentChatContext,

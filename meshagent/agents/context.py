@@ -18,6 +18,7 @@ class AgentChatContext:
         self._system_role = system_role
 
         self._previous_response_id = None
+        self._previous_messages = list[dict]()
     
     @property
     def messages(self):
@@ -28,13 +29,17 @@ class AgentChatContext:
         return self._system_role
     
     @property
+    def previous_messages(self):
+        return self._previous_messages
+    
+    @property
     def previous_response_id(self):
         return self._previous_response_id
     
     def create_response(self, id: str):
         self._previous_response_id = id
+        self._previous_messages.extend(self.messages)
         self.messages.clear()
-
 
     def append_rules(self, rules: list[str]):
         
