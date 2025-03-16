@@ -75,9 +75,9 @@ class ChatBot(SingleRoomAgent):
                     )
                 )
 
-    async def _send_and_save_chat(self, messages: Element, to: RemoteParticipant, id: str, text: str):
+    async def _send_and_save_chat(self, messages: Element, path: str, to: RemoteParticipant, id: str, text: str):
 
-        await self.room.messaging.send_message(to=to, type="chat", message={ "text" : text })
+        await self.room.messaging.send_message(to=to, type="chat", message={  "path" : path, "text" : text })
 
         messages.append_child(tag_name="message", attributes={
             "id" : id,
@@ -87,13 +87,13 @@ class ChatBot(SingleRoomAgent):
         })
         
      
-    async def greet(self, *, messages: Element, chat_context: AgentChatContext, participant: RemoteParticipant):
+    async def greet(self, *, messages: Element, path: str, chat_context: AgentChatContext, participant: RemoteParticipant):
 
 
         if self._auto_greet_message != None:
             chat_context.append_user_message(self._auto_greet_message)
             
-            await self._send_and_save_chat(id=str(uuid.uuid4()), to=RemoteParticipant(id=participant.id), messages=messages, text= self._auto_greet_message)
+            await self._send_and_save_chat(id=str(uuid.uuid4()), to=RemoteParticipant(id=participant.id), messages=messages, path=path, text= self._auto_greet_message)
            
 
 
@@ -128,22 +128,19 @@ class ChatBot(SingleRoomAgent):
         context.append_rules(self._rules)
         return context
 
-    async def open_thread(self, *, thread_id: str):
+    async def open_thread(self, *, path: str):
 
-        thread_path = f".threads/{thread_id}.thread"
 
-        return await self.room.sync.open(path=thread_path)
+        return await self.room.sync.open(path=path)
     
-    async def close_thread(self, *, thread_id: str):
+    async def close_thread(self, *, path: str):
 
-        thread_path = f".threads/{thread_id}.thread"
-
-        return await self.room.sync.close(path=thread_path)
+        return await self.room.sync.close(path=path)
 
 
-    async def _spawn_thread(self, thread_id: str, messages: Chan[RoomMessage]):
+    async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
 
-        self.room.developer.log_nowait(type="chatbot.thread.started", data={ "thread_id" : thread_id })
+        self.room.developer.log_nowait(type="chatbot.thread.started", data={ "path" : path })
         chat_context = await self.init_chat_context()
         opened = False
         thread = None
@@ -221,7 +218,7 @@ class ChatBot(SingleRoomAgent):
 
                 
                     if thread == None:
-                        thread = await self.open_thread(thread_id=thread_id)
+                        thread = await self.open_thread(path=path)
                         
                         for prop in thread.root.get_children():
                             
@@ -250,7 +247,7 @@ class ChatBot(SingleRoomAgent):
                             
                             opened = True
                             
-                            await self.greet(chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
+                            await self.greet(path=path, chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
 
                     if received.type == "chat":
                         
@@ -263,7 +260,7 @@ class ChatBot(SingleRoomAgent):
 
                         text = received.message["text"]
                         
-                        await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":True})
+                        await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":True, "path": path})
 
                         if chat_with_participant.id == received.from_participant_id:
                             self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
@@ -316,20 +313,20 @@ class ChatBot(SingleRoomAgent):
                         )
                     except Exception as e:
                         logger.error("An error was encountered", exc_info=e)
-                        await self._send_and_save_chat(messages=doc_messages, to=chat_with_participant, id=str(uuid.uuid4()), text="There was an error while communicating with the LLM. Please try again later.")
+                        await self._send_and_save_chat(messages=doc_messages, to=chat_with_participant, path=path, id=str(uuid.uuid4()), text="There was an error while communicating with the LLM. Please try again later.")
     
                     
                 finally:
 
-                    await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":False})
+                    await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":False, "path" : path})
         finally:
 
-            self.room.developer.log_nowait(type="chatbot.thread.ended", data={ "thread_id" : thread_id })
+            self.room.developer.log_nowait(type="chatbot.thread.ended", data={ "path" : path })
     
             llm_messages.close()
 
             if thread != None:
-                await self.close_thread(thread_id=thread_id)
+                await self.close_thread(path=path)
    
 
     def _get_message_channel(self, participant_id: str) -> Chan[RoomMessage]:
@@ -357,15 +354,15 @@ class ChatBot(SingleRoomAgent):
         await self.room.local_participant.set_attribute("empty_state_title", self._empty_state_title)
 
         def on_message(message: RoomMessage):
-            
+
             messages = self._get_message_channel(participant_id=message.from_participant_id)
             if message.type == "chat" or message.type == "opened":
                 messages.send_nowait(message)
 
-                thread_id = message.message["thread_id"]
-                logger.info(f"received message for thread {thread_id}")
+                path = message.message["path"]
+                logger.info(f"received message for thread {path}")
                 
-                if thread_id not in self._thread_tasks:
+                if path not in self._thread_tasks:
                      
                     def thread_done(task: asyncio.Task):
 
@@ -376,14 +373,12 @@ class ChatBot(SingleRoomAgent):
                             logger.error(f"The chat thread ended with an error {e}", exc_info=e)
                     
                     
-                    task = asyncio.create_task(self._spawn_thread(messages=messages, thread_id=thread_id))
+                    task = asyncio.create_task(self._spawn_thread(messages=messages, path=path))
                     task.add_done_callback(thread_done)
 
-                    self._thread_tasks[thread_id] = task
-                
-                
-    
-            elif message.type == "typing":                
+                    self._thread_tasks[path] = task
+
+            elif message.type == "typing":
                 def callback(task: asyncio.Task):
                     try:
                         task.result()
