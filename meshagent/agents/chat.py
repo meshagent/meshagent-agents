@@ -144,22 +144,11 @@ class ChatBot(SingleRoomAgent):
     async def _spawn_thread(self, thread_id: str, messages: Chan[RoomMessage]):
 
         self.room.developer.log_nowait(type="chatbot.thread.started", data={ "thread_id" : thread_id })
-    
         chat_context = await self.init_chat_context()
-        
         opened = False
-   
         thread = None
-
-        messaging = self._room.messaging
-
         doc_messages = None
-
         current_file = None
-
-        
-        installed = False
-        
         llm_messages = Chan[ResponseStreamEvent]()
         
         def done_processing_llm_events(task: asyncio.Task):
