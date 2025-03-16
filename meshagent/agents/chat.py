@@ -11,6 +11,8 @@ import urllib
 import uuid
 import datetime
 
+from openai.types.responses import ResponseStreamEvent
+
 logging.basicConfig()
 logger = logging.getLogger("chat")
 logger.setLevel(logging.INFO)
@@ -73,12 +75,12 @@ class ChatBot(SingleRoomAgent):
                     )
                 )
 
-    async def _send_and_save_chat(self, messages: Element, to: RemoteParticipant, text: str):
+    async def _send_and_save_chat(self, messages: Element, to: RemoteParticipant, id: str, text: str):
 
         await self.room.messaging.send_message(to=to, type="chat", message={ "text" : text })
 
         messages.append_child(tag_name="message", attributes={
-            "id" : str(uuid.uuid4()),
+            "id" : id,
             "text" : text,
             "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
             "author_name" : self.room.local_participant.get_attribute("name"),
@@ -91,7 +93,7 @@ class ChatBot(SingleRoomAgent):
         if self._auto_greet_message != None:
             chat_context.append_user_message(self._auto_greet_message)
             
-            await self._send_and_save_chat(to=RemoteParticipant(id=participant.id), messages=messages, text= self._auto_greet_message)
+            await self._send_and_save_chat(id=str(uuid.uuid4()), to=RemoteParticipant(id=participant.id), messages=messages, text= self._auto_greet_message)
            
 
 
@@ -140,6 +142,8 @@ class ChatBot(SingleRoomAgent):
 
 
     async def _spawn_thread(self, thread_id: str, messages: Chan[RoomMessage]):
+
+        self.room.developer.log_nowait(type="chatbot.thread.started", data={ "thread_id" : thread_id })
     
         chat_context = await self.init_chat_context()
         
@@ -152,138 +156,191 @@ class ChatBot(SingleRoomAgent):
         doc_messages = None
 
         current_file = None
-        
+
         
         installed = False
-
-        while True:
-            
-            while True:
-
-                received = await messages.recv()
-
-                chat_with_participant = None
-                for participant in self._room.messaging.get_participants():
-                    if participant.id == received.from_participant_id:
-                        chat_with_participant = participant
-                        break
-                    
-                if chat_with_participant == None:
-                    logger.warning("participant does not have messaging enabled, skipping message")
-                    continue
-              
-                if current_file != chat_with_participant.get_attribute("current_file"):
-                    logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
-                    current_file = chat_with_participant.get_attribute("current_file")
-                    
-                if current_file != None:
-                    chat_context.append_assistant_message(message=f"the user is currently viewing the file at the path: {current_file}")
-
-                elif current_file != None:
-                    chat_context.append_assistant_message(message=f"the user is not current viewing any files")
-
-                if thread == None:
-                    thread = await self.open_thread(thread_id=thread_id)
-                    
-                    for prop in thread.root.get_children():
-                        
-                        if prop.tag_name == "messages":
-
-                            doc_messages = prop
-                            
-                            for element in doc_messages.get_children():
-
-                                if isinstance(element, Element):
-                                    
-                                    msg = element["text"]
-                                    if element["author_name"] == self.room.local_participant.get_attribute("name"):
-                                        chat_context.append_assistant_message(msg)
-                                    else:
-                                        chat_context.append_user_message(msg)
-                    
-                    if doc_messages == None:
-                        raise Exception("thread was not properly initialized")
-
-
-
-                if received.type == "opened":
-                    
-                    if opened == False:
-                        
-                        opened = True
-                        
-                        await self.greet(chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
-
-                if received.type == "chat":
-                    
-                    if thread == None:
-
-                        self.room.developer.log_nowait(type="thread is not open", data={})
-
-                        break
-
-
-                    text = received.message["text"]
-                    
-                    await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":True})
-
-                    if chat_with_participant.id == received.from_participant_id:
-                        self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
-                
-                      
-                        attachments = received.message.get("attachments", [])
-
-                        for attachment in attachments:
-
-                            chat_context.append_assistant_message(message=f"the user attached a file '{attachment["filename"]}' with the content: '{attachment["content"]}'")
-                            
-
-                        chat_context.append_user_message(message=text)
-                            
-
-                    # if user is typing, wait for typing to stop
-                    while True:
-                        
-                        if chat_with_participant.id not in self._is_typing:
-                            break
-                    
-                        await asyncio.sleep(.5)
-
-                    if messages.empty() == True:
-                        break
         
-
+        llm_messages = Chan[ResponseStreamEvent]()
+        
+        def done_processing_llm_events(task: asyncio.Task):
             try:
-               
-                toolkits = [
-                    *self._toolkits,
-                    *await self.get_required_tools(participant_id=chat_with_participant.id)
-                ]
+                task.result()
+            except Exception as e:
+                logger.error("error sending delta", exc_info=e)
 
-                toolkits = await self.finalize_toolkits(toolkits=toolkits, participant=chat_with_participant, chat_context=chat_context)
+        async def process_llm_events():
 
-                response = await self._llm_adapter.next(
-                    context=chat_context,
-                    room=self._room,
-                    toolkits=toolkits,
-                    tool_adapter=self._tool_adapter,
-                )
+            partial = ""
+            content_element = None
+            context_message = None
 
-                text = response
+            async for evt in llm_messages:
                 
-                await self._send_and_save_chat(
-                    messages=doc_messages,
-                    to=chat_with_participant,
-                    text=text, 
-                )
-  
+                self.room.messaging.send_message(to=chat_with_participant, type="llm.event", message=evt)
+
+                if evt.type == "response.content_part.added":
+                    partial = ""
+                    content_element = doc_messages.append_child(tag_name="message", attributes={
+                        "text" : "",
+                        "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
+                        "author_name" : self.room.local_participant.get_attribute("name"),
+                    })
+
+                    context_message = {
+                        "role" : "assistant",
+                        "content" : ""
+                    }
+                    chat_context.messages.append(context_message)
+                 
+                elif evt.type == "response.output_text.delta":
+                    partial += evt.delta
+                    content_element["text"] = partial
+                    context_message["content"] = partial
+                    
+                elif evt.type == "response.output_text.done":
+                    content_element = None
+
+        llm_task = asyncio.create_task(process_llm_events())
+        llm_task.add_done_callback(done_processing_llm_events)
+
+        try:
+            while True:
                 
-            finally:
+                while True:
 
-                await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":False})
+                    received = await messages.recv()
 
-        if thread != None:
-            await self.close_thread(thread_id=thread_id)
+                    chat_with_participant = None
+                    for participant in self._room.messaging.get_participants():
+                        if participant.id == received.from_participant_id:
+                            chat_with_participant = participant
+                            break
+                        
+                    if chat_with_participant == None:
+                        logger.warning("participant does not have messaging enabled, skipping message")
+                        continue
+                
+                    if current_file != chat_with_participant.get_attribute("current_file"):
+                        logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
+                        current_file = chat_with_participant.get_attribute("current_file")
+                        
+                    if current_file != None:
+                        chat_context.append_assistant_message(message=f"the user is currently viewing the file at the path: {current_file}")
+
+                    elif current_file != None:
+                        chat_context.append_assistant_message(message=f"the user is not current viewing any files")
+
+                
+                    if thread == None:
+                        thread = await self.open_thread(thread_id=thread_id)
+                        
+                        for prop in thread.root.get_children():
+                            
+                            if prop.tag_name == "messages":
+
+                                doc_messages = prop
+                                
+                                for element in doc_messages.get_children():
+
+                                    if isinstance(element, Element):
+                                        
+                                        msg = element["text"]
+                                        if element["author_name"] == self.room.local_participant.get_attribute("name"):
+                                            chat_context.append_assistant_message(msg)
+                                        else:
+                                            chat_context.append_user_message(msg)
+                        
+                        if doc_messages == None:
+                            raise Exception("thread was not properly initialized")
+
+
+
+                    if received.type == "opened":
+                        
+                        if opened == False:
+                            
+                            opened = True
+                            
+                            await self.greet(chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
+
+                    if received.type == "chat":
+                        
+                        if thread == None:
+
+                            self.room.developer.log_nowait(type="thread is not open", data={})
+
+                            break
+
+
+                        text = received.message["text"]
+                        
+                        await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":True})
+
+                        if chat_with_participant.id == received.from_participant_id:
+                            self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
+                    
+                        
+                            attachments = received.message.get("attachments", [])
+
+                            for attachment in attachments:
+
+                                chat_context.append_assistant_message(message=f"the user attached a file '{attachment["filename"]}' with the content: '{attachment["content"]}'")
+                                
+
+                            chat_context.append_user_message(message=text)
+                                
+
+                        # if user is typing, wait for typing to stop
+                        while True:
+                            
+                            if chat_with_participant.id not in self._is_typing:
+                                break
+                        
+                            await asyncio.sleep(.5)
+
+                        if messages.empty() == True:
+                            break
+            
+
+                try:
+                
+                    toolkits = [
+                        *self._toolkits,
+                        *await self.get_required_tools(participant_id=chat_with_participant.id)
+                    ]
+
+                    toolkits = await self.finalize_toolkits(toolkits=toolkits, participant=chat_with_participant, chat_context=chat_context)
+
+                    
+                    def handle_event(evt):
+
+                        llm_messages.send_nowait(evt)
+                        
+                
+                    try:
+                        response = await self._llm_adapter.next(
+                            context=chat_context,
+                            room=self._room,
+                            toolkits=toolkits,
+                            tool_adapter=self._tool_adapter,
+                            event_handler=handle_event
+                        )
+                    except Exception as e:
+                        logger.error("An error was encountered", exc_info=e)
+                        await self._send_and_save_chat(messages=doc_messages, to=chat_with_participant, id=str(uuid.uuid4()), text="There was an error while communicating with the LLM. Please try again later.")
+    
+                    
+                finally:
+
+                    await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":False})
+        finally:
+
+            self.room.developer.log_nowait(type="chatbot.thread.ended", data={ "thread_id" : thread_id })
+    
+            llm_messages.close()
+
+            if thread != None:
+                await self.close_thread(thread_id=thread_id)
    
 
     def _get_message_channel(self, participant_id: str) -> Chan[RoomMessage]:

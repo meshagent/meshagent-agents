@@ -3,7 +3,7 @@ from .agent import AgentChatContext
 from jsonschema import validate
 from meshagent.tools.toolkit import Response, Toolkit
 from meshagent.api import RoomClient
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 class ToolResponseAdapter(ABC):
     def __init__(self):
@@ -14,11 +14,11 @@ class ToolResponseAdapter(ABC):
         pass
 
     @abstractmethod
-    async def append_messages(self, *, context: AgentChatContext, tool_call: Any, room: RoomClient, response: Response):
+    async def create_messages(self, *, context: AgentChatContext, tool_call: Any, room: RoomClient, response: Response) -> list:
         pass
 
 
-class LLMAdapter(ABC):
+class LLMAdapter[T](ABC):
 
     def create_chat_context(self) -> AgentChatContext:
         return AgentChatContext()
@@ -31,6 +31,7 @@ class LLMAdapter(ABC):
         toolkits: Toolkit,
         tool_adapter: Optional[ToolResponseAdapter] = None,
         output_schema: Optional[dict] = None,
+        event_handler: Optional[Callable[[T],None]] = None
     ) -> Any:  
         pass
 
