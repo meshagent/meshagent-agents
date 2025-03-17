@@ -1,6 +1,6 @@
-from .agent import SingleRoomAgent, AgentChatContext
+from .agent import SingleRoomAgent, AgentChatContext, AgentCallContext
 from meshagent.api.chan import Chan
-from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element
+from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element, MeshDocument
 from meshagent.tools import Toolkit
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
@@ -19,6 +19,35 @@ logger.setLevel(logging.INFO)
 
 
 # todo: thread should stop when participant stops?
+
+def get_thread_participants(*, room: RoomClient, thread: MeshDocument) -> list[RemoteParticipant]:
+
+    results = list[RemoteParticipant]()
+
+    for prop in thread.root.get_children():
+
+        if prop.tag_name == "members":
+
+            for member in prop.get_children():
+
+                for online in room.messaging.get_participants():
+
+                    if online.get_attribute("name") == member.get_attribute("name"):
+
+                        results.append(online)
+
+    return results
+
+
+class ChatThreadContext:
+    def __init__(self, *, chat: AgentChatContext, thread: MeshDocument, toolkits: list[Toolkit], participants: Optional[list[RemoteParticipant]] = None):
+        self.thread = thread
+        self.toolkits = toolkits
+        if participants == None:
+            participants = []
+
+        self.participants = participants
+        self.chat = chat
 
 class ChatBot(SingleRoomAgent):
     def __init__(self, *, name, title = None, description = None, requires : Optional[list[Requirement]] = None, llm_adapter: LLMAdapter, tool_adapter: Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, auto_greet_message : Optional[str] = None,  empty_state_title : Optional[str] = None, labels: Optional[str] = None):
@@ -96,12 +125,14 @@ class ChatBot(SingleRoomAgent):
             await self._send_and_save_chat(id=str(uuid.uuid4()), to=RemoteParticipant(id=participant.id), messages=messages, path=path, text= self._auto_greet_message)
            
 
-
-    async def finalize_toolkits(self, *, toolkits: list[Toolkit], participant: RemoteParticipant, chat_context: AgentChatContext) -> list[Toolkit]:
+    async def get_thread_participants(self, *, thread: MeshDocument):
+        return get_thread_participants(room=self._room, thread=thread)
+    
+    async def init_thread_context(self, *, thread_context: ChatThreadContext) -> list[Toolkit]:
 
         toaster = None
         
-        for toolkit in toolkits:
+        for toolkit in thread_context.toolkits:
 
             if toolkit.name == "meshagent.ui":
 
@@ -119,9 +150,10 @@ class ChatBot(SingleRoomAgent):
                 
                 return MultiToolkit(required=[ toaster ], base_toolkit=toolkit )
 
-            toolkits = list(map(multi_tool, toolkits))
+            toolkits = list(map(multi_tool, thread_context.toolkits))
         
-        return toolkits
+        thread_context.toolkits = toolkits
+
     
     async def init_chat_context(self) -> AgentChatContext:
         context =  self._llm_adapter.create_chat_context()
@@ -240,7 +272,6 @@ class ChatBot(SingleRoomAgent):
                             raise Exception("thread was not properly initialized")
 
 
-
                     if received.type == "opened":
                         
                         if opened == False:
@@ -260,7 +291,10 @@ class ChatBot(SingleRoomAgent):
 
                         text = received.message["text"]
                         
-                        await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":True, "path": path})
+
+                        for participant in get_thread_participants(room=self._room, thread=thread):
+                            # TODO: async gather
+                            await self._room.messaging.send_message(to=participant, type="thinking", message={"thinking":True, "path": path})
 
                         if chat_with_participant.id == received.from_participant_id:
                             self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
@@ -295,14 +329,17 @@ class ChatBot(SingleRoomAgent):
                         *await self.get_required_tools(participant_id=chat_with_participant.id)
                     ]
 
-                    toolkits = await self.finalize_toolkits(toolkits=toolkits, participant=chat_with_participant, chat_context=chat_context)
+                    thread_context = ChatThreadContext(
+                        chat=chat_context,
+                        thread=thread,
+                        toolkits=toolkits,
+                    )
 
-                    
+                    await self.init_thread_context(thread_context=thread_context)
+
                     def handle_event(evt):
-
                         llm_messages.send_nowait(evt)
                         
-                
                     try:
                         response = await self._llm_adapter.next(
                             context=chat_context,
@@ -317,8 +354,11 @@ class ChatBot(SingleRoomAgent):
     
                     
                 finally:
+                    for participant in get_thread_participants(room=self._room, thread=thread):
+                        # TODO: async gather
+                        await self._room.messaging.send_message(to=participant, type="thinking", message={"thinking":False, "path" : path})
 
-                    await self._room.messaging.send_message(to=chat_with_participant, type="thinking", message={"thinking":False, "path" : path})
+                   
         finally:
 
             self.room.developer.log_nowait(type="chatbot.thread.ended", data={ "path" : path })
