@@ -3,7 +3,7 @@ from meshagent.api.schema import ValueProperty, ChildProperty
 from meshagent.tools import Toolkit
 from meshagent.agents.writer import Writer, WriterContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
-from .schema import prompt_schema, merge
+from meshagent.api.schema_util import prompt_schema, merge
 from typing import Optional
 from meshagent.api import Requirement
 

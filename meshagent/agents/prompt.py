@@ -1,6 +1,6 @@
 
 from .adapter import LLMAdapter, Toolkit, ToolResponseAdapter
-from .schema import prompt_schema
+from meshagent.api.schema_util import prompt_schema
 from .agent import AgentCallContext
 from typing import Optional
 from meshagent.agents import TaskRunner

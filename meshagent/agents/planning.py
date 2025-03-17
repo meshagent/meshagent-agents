@@ -7,7 +7,7 @@ from meshagent.api.schema import MeshSchema
 from meshagent.agents.writer import Writer, WriterContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.api.schema import MeshSchema, ElementType, ChildProperty, ValueProperty
-from meshagent.agents.schema import merge
+from meshagent.api.schema_util import merge
 from meshagent.tools.document_tools import build_tools, DocumentAuthoringToolkit
 from meshagent.agents import TaskRunner
 from copy import deepcopy
@@ -120,7 +120,7 @@ def reasoning_schema(*, description: str, elements: Optional[list[ElementType]] 
             *elements
         ])
 
-from .schema import prompt_schema
+from meshagent.api.schema_util import prompt_schema
 import logging
 logging.basicConfig()
 logger = logging.getLogger("planning_agent")

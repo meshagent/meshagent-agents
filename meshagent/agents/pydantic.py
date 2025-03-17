@@ -6,18 +6,48 @@ from .agent import AgentCallContext
 from .writer import Writer, WriterContext
 import logging
 from typing import Optional
+from meshagent.api import RoomClient
 
 from .agent import TaskRunner, RequiredToolkit, Requirement, RequiredSchema
 
 from .adapter import  ToolResponseAdapter
-
-from meshagent.tools.pydantic import get_pydantic_ai_tools_from_context
+from meshagent.tools.toolkit import Tool, Response, ToolContext
+from meshagent.tools.pydantic import get_pydantic_ai_tool_definition
 
 from typing import Sequence
 import pydantic_ai
 
 logger = logging.getLogger("pydantic_agent")
 logger.setLevel(logging.INFO)
+
+
+def get_pydantic_ai_tool(*, room: RoomClient, tool: Tool, response_adapter: ToolResponseAdapter) -> pydantic_ai.tools.Tool:
+     async def prepare(ctx: pydantic_ai.RunContext, tool_def: pydantic_ai.tools.ToolDefinition):
+         return get_pydantic_ai_tool_definition(tool=tool)
+     
+     async def execute(**kwargs):
+         response = await tool.execute(context=ToolContext(room=room, caller=room.local_participant), **kwargs)
+         return await response_adapter.to_plain_text(room=room, response=response)
+
+     return pydantic_ai.Tool(
+        name=tool.name,
+        takes_ctx=False,
+        description=tool.description,
+        prepare=prepare,
+        function=execute
+    )
+
+def get_pydantic_ai_tools_from_context(*, context: AgentCallContext, response_adapter: ToolResponseAdapter) -> list[pydantic_ai.tools.Tool]:
+
+    tools = list[pydantic_ai.tools.Tool]()
+
+    for toolkit in context.toolkits:
+        
+        for tool in toolkit.tools:
+
+            tools.append(get_pydantic_ai_tool(room=context.room, tool=tool, response_adapter=response_adapter))
+
+    return tools
 
 class PydanticAgent[TInput:BaseModel, TOutput:BaseModel](TaskRunner):
     def __init__(self,

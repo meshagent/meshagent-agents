@@ -10,7 +10,7 @@ from meshagent.tools.toolkit import Toolkit, Tool, ToolContext
 from meshagent.api.room_server_client import RoomClient, RoomException
 from jsonschema import validate
 from .context import AgentCallContext, AgentChatContext
-from .schema import no_arguments_schema
+from meshagent.api.schema_util import no_arguments_schema
 import logging
 import asyncio
 from typing import Optional
