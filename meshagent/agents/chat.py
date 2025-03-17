@@ -95,7 +95,6 @@ class ChatBot(SingleRoomAgent):
 
         else:
             
-
             thread_schema = list(n for n in requires if (isinstance(n, RequiredSchema) and n.name == "thread"))
             if len(thread_schema) == 0:
                 requires.append(
@@ -118,10 +117,8 @@ class ChatBot(SingleRoomAgent):
      
     async def greet(self, *, messages: Element, path: str, chat_context: AgentChatContext, participant: RemoteParticipant):
 
-
         if self._auto_greet_message != None:
             chat_context.append_user_message(self._auto_greet_message)
-            
             await self._send_and_save_chat(id=str(uuid.uuid4()), to=RemoteParticipant(id=participant.id), messages=messages, path=path, text= self._auto_greet_message)
            
 
