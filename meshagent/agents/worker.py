@@ -103,10 +103,14 @@ class Worker(TaskRunner):
                 try:
                     while True:
 
+                        tool_target = context.caller
+                        if context.on_behalf_of != None:
+                            tool_target = context.on_behalf_of
+
                         toolkits = [
                             *self._toolkits,
                             *context.toolkits,
-                            *await self.get_required_tools(participant_id=self.room.local_participant.id)
+                            *await self.get_required_tools(participant_id=tool_target)
                         ]
                         response = await self._llm_adapter.next(
                             context=chat_context,

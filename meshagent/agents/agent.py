@@ -256,8 +256,13 @@ class SingleRoomAgent(Agent):
         
 class TaskRunner(SingleRoomAgent):
 
-    def __init__(self, *, name, title = None, description = None, requires = None, supports_tools : Optional[bool] = None, input_schema: dict, output_schema: dict, labels: Optional[list[str]] = None):
+    def __init__(self, *, name, title = None, description = None, requires = None, supports_tools : Optional[bool] = None, input_schema: dict, output_schema: dict, labels: Optional[list[str]] = None, toolkits: Optional[list[Toolkit]] = None):
         super().__init__(name=name, title=title, description=description, requires=requires, labels=labels)
+
+        if toolkits == None:
+            toolkits = []
+
+        self._toolkits = toolkits
 
         self._registration_id = None     
 
@@ -353,25 +358,30 @@ class TaskRunner(SingleRoomAgent):
         async def worker():
             # Decode and parse the message
             message = json.loads(data.decode('utf-8'))
-            logger.info("got message %s", message)
+            logger.info("agent got message %s", message)
             args = message["arguments"]
             task_id = message["task_id"] 
             context_json = message["context"]
             toolkits_json = message["toolkits"]
             
-
             #context_json = message["context"]
 
             try:
                 chat_context = await self.init_chat_context()
 
                 caller : Participant | None = None
-
+                on_behalf_of : Participant | None = None
+                on_behalf_of_id = message.get("on_behalf_of_id", None) 
+    
                 for participant in self._room.messaging.get_participants():
                     if message["caller_id"] == participant.id:
                         caller = participant
                         break
                 
+                    if on_behalf_of_id == participant.id:
+                        on_behalf_of = participant
+                        break
+
                 if caller == None:
                     caller = RemoteParticipant(
                         id=message["caller_id"],
@@ -379,15 +389,30 @@ class TaskRunner(SingleRoomAgent):
                         attributes={}
                     )
 
+                if on_behalf_of_id != None and on_behalf_of == None:
+                    on_behalf_of = RemoteParticipant(
+                        id=message["on_behalf_of_id"],
+                        role="user",
+                        attributes={}
+                    )
+               
+                tool_target = caller
+                if on_behalf_of != None:
+                    tool_target = on_behalf_of
 
-                context = AgentCallContext(chat=chat_context, room=self.room, caller=caller)
-    
+                toolkits = [
+                    *self._toolkits,
+                    *await self.get_required_tools(participant_id=tool_target.id)
+                ]
+
+                context = AgentCallContext(chat=chat_context, room=self.room, caller=caller, on_behalf_of=on_behalf_of, toolkits=toolkits)
+                 
                 for toolkit_json in toolkits_json:
                     tools = []
                     for tool_json in toolkit_json["tools"]:
                         tools.append(RoomTool(
-                            on_behalf_of_id=message["caller_id"],
-                            participant_id=message["caller_id"],
+                            on_behalf_of_id=on_behalf_of_id,
+                            participant_id=tool_target.id,
                             toolkit_name=toolkit_json["name"],
                             name=tool_json["name"],
                             title=tool_json["title"],

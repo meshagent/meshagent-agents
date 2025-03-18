@@ -81,13 +81,14 @@ class AgentChatContext:
         return AgentChatContext(messages=json["messages"], system_role=json.get("system_role", None))
 
 class AgentCallContext:
-    def __init__(self, *, chat: AgentChatContext, room: RoomClient, toolkits: Optional[list[Toolkit]] = None, caller: Optional[Participant] = None):
+    def __init__(self, *, chat: AgentChatContext, room: RoomClient, toolkits: Optional[list[Toolkit]] = None, caller: Optional[Participant] = None, on_behalf_of: Optional[Participant] = None):
         self._room = room
         if toolkits == None:
             toolkits = list[Toolkit]()
         self._toolkits = toolkits
         self._chat = chat
         self._caller = caller
+        self._on_behalf_of = on_behalf_of
 
     @property
     def toolkits(self):
@@ -101,6 +102,10 @@ class AgentCallContext:
     def caller(self):
         return self._caller
 
+    @property
+    def on_behalf_of(self):
+        return self._on_behalf_of
+    
     @property
     def room(self):
         return self._room
