@@ -149,7 +149,7 @@ class ChatBot(SingleRoomAgent):
 
             toolkits = list(map(multi_tool, thread_context.toolkits))
         
-        thread_context.toolkits = toolkits
+            thread_context.toolkits = toolkits
 
     
     async def init_chat_context(self) -> AgentChatContext:
