@@ -391,6 +391,9 @@ class ChatBot(SingleRoomAgent):
 
         def on_message(message: RoomMessage):
 
+            logger.info(f"received message {message.type}")
+              
+
             messages = self._get_message_channel(participant_id=message.from_participant_id)
             if message.type == "chat" or message.type == "opened":
                 messages.send_nowait(message)
