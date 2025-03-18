@@ -1,10 +1,10 @@
-from meshagent.api import RoomClient, Requirement, RoomException
+from meshagent.api import RoomClient, Requirement, RoomException, Participant
 from meshagent.tools import validate_openai_schema, Toolkit
 import json
 from typing import Optional
 import asyncio
 
-async def generate_json(*, participant_id: Optional[str] = None, room: RoomClient, prompt: Optional[str] = None, output_schema: dict, requires: Optional[list[Requirement]] = None) -> dict:
+async def generate_json(*, on_behalf_of: Optional[Participant] = None, room: RoomClient, prompt: Optional[str] = None, output_schema: dict, requires: Optional[list[Requirement]] = None) -> dict:
     
     # make sure agent is in the room before proceeding
     agent = None
@@ -29,7 +29,7 @@ async def generate_json(*, participant_id: Optional[str] = None, room: RoomClien
 
     validate_openai_schema(output_schema)
     return await room.agents.ask(
-        participant_id=participant_id,
+        on_behalf_of=on_behalf_of,
         agent="meshagent.planning_responder",
         requires = requires,
         arguments = {
