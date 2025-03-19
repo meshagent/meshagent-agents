@@ -10,7 +10,7 @@ from meshagent.tools import MultiToolkit
 import urllib
 import uuid
 import datetime
-
+import json
 from openai.types.responses import ResponseStreamEvent
 
 logging.basicConfig()
@@ -177,7 +177,8 @@ class ChatBot(SingleRoomAgent):
         current_file = None
         llm_messages = Chan[ResponseStreamEvent]()
         thread_context = None
-        
+    
+
         def done_processing_llm_events(task: asyncio.Task):
             try:
                 task.result()
@@ -192,7 +193,10 @@ class ChatBot(SingleRoomAgent):
 
             async for evt in llm_messages:
                 
-                #await self.room.messaging.send_message(to=chat_with_participant, type="llm.event", message=evt)
+                for participant in self._room.messaging.get_participants():
+                    logger.info(f"sending event {evt.type} to {participant.get_attribute("name")}")
+
+                    self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
 
                 if evt.type == "response.content_part.added":
                     partial = ""
@@ -292,7 +296,7 @@ class ChatBot(SingleRoomAgent):
 
                         for participant in get_thread_participants(room=self._room, thread=thread):
                             # TODO: async gather
-                            await self._room.messaging.send_message(to=participant, type="thinking", message={"thinking":True, "path": path})
+                            self._room.messaging.send_message_nowait(to=participant, type="thinking", message={"thinking":True, "path": path})
 
                         if chat_with_participant.id == received.from_participant_id:
                             self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
@@ -356,7 +360,7 @@ class ChatBot(SingleRoomAgent):
                 finally:
                     for participant in get_thread_participants(room=self._room, thread=thread):
                         # TODO: async gather
-                        await self._room.messaging.send_message(to=participant, type="thinking", message={"thinking":False, "path" : path})
+                        self._room.messaging.send_message_nowait(to=participant, type="thinking", message={"thinking":False, "path" : path})
 
                    
         finally:
