@@ -176,6 +176,7 @@ class ChatBot(SingleRoomAgent):
         doc_messages = None
         current_file = None
         llm_messages = Chan[ResponseStreamEvent]()
+        thread_context = None
         
         def done_processing_llm_events(task: asyncio.Task):
             try:
@@ -320,19 +321,21 @@ class ChatBot(SingleRoomAgent):
             
 
                 try:
-                
-                    toolkits = [
-                        *self._toolkits,
-                        *await self.get_required_tools(participant_id=chat_with_participant.id)
-                    ]
+                    
+                    if thread_context == None:
+                        toolkits = [
+                            *self._toolkits,
+                            *await self.get_required_tools(participant_id=chat_with_participant.id)
+                        ]
 
-                    thread_context = ChatThreadContext(
-                        chat=chat_context,
-                        thread=thread,
-                        toolkits=toolkits,
-                    )
+                        thread_context = ChatThreadContext(
+                            chat=chat_context,
+                            thread=thread,
+                            toolkits=toolkits,
+                            participants=get_thread_participants(room=self.room, thread=thread)
+                        )
 
-                    await self.init_thread_context(thread_context=thread_context)
+                        await self.init_thread_context(thread_context=thread_context)
 
                     def handle_event(evt):
                         llm_messages.send_nowait(evt)
@@ -341,7 +344,7 @@ class ChatBot(SingleRoomAgent):
                         response = await self._llm_adapter.next(
                             context=chat_context,
                             room=self._room,
-                            toolkits=toolkits,
+                            toolkits=thread_context.toolkits,
                             tool_adapter=self._tool_adapter,
                             event_handler=handle_event
                         )
@@ -386,6 +389,8 @@ class ChatBot(SingleRoomAgent):
     async def start(self, *, room):
 
         await super().start(room=room)
+
+        logger.info("Starting chatbot")
         
         await self.room.local_participant.set_attribute("empty_state_title", self._empty_state_title)
 
@@ -447,5 +452,7 @@ class ChatBot(SingleRoomAgent):
 
             room.messaging.on("participant_added", on_participant_added)
 
+
+        logger.info("Enabling chatbot messaging")
         await room.messaging.enable()
 

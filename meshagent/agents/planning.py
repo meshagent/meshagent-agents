@@ -279,7 +279,8 @@ class PlanningResponder(TaskRunner):
             output_schema=output_schema,
             requires=requires,
             supports_tools=supports_tools,
-            labels=labels
+            labels=labels,
+            toolkits=toolkits
         )
         
         self._max_iterations = max_iterations
@@ -293,11 +294,6 @@ class PlanningResponder(TaskRunner):
 
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter 
-
-        if toolkits == None:
-            toolkits = []
-        
-        self.toolkits = toolkits
 
         self._use_terminate_tool = use_terminate_tool
 
@@ -389,14 +385,8 @@ class PlanningResponder(TaskRunner):
             
             try:
                 logger.info("COMPLETION STARTING: Step %s", i)
-                
-                toolkits = [
-                    *self.toolkits,
-                    *context.toolkits
-                ]
-
-                responses = await self._llm_adapter.next(context=context.chat, room=room, toolkits=toolkits, tool_adapter=self._tool_adapter, output_schema=rs)
-
+                    
+                responses = await self._llm_adapter.next(context=context.chat, room=room, toolkits=context.toolkits, tool_adapter=self._tool_adapter, output_schema=rs)
 
                 logger.info("COMPLETION RESPONSE %s", responses)
             

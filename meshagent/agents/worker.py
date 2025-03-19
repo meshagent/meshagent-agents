@@ -107,20 +107,15 @@ class Worker(TaskRunner):
                         if context.on_behalf_of != None:
                             tool_target = context.on_behalf_of
 
-                        toolkits = [
-                            *self._toolkits,
-                            *context.toolkits,
-                            *await self.get_required_tools(participant_id=tool_target)
-                        ]
                         response = await self._llm_adapter.next(
                             context=chat_context,
                             room=self._room,
-                            toolkits=toolkits,
+                            toolkits=context.toolkits,
                             tool_adapter=self._tool_adapter,
                             output_schema=step_schema,
                         )
 
-                        if response["finished"] or len(toolkits) == 0:
+                        if response["finished"] or len(context.toolkits) == 0:
                             break
                         else:
                             chat_context.append_user_message(message="proceed to the next step if you are ready")
