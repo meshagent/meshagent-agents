@@ -370,10 +370,10 @@ class StorageIndexer(SingleRoomAgent):
                 logger.error("error while indexing", exc_info=e)
 
 
-    def _on_file_deleted(self, path: str):
+    def _on_file_deleted(self, path: str, participant_id: str):
         self._chan.send_nowait(FileIndexEvent(path=path, deleted=True))
         
-    def _on_file_updated(self, path: str):
+    def _on_file_updated(self, path: str, participant_id: str):
         self._chan.send_nowait(FileIndexEvent(path=path, deleted=False))
 
         
