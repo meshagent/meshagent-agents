@@ -18,9 +18,6 @@ import os
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
-
-
 def _async_debounce(wait):
     def decorator(func):
         task = None

@@ -6,14 +6,15 @@ from typing import Optional
 from meshagent.api.room_server_client import RoomException, RequiredToolkit, Requirement, RequiredSchema
 from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry
 from meshagent.api.protocol import Protocol
-from meshagent.tools.toolkit import Toolkit, Tool, ToolContext
+from meshagent.tools.toolkit import Toolkit, Tool, ToolContext, toolkit_factory
 from meshagent.api.room_server_client import RoomClient, RoomException
 from jsonschema import validate
 from .context import AgentCallContext, AgentChatContext
 from meshagent.api.schema_util import no_arguments_schema
+from meshagent.api import MeshSchema
 import logging
 import asyncio
-from typing import Optional
+from typing import Optional, Dict, Callable, Coroutine
 
 logger = logging.getLogger("agent")
 logger.setLevel(logging.INFO)
@@ -144,6 +145,10 @@ class SingleRoomAgent(Agent):
             
             if isinstance(requirement, RequiredToolkit):
                 
+                if toolkit_factory(requirement.name) != None:
+                    # no need to install something we can create from a factory
+                    continue
+
                 if requirement.name == "meshagent.ui":
                     # TODO: maybe requirements can be marked as non installable?
                     continue
@@ -182,20 +187,34 @@ class SingleRoomAgent(Agent):
         if installed:
             await asyncio.sleep(5)
 
-    async def get_required_tools(self, participant_id: str) -> list[Toolkit]:
+    async def get_required_toolkits(self, context: ToolContext) -> list[Toolkit]:
+
+
+        tool_target = context.caller
+        if context.on_behalf_of != None:
+            tool_target = context.on_behalf_of
 
         toolkits_by_name = dict[str, ToolkitDescription]()
 
         toolkits = list[Toolkit]()
 
-        visible_tools = await self._room.agents.list_toolkits(participant_id=participant_id)
+        visible_tools = await self._room.agents.list_toolkits(participant_id=tool_target.id)
 
         for toolkit_description in visible_tools:
             toolkits_by_name[toolkit_description.name] = toolkit_description
 
+
         for required_toolkit in self.requires:
             
             if isinstance(required_toolkit, RequiredToolkit):
+                
+                if toolkit_factory(required_toolkit.name) != None:
+                
+                    
+                    toolkit = await toolkit_factory(required_toolkit.name)(context, required_toolkit)
+                    toolkits.append(toolkit)
+                    continue
+
 
                 toolkit = toolkits_by_name.get(required_toolkit.name, None)
                 if toolkit == None:
@@ -208,14 +227,14 @@ class SingleRoomAgent(Agent):
 
                     for tool_description in toolkit.tools:
                         tool = RoomTool(
-                            on_behalf_of_id=participant_id,
+                            on_behalf_of_id=tool_target.id,
                             toolkit_name=toolkit.name,
                             name=tool_description.name,
                             description=tool_description.description,
                             input_schema=tool_description.input_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=participant_id,
+                            participant_id=tool_target.id,
                             defs = tool_description.defs
                         )
                         room_tools.append(tool)
@@ -232,14 +251,14 @@ class SingleRoomAgent(Agent):
                             raise RoomException(f"unable to locate required tool {required_tool}")
 
                         tool = RoomTool(
-                            on_behalf_of_id=participant_id,
+                            on_behalf_of_id=tool_target.id,
                             toolkit_name=toolkit.name,
                             name=tool_description.name,
                             description=tool_description.description,
                             input_schema=tool_description.input_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=participant_id,
+                            participant_id=tool_target.id,
                             defs = tool_description.defs
                         )
                         room_tools.append(tool)
@@ -400,9 +419,10 @@ class TaskRunner(SingleRoomAgent):
                 if on_behalf_of != None:
                     tool_target = on_behalf_of
 
+                
                 toolkits = [
                     *self._toolkits,
-                    *await self.get_required_tools(participant_id=tool_target.id)
+                    *await self.get_required_toolkits(context=ToolContext(room=self.room, caller=caller, on_behalf_of=on_behalf_of))
                 ]
 
                 context = AgentCallContext(chat=chat_context, room=self.room, caller=caller, on_behalf_of=on_behalf_of, toolkits=toolkits)
@@ -460,3 +480,4 @@ class RunTaskTool(Tool):
 
     async def execute(self, context: ToolContext, **kwargs):
         return await context.room.agents.ask(agent=self._agent_name, arguments=kwargs)
+    

@@ -17,28 +17,18 @@ logger.setLevel(logging.INFO)
 # todo: thread should stop when participant stops?
 
 class Worker(TaskRunner):
-    def __init__(self, *, name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
+    def __init__(self, *, queue: str, prompt: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
         super().__init__(
             name=name,
             title=title,
             description=description,
             requires=requires,
-            input_schema={
-                "type" : "object",
-                "additionalProperties" : False,
-                "required" : [ "prompt", "queue" ],
-                "properties" : {
-                    "prompt" : {
-                        "type" : "string"
-                    },
-                    "queue" : {
-                        "type" : "string"
-                    }
-                }
-            },
             output_schema=None,
             supports_tools=supports_tools
         )
+
+        self._queue = queue
+        self._prompt = prompt
 
         if toolkits == None:
             toolkits = []
@@ -59,8 +49,8 @@ class Worker(TaskRunner):
 
     async def ask(self, *, context: AgentCallContext, arguments: dict):
         
-        queue = arguments["queue"]
-        prompt = arguments["prompt"]
+        queue = self._queue
+        prompt = self._prompt
 
         step_schema = {
             "type" : "object",

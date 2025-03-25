@@ -1,7 +1,7 @@
 from .agent import SingleRoomAgent, AgentChatContext, AgentCallContext
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element, MeshDocument
-from meshagent.tools import Toolkit
+from meshagent.tools import Toolkit, ToolContext
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
 from typing import Optional
@@ -40,9 +40,8 @@ def get_thread_participants(*, room: RoomClient, thread: MeshDocument) -> list[R
 
 
 class ChatThreadContext:
-    def __init__(self, *, chat: AgentChatContext, thread: MeshDocument, toolkits: list[Toolkit], participants: Optional[list[RemoteParticipant]] = None):
+    def __init__(self, *, chat: AgentChatContext, thread: MeshDocument, participants: Optional[list[RemoteParticipant]] = None):
         self.thread = thread
-        self.toolkits = toolkits
         if participants == None:
             participants = []
 
@@ -125,11 +124,12 @@ class ChatBot(SingleRoomAgent):
     async def get_thread_participants(self, *, thread: MeshDocument):
         return get_thread_participants(room=self._room, thread=thread)
     
-    async def init_thread_context(self, *, thread_context: ChatThreadContext) -> list[Toolkit]:
+    async def get_thread_toolkits(self, *, thread_context: ChatThreadContext, participant: RemoteParticipant) -> list[Toolkit]:
 
+        toolkits = await self.get_required_toolkits(context=ToolContext(room=self.room, caller=participant))
         toaster = None
         
-        for toolkit in thread_context.toolkits:
+        for toolkit in toolkits:
 
             if toolkit.name == "meshagent.ui":
 
@@ -147,10 +147,13 @@ class ChatBot(SingleRoomAgent):
                 
                 return MultiToolkit(required=[ toaster ], base_toolkit=toolkit )
 
-            toolkits = list(map(multi_tool, thread_context.toolkits))
+            toolkits = list(map(multi_tool, toolkits))
         
-            thread_context.toolkits = toolkits
-
+        
+        return [
+            *self._toolkits,
+            *toolkits
+        ]
     
     async def init_chat_context(self) -> AgentChatContext:
         context =  self._llm_adapter.create_chat_context()
@@ -325,21 +328,16 @@ class ChatBot(SingleRoomAgent):
             
 
                 try:
+
+
                     
                     if thread_context == None:
-                        toolkits = [
-                            *self._toolkits,
-                            *await self.get_required_tools(participant_id=chat_with_participant.id)
-                        ]
-
+                      
                         thread_context = ChatThreadContext(
                             chat=chat_context,
                             thread=thread,
-                            toolkits=toolkits,
                             participants=get_thread_participants(room=self.room, thread=thread)
-                        )
-
-                        await self.init_thread_context(thread_context=thread_context)
+                        )                        
 
                     def handle_event(evt):
                         llm_messages.send_nowait(evt)
@@ -348,7 +346,7 @@ class ChatBot(SingleRoomAgent):
                         response = await self._llm_adapter.next(
                             context=chat_context,
                             room=self._room,
-                            toolkits=thread_context.toolkits,
+                            toolkits=await self.get_thread_toolkits(thread_context=thread_context, participant=participant),
                             tool_adapter=self._tool_adapter,
                             event_handler=handle_event
                         )
