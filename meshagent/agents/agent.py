@@ -149,7 +149,7 @@ class SingleRoomAgent(Agent):
                     # no need to install something we can create from a factory
                     continue
 
-                if requirement.name == "meshagent.ui":
+                if requirement.name == "ui":
                     # TODO: maybe requirements can be marked as non installable?
                     continue
                 

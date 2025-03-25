@@ -131,7 +131,7 @@ class ChatBot(SingleRoomAgent):
         
         for toolkit in toolkits:
 
-            if toolkit.name == "meshagent.ui":
+            if toolkit.name == "ui":
 
                 for tool in toolkit.tools:
 
