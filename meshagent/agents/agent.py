@@ -6,7 +6,7 @@ from typing import Optional
 from meshagent.api.room_server_client import RoomException, RequiredToolkit, Requirement, RequiredSchema
 from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry
 from meshagent.api.protocol import Protocol
-from meshagent.tools.toolkit import Toolkit, Tool, ToolContext, toolkit_factory
+from meshagent.tools.toolkit import Toolkit, Tool, ToolContext, toolkit_factory, register_toolkit_factory
 from meshagent.api.room_server_client import RoomClient, RoomException
 from jsonschema import validate
 from .context import AgentCallContext, AgentChatContext
@@ -472,12 +472,39 @@ class TaskRunner(SingleRoomAgent):
         task = asyncio.create_task(worker())
         task.add_done_callback(on_done)    
 
+
 class RunTaskTool(Tool):
-    def __init__(self, *, agent_name: str, input_schema: dict, rules = None, thumbnail_url = None):
-        super().__init__(name=agent_name, input_schema=input_schema, rules=rules, thumbnail_url=thumbnail_url)
+    def __init__(self, *, name: str, agent_name: str, input_schema: dict, rules = None, thumbnail_url = None, title: Optional[str] = None, description: Optional[str]  = None):
+        super().__init__(name=name, input_schema=input_schema, rules=rules, thumbnail_url=thumbnail_url, title=title, description=description)
 
         self._agent_name = agent_name
 
     async def execute(self, context: ToolContext, **kwargs):
         return await context.room.agents.ask(agent=self._agent_name, arguments=kwargs)
     
+
+async def make_run_task_tool(context: ToolContext, toolkit: RequiredToolkit):
+
+    agents = await context.room.agents.list_agents()
+    tools = []
+    for agent_name in toolkit.tools:
+        agent = next((x for x in agents if x.name == agent_name), None)
+
+        if agent == None:
+            raise RoomException(f"agent was not found in the room {agent_name}")
+        
+        tools.append(
+            RunTaskTool(
+                agent_name=agent_name,
+                name=f"run_{agent_name}",
+                input_schema=agent.input_schema,
+                title=agent.title,
+                description=agent.description
+            ))
+
+    return Toolkit(
+        name="agents",
+        tools=tools
+    )
+
+register_toolkit_factory("agents", make_run_task_tool)
