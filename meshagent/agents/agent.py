@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Optional
 
 from meshagent.api.room_server_client import RoomException, RequiredToolkit, Requirement, RequiredSchema
-from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry
+from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry, JsonResponse
 from meshagent.api.protocol import Protocol
 from meshagent.tools.toolkit import Toolkit, Tool, ToolContext, toolkit_factory, register_toolkit_factory
 from meshagent.api.room_server_client import RoomClient, RoomException
@@ -385,6 +385,8 @@ class TaskRunner(SingleRoomAgent):
             
             #context_json = message["context"]
 
+            chat_context = None
+
             try:
                 chat_context = await self.init_chat_context()
 
@@ -422,7 +424,7 @@ class TaskRunner(SingleRoomAgent):
                 
                 toolkits = [
                     *self._toolkits,
-                    *await self.get_required_toolkits(context=ToolContext(room=self.room, caller=caller, on_behalf_of=on_behalf_of))
+                    *await self.get_required_toolkits(context=ToolContext(room=self.room, caller=caller, on_behalf_of=on_behalf_of, caller_context={ "chat": chat_context.to_json() }))
                 ]
 
                 context = AgentCallContext(chat=chat_context, room=self.room, caller=caller, on_behalf_of=on_behalf_of, toolkits=toolkits)
@@ -456,15 +458,28 @@ class TaskRunner(SingleRoomAgent):
                 
                 await protocol.send(type="agent.ask_response", data=json.dumps({ 
                     "task_id" : task_id,
-                    "response" : response,
+                    "answer" : response,
+                    "caller_context" : {
+                        "chat" : chat_context.to_json()
+                    }
                 }))
 
             except Exception as e:
                 logger.error("Task runner failed to complete task", exc_info=e)
-                await protocol.send(type="agent.ask_response", data=json.dumps({
-                    "task_id" : task_id,
-                    "error" : str(e),
-                }))
+                if chat_context != None:
+                        
+                    await protocol.send(type="agent.ask_response", data=json.dumps({
+                        "task_id" : task_id,
+                        "error" : str(e),
+                        "caller_context" : {
+                            "chat" : chat_context.to_json()
+                        }
+                    }))
+                else:
+                    await protocol.send(type="agent.ask_response", data=json.dumps({
+                        "task_id" : task_id,
+                        "error" : str(e),
+                    }))
 
         def on_done(task: asyncio.Task):
             task.result()

@@ -8,7 +8,7 @@ from meshagent.api.participant import Participant
 import uuid
 
 class AgentChatContext:
-    def __init__(self, *, messages: Optional[list[dict]] = None, system_role: Optional[str] = None):
+    def __init__(self, *, messages: Optional[list[dict]] = None, system_role: Optional[str] = None, previous_messages: Optional[list[dict]] = None, previous_response_id: Optional[str] = None):
         self.id = str(uuid.uuid4())
         if messages == None:
             messages = list[dict]()
@@ -17,8 +17,11 @@ class AgentChatContext:
             system_role = "system"
         self._system_role = system_role
 
-        self._previous_response_id = None
-        self._previous_messages = list[dict]()
+        if previous_messages == None:            
+            previous_messages = list[dict]()
+
+        self._previous_response_id = previous_response_id
+        self._previous_messages = previous_messages
     
     @property
     def messages(self):
@@ -36,7 +39,7 @@ class AgentChatContext:
     def previous_response_id(self):
         return self._previous_response_id
     
-    def create_response(self, id: str):
+    def track_response(self, id: str):
         self._previous_response_id = id
         self._previous_messages.extend(self.messages)
         self.messages.clear()
@@ -73,12 +76,14 @@ class AgentChatContext:
     def to_json(self) -> dict:
         return {
             "messages" : self.messages,
-            "system_role" : self.system_role
+            "system_role" : self.system_role,
+            "previous_messages" : self.previous_messages,
+            "previous_response_id" : self.previous_response_id
         }
     
     @staticmethod
     def from_json(json: dict):
-        return AgentChatContext(messages=json["messages"], system_role=json.get("system_role", None))
+        return AgentChatContext(messages=json["messages"], system_role=json.get("system_role", None), previous_messages=json.get("previous_messages", None), previous_response_id=json.get("previous_response_id", None))
 
 class AgentCallContext:
     def __init__(self, *, chat: AgentChatContext, room: RoomClient, toolkits: Optional[list[Toolkit]] = None, caller: Optional[Participant] = None, on_behalf_of: Optional[Participant] = None):

@@ -126,7 +126,7 @@ class ChatBot(SingleRoomAgent):
     
     async def get_thread_toolkits(self, *, thread_context: ChatThreadContext, participant: RemoteParticipant) -> list[Toolkit]:
 
-        toolkits = await self.get_required_toolkits(context=ToolContext(room=self.room, caller=participant))
+        toolkits = await self.get_required_toolkits(context=ToolContext(room=self.room, caller=participant, caller_context={ "chat": thread_context.chat.to_json() }))
         toaster = None
         
         for toolkit in toolkits:
