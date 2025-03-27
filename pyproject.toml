@@ -1,5 +1,43 @@
 [build-system]
 requires = [
-    "setuptools>=42",
+  "setuptools>=61.0",
+  "wheel"
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "meshagent-agents"
+dynamic = ["version", "readme"]
+description = "Agent Building Blocks for Meshagent"
+requires-python = ">=3.9.0"
+license = "Apache-2.0"
+classifiers = []
+keywords = []
+dependencies = [
+  "pyjwt>=2.0.0",
+  "pytest>=8.3.4",
+  "pytest-asyncio>=0.24.0",
+  "meshagent-api>=0.0.7",
+  "meshagent-tools>=0.0.7",
+  "meshagent-openai>=0.0.7",
+  "pydantic>=2.10.4",
+  "pydantic-ai>=0.0.23",
+  "chonkie>=0.5.1",
+  "chonkie[semantic]>=0.5.1",
+  "chonkie[openai]>=0.5.1"
+]
+
+[project.urls]
+Documentation = "https://meshagent.com"
+Website = "https://meshagent.com"
+Source = "https://github.com/meshagent"
+
+[tool.setuptools.packages.find]
+include = ["meshagent.*"]
+
+[tool.setuptools.package-data]
+"meshagent.agents" = ["py.typed", "*.pyi", "**/*.pyi", "**/*.js"]
+
+[tool.setuptools.dynamic]
+version = {attr = "meshagent.agents.version.__version__"}
+readme = { file = "README.md", content-type = "text/markdown" }
