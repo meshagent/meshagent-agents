@@ -14,17 +14,17 @@ license = "Apache-2.0"
 classifiers = []
 keywords = []
 dependencies = [
-  "pyjwt>=2.0.0",
-  "pytest>=8.3.4",
-  "pytest-asyncio>=0.24.0",
-  "meshagent-api>=0.0.7",
-  "meshagent-tools>=0.0.7",
-  "meshagent-openai>=0.0.7",
-  "pydantic>=2.10.4",
-  "pydantic-ai>=0.0.23",
-  "chonkie>=0.5.1",
-  "chonkie[semantic]>=0.5.1",
-  "chonkie[openai]>=0.5.1"
+  "pyjwt~=2.10.1",
+  "pytest~=8.3.5",
+  "pytest-asyncio~=0.26.0",
+  "meshagent-api~=0.0.9",
+  "meshagent-tools~=0.0.9",
+  "meshagent-openai~=0.0.9",
+  "pydantic~=2.11.1",
+  "pydantic-ai~=0.0.48",
+  "chonkie~=0.5.1",
+  "chonkie[semantic]~=0.5.1",
+  "chonkie[openai]~=0.5.1"
 ]
 
 [project.urls]
