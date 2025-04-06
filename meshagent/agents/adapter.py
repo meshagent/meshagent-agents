@@ -3,7 +3,9 @@ from .agent import AgentChatContext
 from jsonschema import validate
 from meshagent.tools.toolkit import Response, Toolkit
 from meshagent.api import RoomClient
-from typing import Any, Optional, Callable
+from typing import Any, Optional, Callable, TypeVar, Generic
+
+T = TypeVar("T")
 
 class ToolResponseAdapter(ABC):
     def __init__(self):
@@ -18,7 +20,7 @@ class ToolResponseAdapter(ABC):
         pass
 
 
-class LLMAdapter[T](ABC):
+class LLMAdapter(Generic[T]):
 
     def create_chat_context(self) -> AgentChatContext:
         return AgentChatContext()

@@ -8,7 +8,7 @@ from aiohttp import web
 import asyncio
 
 import logging
-from typing import Callable, Optional, TypeVar
+from typing import Callable, Optional
 
 from .agent import TaskRunner
 
