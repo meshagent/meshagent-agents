@@ -13,7 +13,7 @@ from typing import Callable, Optional
 from .agent import TaskRunner
 
 logger = logging.getLogger("hosting")
-logger.setLevel(logging.INFO)
+
 
 
 class RemoteTaskRunnerServer[T:TaskRunner](WebhookServer):

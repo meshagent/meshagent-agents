@@ -13,9 +13,7 @@ import datetime
 import json
 from openai.types.responses import ResponseStreamEvent
 
-logging.basicConfig()
 logger = logging.getLogger("chat")
-logger.setLevel(logging.INFO)
 
 
 # todo: thread should stop when participant stops?

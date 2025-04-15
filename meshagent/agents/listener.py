@@ -11,7 +11,7 @@ from meshagent.api.websocket_protocol import WebSocketClientProtocol
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+
 
 from meshagent.agents.agent import TaskRunner, AgentChatContext, AgentCallContext
 

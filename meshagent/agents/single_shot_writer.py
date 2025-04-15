@@ -8,9 +8,9 @@ from typing import Optional
 from meshagent.api import Requirement
 
 import logging
-logging.basicConfig()
+
 logger = logging.getLogger("planning_agent")
-logger.setLevel(logging.INFO)
+
 
 
 class SingleShotWriter(Writer):

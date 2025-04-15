@@ -122,9 +122,9 @@ def reasoning_schema(*, description: str, elements: Optional[list[ElementType]] 
 
 from meshagent.api.schema_util import prompt_schema
 import logging
-logging.basicConfig()
+
 logger = logging.getLogger("planning_agent")
-logger.setLevel(logging.INFO)
+
 
 
 class PlanningWriter(Writer):
