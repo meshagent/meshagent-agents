@@ -6,7 +6,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-version = "0.0.11"
+version = "0.0.14"
 name = "sample-chatbot"
 description = "Sample chatbot"
 requires-python = ">=3.9.0"
@@ -14,9 +14,9 @@ license = "Apache-2.0"
 classifiers = []
 keywords = []
 dependencies = [
-  "meshagent-api~=0.0.11",
-  "meshagent-agents~=0.0.11",
-  "meshagent-openai~=0.0.11",
+  "meshagent-api~=0.0.14",
+  "meshagent-agents~=0.0.14",
+  "meshagent-openai~=0.0.14",
 ]
 
 [tool.setuptools.package-data]
