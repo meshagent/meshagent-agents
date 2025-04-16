@@ -18,7 +18,7 @@ from typing import Sequence
 import pydantic_ai
 
 logger = logging.getLogger("pydantic_agent")
-logger.setLevel(logging.INFO)
+
 
 
 def get_pydantic_ai_tool(*, room: RoomClient, tool: Tool, response_adapter: ToolResponseAdapter) -> pydantic_ai.tools.Tool:

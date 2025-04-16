@@ -41,7 +41,7 @@ def _async_debounce(wait):
     return decorator
 
 logger = logging.getLogger("indexer")
-logger.setLevel(logging.INFO)
+
 
 class Chunk:
     def __init__(self, *, text: str, start: int, end: int):

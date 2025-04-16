@@ -9,9 +9,8 @@ import json
 
 import logging
 
-logging.basicConfig()
 logger = logging.getLogger("chat")
-logger.setLevel(logging.INFO)
+
 
 
 # todo: thread should stop when participant stops?

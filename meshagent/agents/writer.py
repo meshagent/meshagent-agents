@@ -8,9 +8,8 @@ import asyncio
 import logging
 from meshagent.agents.hosting import TaskRunner
 
-logging.basicConfig()
 logger = logging.getLogger("writer_agent")
-logger.setLevel(logging.INFO)
+
 
 class WriterContext:
     def __init__(self, room: RoomClient, document: Document, call_context: AgentCallContext, path: str):

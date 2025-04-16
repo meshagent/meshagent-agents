@@ -17,7 +17,7 @@ import asyncio
 from typing import Optional, Dict, Callable, Coroutine
 
 logger = logging.getLogger("agent")
-logger.setLevel(logging.INFO)
+
 
 class AgentException(RoomException):
     pass
