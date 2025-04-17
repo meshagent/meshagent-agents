@@ -164,7 +164,6 @@ class ChatBot(SingleRoomAgent):
         return await self.room.sync.open(path=path)
     
     async def close_thread(self, *, path: str):
-
         return await self.room.sync.close(path=path)
 
 
@@ -360,14 +359,16 @@ class ChatBot(SingleRoomAgent):
 
                    
         finally:
-
-            self.room.developer.log_nowait(type="chatbot.thread.ended", data={ "path" : path })
-    
+            
+            
             llm_messages.close()
 
-            if thread != None:
-                await self.close_thread(path=path)
-   
+            if self.room != None:
+                self.room.developer.log_nowait(type="chatbot.thread.ended", data={ "path" : path })
+    
+                if thread != None:
+                    await self.close_thread(path=path)
+    
 
     def _get_message_channel(self, participant_id: str) -> Chan[RoomMessage]:
         if participant_id not in self._message_channels:
