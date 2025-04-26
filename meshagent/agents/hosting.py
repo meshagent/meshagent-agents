@@ -115,3 +115,4 @@ class RemoteAgentServer[T:SingleRoomAgent](WebhookServer):
         
     async def on_call(self, event: CallEvent):
         await self._spawn(room_name=event.room_name, room_url=event.room_url, token=event.token, arguments=event.arguments)
+
