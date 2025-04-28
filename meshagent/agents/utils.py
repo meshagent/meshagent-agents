@@ -11,7 +11,7 @@ async def generate_json(*, on_behalf_of: Optional[Participant] = None, room: Roo
     for i in range(10):
         agents = await room.agents.list_agents()
         for a in agents:
-            if a.name == "meshagent.planning_responder":
+            if a.name == "meshagent.schema_planner":
                 agent = a
                 break
         
@@ -21,7 +21,7 @@ async def generate_json(*, on_behalf_of: Optional[Participant] = None, room: Roo
         await asyncio.sleep(1)
 
     if agent == None:
-        raise RoomException("unable to locate required agent (meshagent.planning_responder)")
+        raise RoomException("unable to locate required agent (meshagent.schema_planner)")
         
     
     if prompt == None:
@@ -30,7 +30,7 @@ async def generate_json(*, on_behalf_of: Optional[Participant] = None, room: Roo
     validate_openai_schema(output_schema)
     return await room.agents.ask(
         on_behalf_of=on_behalf_of,
-        agent="meshagent.planning_responder",
+        agent="meshagent.schema_planner",
         requires = requires,
         arguments = {
             "prompt": prompt,
