@@ -250,7 +250,7 @@ class PlanningWriter(Writer):
  
 class PlanningResponder(TaskRunner):
 
-    def __init__(self, *, name:str, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, output_schema: dict,  max_iterations : int = 100, toolkits: Optional[list[Toolkit]] = None, title: Optional[str] = None, description: Optional[str] = None, requires: Optional[list[Requirement]] = None, supports_tools : bool = True, input_prompt: bool = True, use_terminate_tool: bool = False, rules: Optional[list[str]] = None, labels: Optional[list[str]] = None):
+    def __init__(self, *, name:str, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, output_schema: dict,  max_iterations : int = 100, toolkits: Optional[list[Toolkit]] = None, title: Optional[str] = None, description: Optional[str] = None, requires: Optional[list[Requirement]] = None, supports_tools : bool = True, input_prompt: bool = True, rules: Optional[list[str]] = None, labels: Optional[list[str]] = None):
         if isinstance(output_schema, dict) == False:
             raise Exception("schema must be a dict, got: {type}".format(type=type(output_schema)))
 
@@ -295,8 +295,6 @@ class PlanningResponder(TaskRunner):
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter 
 
-        self._use_terminate_tool = use_terminate_tool
-
     async def init_chat_context(self):
         chat = self._llm_adapter.create_chat_context()
 
@@ -322,39 +320,12 @@ class PlanningResponder(TaskRunner):
                 self.parent._responses[self.context] = kwargs
                 return TextResponse(text="the response was sent")
             
-        terminated = False
-
-        class ExitTool(Tool):
-            def __init__(self):
-                super().__init__(
-                    name="terminate",
-                    title="terminate", 
-                    description="terminates the agent, the agent will no longer be available",     
-                    input_schema={
-                        "type" : "object",
-                        "required" : [],
-                        "additionalProperties" : False,
-                        "properties" : {}
-                    }
-                )
-
-            async def execute(self, *, context: ToolContext, **kwargs):
-                nonlocal terminated
-                terminated = True
-                return TextResponse(text="the process was terminated")
-        
-        use_terminate_tool = self._use_terminate_tool
-        
-
         class ResponseToolkit(Toolkit):
             def __init__(self, output_schema, context, parent):
 
                 tools = [    
                     ResponseTool(output_schema=output_schema, context=context, parent=parent)
                 ]
-
-                if use_terminate_tool:
-                    tools.append(ExitTool())
 
                 super().__init__(
                     name="meshagent.responder",
@@ -372,7 +343,7 @@ class PlanningResponder(TaskRunner):
         based on what you know know, either execute the next task or formulate a new plan. If you have sufficient information to complete the task, return a final answer.
         """
     
-        rs = reasoning_schema(description="uses tools", elements=[], has_done_property=self._use_terminate_tool == False, has_abort=self._use_terminate_tool == False).to_json()
+        rs = reasoning_schema(description="uses tools", elements=[], has_done_property=True, has_abort=True).to_json()
 
         if self._input_prompt:
             prompt = arguments["prompt"]
@@ -380,7 +351,7 @@ class PlanningResponder(TaskRunner):
 
         room = context.room
         i = 0
-        while i < self._max_iterations and not terminated:
+        while i < self._max_iterations:
             i += 1
             
             try:
