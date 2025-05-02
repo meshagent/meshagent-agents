@@ -7,6 +7,7 @@ thread_schema = MeshSchema(
             tag_name="thread", 
             description="a thread of messages",
             properties=[
+                ValueProperty(name="name", description="name of the tread", type="string"),
                 ChildProperty(name="properties", description="the messages in the thread", ordered=True, child_tag_names=[
                     "members", "messages"
                 ]),
