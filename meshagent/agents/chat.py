@@ -269,6 +269,10 @@ class ChatBot(SingleRoomAgent):
                                             chat_context.append_assistant_message(msg)
                                         else:
                                             chat_context.append_user_message(msg)
+
+                                        for child in element.get_children():
+                                            if child.tag_name == "file":
+                                                chat_context.append_assistant_message(f"the user attached a file with the path '{child.get_attribute("path")}'")
                         
                         if doc_messages == None:
                             raise Exception("thread was not properly initialized")
@@ -306,7 +310,7 @@ class ChatBot(SingleRoomAgent):
 
                             for attachment in attachments:
 
-                                chat_context.append_assistant_message(message=f"the user attached a file '{attachment["filename"]}' with the content: '{attachment["content"]}'")
+                                chat_context.append_assistant_message(message=f"the user attached a file at the path '{attachment["path"]}'")
                                 
 
                             chat_context.append_user_message(message=text)
@@ -334,7 +338,7 @@ class ChatBot(SingleRoomAgent):
                             chat=chat_context,
                             thread=thread,
                             participants=get_thread_participants(room=self.room, thread=thread)
-                        )                        
+                        )
 
                     def handle_event(evt):
                         llm_messages.send_nowait(evt)
