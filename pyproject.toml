@@ -22,9 +22,24 @@ dependencies = [
   "meshagent-openai~=0.0.20",
   "pydantic~=2.11.1",
   "pydantic-ai~=0.0.48",
-  "chonkie~=0.5.1",
-  "chonkie[semantic]~=0.5.1",
-  "chonkie[openai]~=0.5.1"
+]
+
+[project.optional-dependencies]
+all = [
+    "meshagent-api[all]~=0.0.20",
+    "chonkie~=0.5.1",
+    "chonkie[semantic]~=0.5.1",
+    "chonkie[openai]~=0.5.1"
+]
+
+sync = [
+    "meshagent-api[sync]~=0.0.20",
+]
+
+rag = [
+    "chonkie~=0.5.1",
+    "chonkie[semantic]~=0.5.1",
+    "chonkie[openai]~=0.5.1"
 ]
 
 [project.urls]
