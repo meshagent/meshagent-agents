@@ -17,23 +17,23 @@ dependencies = [
   "pyjwt~=2.10.1",
   "pytest~=8.3.5",
   "pytest-asyncio~=0.26.0",
-  "meshagent-api~=0.0.21",
-  "meshagent-tools~=0.0.21",
-  "meshagent-openai~=0.0.21",
+  "meshagent-api~=0.0.22",
+  "meshagent-tools~=0.0.22",
+  "meshagent-openai~=0.0.22",
   "pydantic~=2.11.1",
   "pydantic-ai~=0.0.48",
 ]
 
 [project.optional-dependencies]
 all = [
-    "meshagent-api[all]~=0.0.21",
+    "meshagent-api[all]~=0.0.22",
     "chonkie~=0.5.1",
     "chonkie[semantic]~=0.5.1",
     "chonkie[openai]~=0.5.1"
 ]
 
 sync = [
-    "meshagent-api[sync]~=0.0.21",
+    "meshagent-api[sync]~=0.0.22",
 ]
 
 rag = [
