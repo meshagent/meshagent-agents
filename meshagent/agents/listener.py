@@ -37,7 +37,7 @@ class Listener(TaskRunner):
                 "properties" : {
                     "path" : {
                         "type" : "string",
-                        "description" : "the path of the document to proofread"
+                        "description" : "the path of the document to listen to"
                     }
                 }
             },
