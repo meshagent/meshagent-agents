@@ -14,14 +14,12 @@ logger = logging.getLogger("chat")
 
 
 class Worker(SingleRoomAgent):
-    def __init__(self, *, queue: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
+    def __init__(self, *, queue: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None):
         super().__init__(
             name=name,
             title=title,
             description=description,
             requires=requires,
-            output_schema=None,
-            supports_tools=supports_tools
         )
 
         self._queue = queue
@@ -50,7 +48,7 @@ class Worker(SingleRoomAgent):
         await super().start(room=room)
 
         
-        self._main_task = asyncio.create_task(self.run())
+        self._main_task = asyncio.create_task(self.run(room=room))
 
     async def stop(self):
 
@@ -85,7 +83,8 @@ class Worker(SingleRoomAgent):
 
             message = await room.queues.receive(name=self._queue, create=True, wait=True)
             if message != None:
-
+                
+                logger.info(f"received message on worker queue {message}")
                 try:
 
                     chat_context = await self.init_chat_context()

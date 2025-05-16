@@ -5,6 +5,7 @@ from email import message_from_bytes
 from email.message import EmailMessage
 from email.policy import default
 import email.utils
+from meshagent.api import ParticipantToken
 
 from meshagent.api import RoomClient
 
@@ -34,7 +35,12 @@ def create_reply_email_message(*, message: dict, from_address: str, body: str) -
     if not subject.startswith("RE:"):
         subject = "RE: " + subject
 
+    _, addr = email.utils.parseaddr(from_address) 
+    domain = addr.split("@")[-1].lower()
+    id = f"<{uuid.uuid4()}@{domain}>"
+
     msg = EmailMessage()
+    msg["Message-ID"] = id
     msg["Subject"] = subject
     msg["From"] = from_address
     msg["To"] = message.get("reply_to")
@@ -139,7 +145,11 @@ async def save_email_message(*, room: RoomClient, content: bytes, role: MessageR
     finally:
         await room.storage.close(handle=handle)
 
-    try:
+    # create email table if it doesn't exist
+    tables = await room.database.list_tables()
+
+    if "emails" not in tables:
+
         await room.database.create_table_with_schema(
             name="emails",
             schema={
@@ -150,9 +160,6 @@ async def save_email_message(*, room: RoomClient, content: bytes, role: MessageR
         )
 
         await room.database.create_scalar_index(table="emails", column="id")
-        
-    except Exception as e:
-        ...
 
     
     await room.database.insert(table="emails", records=[ { "id" : message_id, "json" : json.dumps(queued_message) } ])
@@ -200,7 +207,8 @@ class SmtpConfiguration:
 class MailWorker(Worker):
 
     def __init__(self, *, 
-        queue, name,
+        queue: str = "email", 
+        name,
         title=None,
         description=None,
         requires=None,
@@ -208,17 +216,22 @@ class MailWorker(Worker):
         tool_adapter = None,
         toolkits = None,
         rules = None,
-        supports_tools = True,
-        email_address: str,
+        domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "meshagent.com"),
         smtp: Optional[SmtpConfiguration] = None):
 
         if smtp == None:
             smtp = SmtpConfiguration()
 
-        self._email_address = email_address
+        self._domain = domain
         self._smtp = smtp
-        super().__init__(queue=queue, name=name, title=title, description=description, requires=requires, llm_adapter=llm_adapter, tool_adapter=tool_adapter, toolkits=toolkits, rules=rules, supports_tools=supports_tools)
+        super().__init__(queue=queue, name=name, title=title, description=description, requires=requires, llm_adapter=llm_adapter, tool_adapter=tool_adapter, toolkits=toolkits, rules=rules)
 
+    async def start(self, *, room):
+        
+        await super().start(room=room)
+
+        token = ParticipantToken.from_jwt(room.protocol.token, validate=False)
+        self._email_address = room_address(project_id=token.project_id, room_name=room.room_name, domain=self._domain)
 
     async def append_message_context(self, *, room, message, chat_context):
         
@@ -244,12 +257,17 @@ class MailWorker(Worker):
     
     async def process_message(self, *, chat_context, room, message, toolkits):
         
-        body = await super().process_message(chat_context, room=room, message=message, toolkits=toolkits)
+        logger.info(f"processing message {message}")
+        body = await super().process_message(chat_context=chat_context, room=room, message=message, toolkits=toolkits)
 
         msg = create_reply_email_message(message=message, from_address=self._email_address, body=body)
 
-        await save_email_message(room=room, content=msg.as_bytes(), role="agent")
+        
+        reply_msg_dict = await save_email_message(room=room, content=msg.as_bytes(), role="agent")
 
+        logger.info(f"replying with message {reply_msg_dict}")
+        
+       
         username = self._smtp.username
         if username == None:
             username = self.room.local_participant.get_attribute("name")
