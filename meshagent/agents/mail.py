@@ -333,5 +333,5 @@ def decompress_uuid(compressed_uuid: str) -> str:
     return standard_uuid
 
 
-def room_address(*, project_id: str, room_name: str, domain: str = "meshagent.com"):
+def room_address(*, project_id: str, room_name: str, domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "meshagent.com")):
     return f"{compress_uuid(project_id)}+{room_name}@{domain}"
