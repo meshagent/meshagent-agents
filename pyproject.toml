@@ -29,11 +29,16 @@ all = [
     "meshagent-api[all]~=0.0.22",
     "chonkie~=0.5.1",
     "chonkie[semantic]~=0.5.1",
-    "chonkie[openai]~=0.5.1"
+    "chonkie[openai]~=0.5.1",
+    "aiosmtplib~=4.0.1"
 ]
 
 sync = [
     "meshagent-api[sync]~=0.0.22",
+]
+
+mail = [
+   "aiosmtplib~=4.0.1"
 ]
 
 rag = [

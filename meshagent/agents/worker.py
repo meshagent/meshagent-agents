@@ -1,22 +1,20 @@
-from .agent import TaskRunner, AgentCallContext
+from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant
+from meshagent.agents import AgentChatContext
 from meshagent.tools import Toolkit
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
 from typing import Optional
 import json
-
+from meshagent.tools import ToolContext
 import logging
 
 logger = logging.getLogger("chat")
 
 
-
-# todo: thread should stop when participant stops?
-
-class Worker(TaskRunner):
-    def __init__(self, *, queue: str, prompt: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
+class Worker(SingleRoomAgent):
+    def __init__(self, *, queue: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
         super().__init__(
             name=name,
             title=title,
@@ -27,7 +25,6 @@ class Worker(TaskRunner):
         )
 
         self._queue = queue
-        self._prompt = prompt
 
         if toolkits == None:
             toolkits = []
@@ -44,71 +41,66 @@ class Worker(TaskRunner):
             rules = []
 
         self._rules = rules
+        self._done = False
+       
 
+    async def start(self, *, room: RoomClient):
+        self._done = False
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict):
+        await super().start(room=room)
+
         
-        queue = self._queue
-        prompt = self._prompt
+        self._main_task = asyncio.create_task(self.run())
 
-        step_schema = {
-            "type" : "object",
-            "required" : ["text","finished"],
-            "additionalProperties" : False, 
-            "description" : "execute a step",
-            "properties" : {
-                "text" : {
-                    "description" : "a reply to the user or status to display during an intermediate step",
-                    "type" : "string"
-                },
-                "finished" : {
-                    "description" : "whether the agent has finished answering the user's last message, also should be set to true if we get stuck in a loop, or if the user did not make a request",
-                    "type" : "boolean"
-                }
-            }
-        }
+    async def stop(self):
+
+        self._done = True
+
+        await asyncio.gather(self._main_task)
+
+        await super().stop()
+
+
+    async def append_message_context(self, *, room: RoomClient, message: dict, chat_context: AgentChatContext):
+        chat_context.append_user_message(message=json.dumps(message))
         
-        # todo: add graceful exit 
+    async def process_message(self, *, chat_context: AgentChatContext, room: RoomClient, message: dict, toolkits: list[Toolkit]):
 
-        while True:
+        return await self._llm_adapter.next(
+            context=chat_context,
+            room=room,
+            toolkits=toolkits,
+            tool_adapter=self._tool_adapter,
+        )
 
-            message = await self.room.queues.receive(name=queue, create=True, wait=True)
+
+    async def run(self, *, room: RoomClient):
+
+        toolkits = [
+            *await self.get_required_toolkits(ToolContext(room=room, caller=room.local_participant)),
+            *self._toolkits
+        ]
+        
+        while not self._done:
+
+            message = await room.queues.receive(name=self._queue, create=True, wait=True)
             if message != None:
-                
-                # for each message, create a new chat context
 
-                chat_context = await self.init_chat_context()
-
-            
-                chat_context.append_rules(
-                    rules=[
-                        *self._rules,
-                    ]
-                )
-                
-                chat_context.append_user_message(message=prompt)
-                chat_context.append_user_message(message=json.dumps(message))
-                
                 try:
-                    while True:
 
-                        tool_target = context.caller
-                        if context.on_behalf_of != None:
-                            tool_target = context.on_behalf_of
+                    chat_context = await self.init_chat_context()
 
-                        response = await self._llm_adapter.next(
-                            context=chat_context,
-                            room=self._room,
-                            toolkits=context.toolkits,
-                            tool_adapter=self._tool_adapter,
-                            output_schema=step_schema,
-                        )
-
-                        if response["finished"] or len(context.toolkits) == 0:
-                            break
-                        else:
-                            chat_context.append_user_message(message="proceed to the next step if you are ready")
+                    chat_context.append_rules(
+                        rules=[
+                            *self._rules,
+                        ]
+                    )
                     
+                    await self.append_message_context(room=room, message=message, chat_context=chat_context)
+                        
+
+                    await self.process_message(chat_context=chat_context, room=room, message=message, toolkits=toolkits)
+       
                 except Exception as e:
 
                     logger.error(f"Failed to process a message {message}", exc_info=e)
