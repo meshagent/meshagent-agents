@@ -1,6 +1,7 @@
 from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant
+from meshagent.agents import AgentChatContext
 from meshagent.tools import Toolkit
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
@@ -11,8 +12,9 @@ import logging
 
 logger = logging.getLogger("chat")
 
+
 class Worker(SingleRoomAgent):
-    def __init__(self, *, queue: str, prompt: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
+    def __init__(self, *, queue: str,  name, title = None, description = None, requires = None, llm_adapter: LLMAdapter, tool_adapter:  Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, supports_tools: bool = True):
         super().__init__(
             name=name,
             title=title,
@@ -23,7 +25,6 @@ class Worker(SingleRoomAgent):
         )
 
         self._queue = queue
-        self._prompt = prompt
 
         if toolkits == None:
             toolkits = []
@@ -59,23 +60,13 @@ class Worker(SingleRoomAgent):
 
         await super().stop()
 
-    async def process_message(self, *, room: RoomClient, message: dict, toolkits: list[Toolkit]):
 
-        prompt = self._prompt
-
-        chat_context = await self.init_chat_context()
-    
-        chat_context.append_rules(
-            rules=[
-                *self._rules,
-            ]
-        )
-        
-        chat_context.append_user_message(message=prompt)
+    async def append_message_context(self, *, room: RoomClient, message: dict, chat_context: AgentChatContext):
         chat_context.append_user_message(message=json.dumps(message))
+        
+    async def process_message(self, *, chat_context: AgentChatContext, room: RoomClient, message: dict, toolkits: list[Toolkit]):
 
-            
-        await self._llm_adapter.next(
+        return await self._llm_adapter.next(
             context=chat_context,
             room=room,
             toolkits=toolkits,
@@ -83,10 +74,12 @@ class Worker(SingleRoomAgent):
         )
 
 
-
     async def run(self, *, room: RoomClient):
 
-        toolkits = await self.get_required_toolkits(ToolContext(room=room, caller=room.local_participant))
+        toolkits = [
+            *await self.get_required_toolkits(ToolContext(room=room, caller=room.local_participant)),
+            *self._toolkits
+        ]
         
         while not self._done:
 
@@ -95,10 +88,19 @@ class Worker(SingleRoomAgent):
 
                 try:
 
-                    await self.process_message(room=room, message=message, toolkits=toolkits)
+                    chat_context = await self.init_chat_context()
+
+                    chat_context.append_rules(
+                        rules=[
+                            *self._rules,
+                        ]
+                    )
+                    
+                    await self.append_message_context(room=room, message=message, chat_context=chat_context)
+                        
+
+                    await self.process_message(chat_context=chat_context, room=room, message=message, toolkits=toolkits)
        
                 except Exception as e:
 
                     logger.error(f"Failed to process a message {message}", exc_info=e)
-
-                
