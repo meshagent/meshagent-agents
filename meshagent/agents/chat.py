@@ -196,7 +196,7 @@ class ChatBot(SingleRoomAgent):
                 for participant in self._room.messaging.get_participants():
                     logger.info(f"sending event {evt.type} to {participant.get_attribute("name")}")
 
-                    self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
+                    # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
 
                 if evt.type == "response.content_part.added":
                     partial = ""
@@ -304,8 +304,7 @@ class ChatBot(SingleRoomAgent):
 
                         if chat_with_participant.id == received.from_participant_id:
                             self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
-                    
-                        
+
                             attachments = received.message.get("attachments", [])
 
                             for attachment in attachments:
