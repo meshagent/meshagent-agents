@@ -185,6 +185,7 @@ async def load_thread(*, room: RoomClient, message: dict, thread: list[dict]):
             logger.warning(f"message not found {in_reply_to}")
 
 
+
 class SmtpConfiguration:
     def __init__(self, username: Optional[str] = None, password: Optional[str] = None, port: Optional[int] = None, hostname: Optional[str] = None):
         if username == None:
