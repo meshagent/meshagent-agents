@@ -321,12 +321,8 @@ class ChatBot(SingleRoomAgent):
                                 if thread == None:
 
                                     self.room.developer.log_nowait(type="thread is not open", data={})
-
                                     break
 
-
-                                
-                                
 
                                 for participant in get_thread_participants(room=self._room, thread=thread):
                                     # TODO: async gather

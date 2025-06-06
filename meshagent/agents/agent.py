@@ -3,6 +3,7 @@ from copy import deepcopy
 
 from typing import Optional
 
+from meshagent.api.messaging import unpack_message, pack_message
 from meshagent.api.room_server_client import RoomException, RequiredToolkit, Requirement, RequiredSchema
 from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry, JsonResponse
 from meshagent.api.protocol import Protocol
@@ -376,7 +377,7 @@ class TaskRunner(SingleRoomAgent):
         
         async def worker():
             # Decode and parse the message
-            message = json.loads(data.decode('utf-8'))
+            message, _ = unpack_message(data)
             logger.info("agent got message %s", message)
             args = message["arguments"]
             task_id = message["task_id"] 
@@ -456,7 +457,7 @@ class TaskRunner(SingleRoomAgent):
           
                 response = await self.ask(context=context, arguments=args)
                 
-                await protocol.send(type="agent.ask_response", data=json.dumps({ 
+                await protocol.send(type="agent.ask_response", data=pack_message({ 
                     "task_id" : task_id,
                     "answer" : response,
                     "caller_context" : {
@@ -468,7 +469,7 @@ class TaskRunner(SingleRoomAgent):
                 logger.error("Task runner failed to complete task", exc_info=e)
                 if chat_context != None:
                         
-                    await protocol.send(type="agent.ask_response", data=json.dumps({
+                    await protocol.send(type="agent.ask_response", data=pack_message({
                         "task_id" : task_id,
                         "error" : str(e),
                         "caller_context" : {
@@ -476,7 +477,7 @@ class TaskRunner(SingleRoomAgent):
                         }
                     }))
                 else:
-                    await protocol.send(type="agent.ask_response", data=json.dumps({
+                    await protocol.send(type="agent.ask_response", data=pack_message({
                         "task_id" : task_id,
                         "error" : str(e),
                     }))
