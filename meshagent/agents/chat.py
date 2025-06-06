@@ -440,6 +440,7 @@ class ChatBot(SingleRoomAgent):
 
                 messages = self._get_message_channel(participant_id=message.from_participant_id)
                 if message.type == "chat" or message.type == "opened":
+                    path = message.message["path"]
 
                     span.set_attributes({
                         "path" : path
@@ -447,7 +448,6 @@ class ChatBot(SingleRoomAgent):
 
                     messages.send_nowait(message)
 
-                    path = message.message["path"]
                     logger.info(f"received message for thread {path}")
                     
                     if path not in self._thread_tasks or self._thread_tasks[path].cancelled:
