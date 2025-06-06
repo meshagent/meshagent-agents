@@ -313,6 +313,7 @@ class ChatBot(SingleRoomAgent):
 
                              with tracer.start_as_current_span("chatbot.handle_chat") as span:
                                 
+                                text = received.message["text"]
                                 span.set_attributes({
                                     "text" : text
                                 })
@@ -324,7 +325,7 @@ class ChatBot(SingleRoomAgent):
                                     break
 
 
-                                text = received.message["text"]
+                                
                                 
 
                                 for participant in get_thread_participants(room=self._room, thread=thread):
