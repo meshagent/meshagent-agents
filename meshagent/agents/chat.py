@@ -13,6 +13,10 @@ import datetime
 import json
 from openai.types.responses import ResponseStreamEvent
 
+from opentelemetry import trace
+
+tracer = trace.get_tracer("meshagent.chatbot")
+
 logger = logging.getLogger("chat")
 
 
@@ -102,14 +106,22 @@ class ChatBot(SingleRoomAgent):
 
     async def _send_and_save_chat(self, messages: Element, path: str, to: RemoteParticipant, id: str, text: str):
 
-        await self.room.messaging.send_message(to=to, type="chat", message={  "path" : path, "text" : text })
+        with tracer.start_as_current_span("chatbot.say") as span:
 
-        messages.append_child(tag_name="message", attributes={
-            "id" : id,
-            "text" : text,
-            "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
-            "author_name" : self.room.local_participant.get_attribute("name"),
-        })
+            span.set_attributes({
+                "id" : id,
+                "path" : path,
+                "text" : text
+            })
+
+            await self.room.messaging.send_message(to=to, type="chat", message={  "path" : path, "text" : text })
+
+            messages.append_child(tag_name="message", attributes={
+                "id" : id,
+                "text" : text,
+                "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
+                "author_name" : self.room.local_participant.get_attribute("name"),
+            })
         
      
     async def greet(self, *, messages: Element, path: str, chat_context: AgentChatContext, participant: RemoteParticipant):
@@ -224,108 +236,126 @@ class ChatBot(SingleRoomAgent):
         llm_task.add_done_callback(done_processing_llm_events)
 
         try:
+
             while True:
-                
+
                 while True:
 
                     received = await messages.recv()
 
-                    chat_with_participant = None
-                    for participant in self._room.messaging.get_participants():
-                        if participant.id == received.from_participant_id:
-                            chat_with_participant = participant
-                            break
-                        
-                    if chat_with_participant == None:
-                        logger.warning("participant does not have messaging enabled, skipping message")
-                        continue
-                
-                    if current_file != chat_with_participant.get_attribute("current_file"):
-                        logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
-                        current_file = chat_with_participant.get_attribute("current_file")
-                        
-                    if current_file != None:
-                        chat_context.append_assistant_message(message=f"the user is currently viewing the file at the path: {current_file}")
+                    with tracer.start_as_current_span("chatbot.thread.receive") as span:
 
-                    elif current_file != None:
-                        chat_context.append_assistant_message(message=f"the user is not current viewing any files")
+                        span.set_attributes({
+                            "from_participant_id" : received.from_participant_id,
+                            "type" : received.type,
+                            "has_attachment" : received.attachment != None,
+                        })
 
-                
-                    if thread == None:
-                        thread = await self.open_thread(path=path)
-                        
-                        for prop in thread.root.get_children():
-                            
-                            if prop.tag_name == "messages":
-
-                                doc_messages = prop
-                                
-                                for element in doc_messages.get_children():
-
-                                    if isinstance(element, Element):
-                                        
-                                        msg = element["text"]
-                                        if element["author_name"] == self.room.local_participant.get_attribute("name"):
-                                            chat_context.append_assistant_message(msg)
-                                        else:
-                                            chat_context.append_user_message(msg)
-
-                                        for child in element.get_children():
-                                            if child.tag_name == "file":
-                                                chat_context.append_assistant_message(f"the user attached a file with the path '{child.get_attribute("path")}'")
-                        
-                        if doc_messages == None:
-                            raise Exception("thread was not properly initialized")
-
-
-                    if received.type == "opened":
-                        
-                        if opened == False:
-                            
-                            opened = True
-                            
-                            await self.greet(path=path, chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
-
-                    if received.type == "chat":
-                        
-                        if thread == None:
-
-                            self.room.developer.log_nowait(type="thread is not open", data={})
-
-                            break
-
-
-                        text = received.message["text"]
-                        
-
-                        for participant in get_thread_participants(room=self._room, thread=thread):
-                            # TODO: async gather
-                            self._room.messaging.send_message_nowait(to=participant, type="thinking", message={"thinking":True, "path": path})
-
-                        if chat_with_participant.id == received.from_participant_id:
-                            self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
-
-                            attachments = received.message.get("attachments", [])
-
-                            for attachment in attachments:
-
-                                chat_context.append_assistant_message(message=f"the user attached a file at the path '{attachment["path"]}'")
-                                
-
-                            chat_context.append_user_message(message=text)
-                                
-
-                        # if user is typing, wait for typing to stop
-                        while True:
-                            
-                            if chat_with_participant.id not in self._is_typing:
+                        chat_with_participant = None
+                        for participant in self._room.messaging.get_participants():
+                            if participant.id == received.from_participant_id:
+                                chat_with_participant = participant
                                 break
-                        
-                            await asyncio.sleep(.5)
+                            
+                        if chat_with_participant == None:
+                            logger.warning("participant does not have messaging enabled, skipping message")
+                            continue
+                    
+                        if current_file != chat_with_participant.get_attribute("current_file"):
+                            logger.info(f"participant is now looking at {chat_with_participant.get_attribute("current_file")}")
+                            current_file = chat_with_participant.get_attribute("current_file")
+                            
+                        if current_file != None:
+                            chat_context.append_assistant_message(message=f"the user is currently viewing the file at the path: {current_file}")
 
-                        if messages.empty() == True:
-                            break
-            
+                        elif current_file != None:
+                            chat_context.append_assistant_message(message=f"the user is not current viewing any files")
+
+                    
+                        if thread == None:
+                            with tracer.start_as_current_span("chatbot.open_thread") as span:
+
+                                thread = await self.open_thread(path=path)
+                                
+                                for prop in thread.root.get_children():
+                                    
+                                    if prop.tag_name == "messages":
+
+                                        doc_messages = prop
+                                        
+                                        for element in doc_messages.get_children():
+
+                                            if isinstance(element, Element):
+                                                
+                                                msg = element["text"]
+                                                if element["author_name"] == self.room.local_participant.get_attribute("name"):
+                                                    chat_context.append_assistant_message(msg)
+                                                else:
+                                                    chat_context.append_user_message(msg)
+
+                                                for child in element.get_children():
+                                                    if child.tag_name == "file":
+                                                        chat_context.append_assistant_message(f"the user attached a file with the path '{child.get_attribute("path")}'")
+                                
+                                if doc_messages == None:
+                                    raise Exception("thread was not properly initialized")
+
+
+                        if received.type == "opened":
+                            
+                            if opened == False:
+                                
+                                opened = True
+                                
+                                await self.greet(path=path, chat_context=chat_context, participant=chat_with_participant, messages=doc_messages)
+
+                        if received.type == "chat":
+
+                             with tracer.start_as_current_span("chatbot.handle_chat") as span:
+                                
+                                text = received.message["text"]
+                                span.set_attributes({
+                                    "text" : text
+                                })
+                                
+                                if thread == None:
+
+                                    self.room.developer.log_nowait(type="thread is not open", data={})
+
+                                    break
+
+
+                                
+                                
+
+                                for participant in get_thread_participants(room=self._room, thread=thread):
+                                    # TODO: async gather
+                                    self._room.messaging.send_message_nowait(to=participant, type="thinking", message={"thinking":True, "path": path})
+
+                                if chat_with_participant.id == received.from_participant_id:
+                                    self.room.developer.log_nowait(type="llm.message", data={ "context" : chat_context.id, "participant_id" : self.room.local_participant.id, "participant_name" : self.room.local_participant.get_attribute("name"), "message" : { "content" : {  "role" : "user", "text" : received.message["text"] } } })
+
+                                    attachments = received.message.get("attachments", [])
+
+                                    for attachment in attachments:
+
+                                        chat_context.append_assistant_message(message=f"the user attached a file at the path '{attachment["path"]}'")
+                                        
+
+                                    chat_context.append_user_message(message=text)
+                                        
+
+                                # if user is typing, wait for typing to stop
+                                while True:
+                                    
+                                    if chat_with_participant.id not in self._is_typing:
+                                        break
+                                
+                                    await asyncio.sleep(.5)
+
+                                if messages.empty() == True:
+                                    break
+                    
 
                 try:
 
@@ -401,49 +431,60 @@ class ChatBot(SingleRoomAgent):
         def on_message(message: RoomMessage):
 
             logger.info(f"received message {message.type}")
-              
+            
+            with tracer.start_as_current_span("chatbot.receive") as span:
+               
+                span.set_attributes({
+                    "type" : message.type,
+                    "from_participant_id" : message.from_participant_id
+                })
 
-            messages = self._get_message_channel(participant_id=message.from_participant_id)
-            if message.type == "chat" or message.type == "opened":
-                messages.send_nowait(message)
+                messages = self._get_message_channel(participant_id=message.from_participant_id)
+                if message.type == "chat" or message.type == "opened":
+                    path = message.message["path"]
 
-                path = message.message["path"]
-                logger.info(f"received message for thread {path}")
-                
-                if path not in self._thread_tasks or self._thread_tasks[path].cancelled:
-                     
-                    def thread_done(task: asyncio.Task):
+                    span.set_attributes({
+                        "path" : path
+                    })
 
-                        self._message_channels.pop(message.from_participant_id)
+                    messages.send_nowait(message)
+
+                    logger.info(f"received message for thread {path}")
+                    
+                    if path not in self._thread_tasks or self._thread_tasks[path].cancelled:
+                        
+                        def thread_done(task: asyncio.Task):
+
+                            self._message_channels.pop(message.from_participant_id)
+                            try:
+                                task.result()
+                            except Exception as e:
+                                logger.error(f"The chat thread ended with an error {e}", exc_info=e)
+                        
+                        
+                        task = asyncio.create_task(self._spawn_thread(messages=messages, path=path))
+                        task.add_done_callback(thread_done)
+
+                        self._thread_tasks[path] = task
+
+                elif message.type == "typing":
+                    def callback(task: asyncio.Task):
                         try:
                             task.result()
-                        except Exception as e:
-                            logger.error(f"The chat thread ended with an error {e}", exc_info=e)
+                        except:
+                            pass
                     
-                    
-                    task = asyncio.create_task(self._spawn_thread(messages=messages, path=path))
-                    task.add_done_callback(thread_done)
+                    async def remove_timeout(id: str):
+                        await asyncio.sleep(1)
+                        self._is_typing.pop(id)
 
-                    self._thread_tasks[path] = task
+                    if message.from_participant_id in self._is_typing:
+                        self._is_typing[message.from_participant_id].cancel()
 
-            elif message.type == "typing":
-                def callback(task: asyncio.Task):
-                    try:
-                        task.result()
-                    except:
-                        pass
-                
-                async def remove_timeout(id: str):
-                    await asyncio.sleep(1)
-                    self._is_typing.pop(id)
+                    timeout = asyncio.create_task(remove_timeout(id=message.from_participant_id))
+                    timeout.add_done_callback(callback)
 
-                if message.from_participant_id in self._is_typing:
-                    self._is_typing[message.from_participant_id].cancel()
-
-                timeout = asyncio.create_task(remove_timeout(id=message.from_participant_id))
-                timeout.add_done_callback(callback)
-
-                self._is_typing[message.from_participant_id] = timeout
+                    self._is_typing[message.from_participant_id] = timeout
 
         room.messaging.on("message", on_message)
         
