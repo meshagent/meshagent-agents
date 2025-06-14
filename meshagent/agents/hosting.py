@@ -1,7 +1,8 @@
 import logging
 
 from meshagent.api import websocket_protocol, RoomMessage
-from meshagent.api.webhooks import WebhookServer, RoomStartedEvent, RoomEndedEvent, WebSocketClientProtocol, CallEvent
+from meshagent.api.webhooks import WebhookServer, RoomStartedEvent, RoomEndedEvent, CallEvent
+from meshagent.api import WebSocketClientProtocol
 from meshagent.api.room_server_client import RoomClient
 from meshagent.agents import SingleRoomAgent
 from aiohttp import web
