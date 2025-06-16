@@ -170,17 +170,24 @@ class SingleRoomAgent(Agent):
             elif isinstance(requirement, RequiredSchema):
 
                 if requirement.name not in schemas_by_name:
-                    
+
                     installed = True
 
-                    logger.info(f"Installing required tool {requirement.name}")
-                    
-                    if requirement.name.startswith("https://"):
-                        url = requirement.name
-                    else:    
-                        url = f"{meshagent_base_url()}/schemas/{requirement.name}"
+                    schema_path = f".schemas/{requirement.name}.json"
 
-                    await self._room.agents.make_call(url=url, name=requirement.name, arguments={})
+                   
+                    if await self._room.storage.exists(path=schema_path):
+                        # Schema is already in the room
+                        pass
+                    else:
+                        logger.info(f"Installing required tool {requirement.name}")
+                        
+                        if requirement.name.startswith("https://"):
+                            url = requirement.name
+                        else:
+                            url = f"{meshagent_base_url()}/schemas/{requirement.name}"
+                    
+                        await self._room.agents.make_call(url=url, name=requirement.name, arguments={})
 
             else:
                 raise RoomException("unsupported requirement")

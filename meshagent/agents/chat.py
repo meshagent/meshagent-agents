@@ -3,6 +3,7 @@ from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element, MeshDocument
 from meshagent.tools import Toolkit, ToolContext
 from .adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.openai.tools.responses_adapter import ImageGenerationTool
 import asyncio
 from typing import Optional
 import logging
@@ -11,6 +12,8 @@ import urllib
 import uuid
 import datetime
 import json
+from typing import Literal, Optional
+import base64
 from openai.types.responses import ResponseStreamEvent
 
 from opentelemetry import trace
@@ -20,7 +23,118 @@ tracer = trace.get_tracer("meshagent.chatbot")
 logger = logging.getLogger("chat")
 
 
-# todo: thread should stop when participant stops?
+
+
+class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
+    def __init__(self,
+        *,
+        background: Literal["transparent","opaque","auto"] = None,
+        input_image_mask_url: Optional[str] = None,
+        model: Optional[str] = None,
+        moderation: Optional[str] = None,
+        output_compression: Optional[int] = None,
+        output_format: Optional[Literal["png","webp","jpeg"]] = None,
+        partial_images: Optional[int] = None,
+        quality: Optional[Literal["auto", "low", "medium", "high"]] = None,
+        size: Optional[Literal["1024x1024","1024x1536","1536x1024","auto"]] = None,
+        thread_context: 'ChatThreadContext'
+    ):
+        super().__init__(
+            background=background,
+            input_image_mask_url=input_image_mask_url,
+            model=model,
+            moderation=moderation,
+            output_compression=output_compression,
+            output_format=output_format,
+            partial_images=partial_images,
+            quality=quality,
+            size=size
+        )
+
+        self.thread_context = thread_context
+
+    async def on_image_generation_partial(self, context, *, item_id, output_index, sequence_number, type, partial_image_b64, partial_image_index, size, quality, background, output_format, **extra):
+        
+        output_format = self.output_format
+        if output_format == None:
+            output_format = "png"
+
+        image_name = f"{str(uuid.uuid4())}.{output_format}"
+
+        handle = await context.room.storage.open(path=image_name)
+        await context.room.storage.write(handle=handle, data=base64.b64decode(partial_image_b64))
+        await context.room.storage.close(handle=handle)
+
+
+        messages = None
+
+        for prop in self.thread_context.thread.root.get_children():
+                                
+            if prop.tag_name == "messages":
+
+                messages = prop
+
+        for child in messages.get_children():
+
+            if child.get_attribute("id") == item_id:
+
+                for file in child.get_children():
+                    file.set_attribute("path", image_name)
+
+                return
+
+        message_element = messages.append_child(
+            tag_name="message",                                            
+            attributes={
+                "id" : item_id,
+                "text" : "",
+                "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
+                "author_name" : context.room.local_participant.get_attribute("name"),
+            }
+        )
+        message_element.append_child(tag_name="file", attributes={ "path" : image_name })
+    
+    async def on_image_generated(self, context: ToolContext, *, item_id: str, data: bytes, status: str, size: str, quality: str, background: str, output_format: str, **extra):
+        
+        output_format = self.output_format
+        if output_format == None:
+            output_format = "png"
+
+        image_name = f"{str(uuid.uuid4())}.{output_format}"
+
+        handle = await context.room.storage.open(path=image_name)
+        await context.room.storage.write(handle=handle, data=data)
+        await context.room.storage.close(handle=handle)
+
+
+        messages = None
+
+        for prop in self.thread_context.thread.root.get_children():
+                                
+            if prop.tag_name == "messages":
+
+                messages = prop
+
+        for child in messages.get_children():
+
+            if child.get_attribute("id") == item_id:
+
+                for file in child.get_children():
+                    file.set_attribute("path", image_name)
+
+                return
+        
+        message_element = messages.append_child(
+            tag_name="message",                                            
+            attributes={
+                "id" : item_id,
+                "text" : "",
+                "created_at" : datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
+                "author_name" : context.room.local_participant.get_attribute("name"),
+            }
+        )
+        message_element.append_child(tag_name="file", attributes={ "path" : image_name })
+
 
 def get_thread_participants(*, room: RoomClient, thread: MeshDocument) -> list[RemoteParticipant]:
 
@@ -50,6 +164,7 @@ class ChatThreadContext:
         self.participants = participants
         self.chat = chat
 
+# todo: thread should stop when participant stops?
 class ChatBot(SingleRoomAgent):
     def __init__(self, *, name, title = None, description = None, requires : Optional[list[Requirement]] = None, llm_adapter: LLMAdapter, tool_adapter: Optional[ToolResponseAdapter] = None, toolkits: Optional[list[Toolkit]] = None, rules : Optional[list[str]] = None, auto_greet_message : Optional[str] = None,  empty_state_title : Optional[str] = None, labels: Optional[str] = None):
         
@@ -231,6 +346,7 @@ class ChatBot(SingleRoomAgent):
                     
                 elif evt.type == "response.output_text.done":
                     content_element = None
+                    
 
         llm_task = asyncio.create_task(process_llm_events())
         llm_task.add_done_callback(done_processing_llm_events)
