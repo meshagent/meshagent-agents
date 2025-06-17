@@ -24,7 +24,6 @@ logger = logging.getLogger("chat")
 
 
 
-
 class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
     def __init__(self,
         *,
