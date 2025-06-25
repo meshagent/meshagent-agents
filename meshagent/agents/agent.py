@@ -2,7 +2,6 @@ import json
 from copy import deepcopy
 
 from typing import Optional
-import os
 
 from meshagent.api.messaging import unpack_message, pack_message
 from meshagent.api.room_server_client import RoomException, RequiredToolkit, Requirement, RequiredSchema
@@ -164,10 +163,7 @@ class SingleRoomAgent(Agent):
                     if requirement.name.startswith("https://"):
                         url = requirement.name
                     else:
-                        if os.getenv("MESHAGENT_SESSION_ID") != None:
-                            url = f"{meshagent_base_url()}/toolkits/{requirement.name}"
-                        else:
-                            url = f"{meshagent_base_url()}/tunnel/9000/toolkits/{requirement.name}"
+                        url = f"{meshagent_base_url()}/toolkits/{requirement.name}"
 
                     await self._room.agents.make_call(url=url, name=requirement.name, arguments={})
             
@@ -189,11 +185,8 @@ class SingleRoomAgent(Agent):
                         if requirement.name.startswith("https://"):
                             url = requirement.name
                         else:
-                            if os.getenv("MESHAGENT_SESSION_ID") != None:
-                                url = f"{meshagent_base_url()}/schemas/{requirement.name}"
-                            else:
-                                url = f"{meshagent_base_url()}/tunnel/9000/schemas/{requirement.name}"
-
+                            url = f"{meshagent_base_url()}/schemas/{requirement.name}"
+                    
                         await self._room.agents.make_call(url=url, name=requirement.name, arguments={})
 
             else:
