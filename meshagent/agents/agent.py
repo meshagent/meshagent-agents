@@ -164,7 +164,7 @@ class SingleRoomAgent(Agent):
                     if requirement.name.startswith("https://"):
                         url = requirement.name
                     else:
-                        if os.getenv("MESHAGENT_SESSION_ID") == None:
+                        if os.getenv("MESHAGENT_SESSION_ID") != None:
                             url = f"{meshagent_base_url()}/toolkits/{requirement.name}"
                         else:
                             url = f"{meshagent_base_url()}/tunnel/9000/toolkits/{requirement.name}"
@@ -189,7 +189,7 @@ class SingleRoomAgent(Agent):
                         if requirement.name.startswith("https://"):
                             url = requirement.name
                         else:
-                            if os.getenv("MESHAGENT_SESSION_ID") == None:
+                            if os.getenv("MESHAGENT_SESSION_ID") != None:
                                 url = f"{meshagent_base_url()}/schemas/{requirement.name}"
                             else:
                                 url = f"{meshagent_base_url()}/tunnel/9000/schemas/{requirement.name}"
