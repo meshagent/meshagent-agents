@@ -163,7 +163,7 @@ class SingleRoomAgent(Agent):
                     if requirement.name.startswith("https://"):
                         url = requirement.name
                     else:    
-                        url = f"{meshagent_base_url()}/toolkits/{requirement.name}"
+                        url = f"http://localhost:9000/toolkits/{requirement.name}"
 
                     await self._room.agents.make_call(url=url, name=requirement.name, arguments={})
             
@@ -185,7 +185,7 @@ class SingleRoomAgent(Agent):
                         if requirement.name.startswith("https://"):
                             url = requirement.name
                         else:
-                            url = f"{meshagent_base_url()}/schemas/{requirement.name}"
+                            url = f"http://localhost:9000/schemas/{requirement.name}"
                     
                         await self._room.agents.make_call(url=url, name=requirement.name, arguments={})
 
