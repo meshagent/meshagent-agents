@@ -92,6 +92,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
             }
         )
         message_element.append_child(tag_name="file", attributes={ "path" : image_name })
+
     
     async def on_image_generated(self, context: ToolContext, *, item_id: str, data: bytes, status: str, size: str, quality: str, background: str, output_format: str, **extra):
         
@@ -133,6 +134,9 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
             }
         )
         message_element.append_child(tag_name="file", attributes={ "path" : image_name })
+
+        self.thread_context.chat.append_assistant_message(f"An image was saved at the path {image_name} and displayed to the user")
+   
 
 
 def get_thread_participants(*, room: RoomClient, thread: MeshDocument) -> list[RemoteParticipant]:
@@ -285,8 +289,6 @@ class ChatBot(SingleRoomAgent):
         return context
 
     async def open_thread(self, *, path: str):
-
-
         return await self.room.sync.open(path=path)
     
     async def close_thread(self, *, path: str):
