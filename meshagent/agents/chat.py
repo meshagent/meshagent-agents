@@ -15,6 +15,7 @@ import json
 from typing import Literal, Optional
 import base64
 from openai.types.responses import ResponseStreamEvent
+from asyncio import CancelledError
 
 from opentelemetry import trace
 
@@ -310,6 +311,8 @@ class ChatBot(SingleRoomAgent):
         def done_processing_llm_events(task: asyncio.Task):
             try:
                 task.result()
+            except CancelledError as e:
+                pass
             except Exception as e:
                 logger.error("error sending delta", exc_info=e)
 
@@ -571,6 +574,8 @@ class ChatBot(SingleRoomAgent):
                             self._message_channels.pop(message.from_participant_id)
                             try:
                                 task.result()
+                            except CancelledError as e:
+                                pass
                             except Exception as e:
                                 logger.error(f"The chat thread ended with an error {e}", exc_info=e)
                         
