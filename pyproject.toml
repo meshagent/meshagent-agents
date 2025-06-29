@@ -14,14 +14,13 @@ license = "Apache-2.0"
 classifiers = []
 keywords = []
 dependencies = [
-  "pyjwt~=2.10.1",
-  "pytest~=8.3.5",
-  "pytest-asyncio~=0.26.0",
+  "pyjwt~=2.10",
+  "pytest~=8.3",
+  "pytest-asyncio~=0.26",
   "meshagent-api~=0.0.35",
   "meshagent-tools~=0.0.35",
   "meshagent-openai~=0.0.35",
-  "pydantic~=2.11.1",
-  "pydantic-ai~=0.0.48",
+  "pydantic~=2.11",
   "opentelemetry-distro~=0.54b1"
 ]
 
