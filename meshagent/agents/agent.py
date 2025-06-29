@@ -174,8 +174,7 @@ class SingleRoomAgent(Agent):
                     installed = True
 
                     schema_path = f".schemas/{requirement.name}.json"
-
-                   
+                    
                     if await self._room.storage.exists(path=schema_path):
                         # Schema is already in the room
                         pass

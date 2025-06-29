@@ -39,7 +39,7 @@ class RemoteTaskRunnerServer[T:TaskRunner](WebhookServer):
 
                 def on_message(message: RoomMessage):
                     if message.type == "dismiss":
-                        logger.info(f"dismissed by {message.from_participant_id}")
+                        logger.info(f"dismissed task runner by {message.from_participant_id}")
                         dismissed.set_result(True)
 
                 room.messaging.on("message", on_message)
@@ -81,7 +81,7 @@ class RemoteAgentServer[T:SingleRoomAgent](WebhookServer):
     
     async def _spawn(self, *, room_name: str, room_url: str, token: str, arguments: Optional[dict] = None):
 
-        logger.info(f"room: {room_name} url: {room_url} token: {token} arguments: {arguments}")
+        logger.info(f"spawning agent on room: {room_name} url: {room_url} arguments: {arguments}")
         agent = self._create_agent(arguments=arguments)
 
         async def run():
@@ -91,7 +91,7 @@ class RemoteAgentServer[T:SingleRoomAgent](WebhookServer):
 
                 def on_message(message: RoomMessage):
                     if message.type == "dismiss":
-                        logger.info(f"dismissed by {message.from_participant_id}")
+                        logger.info(f"dismissed agent by {message.from_participant_id}")
                         dismissed.set_result(True)
 
                 room.messaging.on("message", on_message)
