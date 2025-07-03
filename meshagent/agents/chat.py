@@ -378,7 +378,7 @@ class ChatBot(SingleRoomAgent):
                     
                     logger.info(f"waiting for message on thread {path}")
                     received = await messages.recv()
-                    logger.info(f"received for message on thread {path}: {received.type}")
+                    logger.info(f"received message on thread {path}: {received.type}")
 
                     chat_with_participant = None
                     for participant in self._room.messaging.get_participants():
