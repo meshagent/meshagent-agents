@@ -18,3 +18,12 @@ The ``Worker`` is a queue-based ``SingleRoomAgent`` that processes queued messag
 
 ### ChatBot
 The ``ChatBot`` is a conversational agent derived from the ``SingleRoomAgent``. It wires an LLMAdapter, optoinal tools, and manages chat threads for each user. This means multiple users can be in the same room interacting with a chat agent, but each user will have private messages with the agent. Check out the [Build and Deploy a Chat Agent](https://docs.meshagent.com/agents/standard/buildanddeploychatbot) example to learn how to create a simple Chat Agent without tools then add built-in MeshAgent tools and custom tools to the agent.
+
+---
+### Learn more about MeshAgent on our website or check out the docs for additional examples!
+
+**Website**: [www.meshagent.com](https://www.meshagent.com/)
+
+**Documentation**: [docs.meshagent.com](https://docs.meshagent.com/)
+
+---
