@@ -17,14 +17,14 @@ class AgentChatContext:
         previous_response_id: Optional[str] = None,
     ):
         self.id = str(uuid.uuid4())
-        if messages == None:
+        if messages is None:
             messages = list[dict]()
         self._messages = messages.copy()
-        if system_role == None:
+        if system_role is None:
             system_role = "system"
         self._system_role = system_role
 
-        if previous_messages == None:
+        if previous_messages is None:
             previous_messages = list[dict]()
 
         self._previous_response_id = previous_response_id
@@ -59,7 +59,7 @@ class AgentChatContext:
                 system_message = m
                 break
 
-        if system_message == None:
+        if system_message is None:
             system_message = {"role": self.system_role, "content": ""}
             self.messages.insert(0, system_message)
 
@@ -116,7 +116,7 @@ class AgentCallContext:
         on_behalf_of: Optional[Participant] = None,
     ):
         self._room = room
-        if toolkits == None:
+        if toolkits is None:
             toolkits = list[Toolkit]()
         self._toolkits = toolkits
         self._chat = chat

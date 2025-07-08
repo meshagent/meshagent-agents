@@ -87,20 +87,20 @@ class Agent:
         labels: Optional[list[str]] = None,
     ):
         self._name = name
-        if title == None:
+        if title is None:
             title = name
         self._title = title
-        if description == None:
+        if description is None:
             description = ""
 
         self._description = description
-        if requires == None:
+        if requires is None:
             requires = []
 
         self.init_requirements(requires)
         self._requires = requires
 
-        if labels == None:
+        if labels is None:
             labels = []
 
         self._labels = labels
@@ -160,7 +160,7 @@ class SingleRoomAgent(Agent):
         self._room = None
 
     async def start(self, *, room: RoomClient) -> None:
-        if self._room != None:
+        if self._room is not None:
             raise RoomException("room is already started")
 
         self._room = room
@@ -196,7 +196,7 @@ class SingleRoomAgent(Agent):
 
         for requirement in self.requires:
             if isinstance(requirement, RequiredToolkit):
-                if toolkit_factory(requirement.name) != None:
+                if toolkit_factory(requirement.name) is not None:
                     # no need to install something we can create from a factory
                     continue
 
@@ -247,7 +247,7 @@ class SingleRoomAgent(Agent):
 
     async def get_required_toolkits(self, context: ToolContext) -> list[Toolkit]:
         tool_target = context.caller
-        if context.on_behalf_of != None:
+        if context.on_behalf_of is not None:
             tool_target = context.on_behalf_of
 
         toolkits_by_name = dict[str, ToolkitDescription]()
@@ -263,7 +263,7 @@ class SingleRoomAgent(Agent):
 
         for required_toolkit in self.requires:
             if isinstance(required_toolkit, RequiredToolkit):
-                if toolkit_factory(required_toolkit.name) != None:
+                if toolkit_factory(required_toolkit.name) is not None:
                     toolkit = await toolkit_factory(required_toolkit.name)(
                         context, required_toolkit
                     )
@@ -271,14 +271,14 @@ class SingleRoomAgent(Agent):
                     continue
 
                 toolkit = toolkits_by_name.get(required_toolkit.name, None)
-                if toolkit == None:
+                if toolkit is None:
                     raise RoomException(
                         f"unable to locate required toolkit {required_toolkit.name}"
                     )
 
                 room_tools = list[RoomTool]()
 
-                if required_toolkit.tools == None:
+                if required_toolkit.tools is None:
                     for tool_description in toolkit.tools:
                         tool = RoomTool(
                             on_behalf_of_id=tool_target.id,
@@ -300,7 +300,7 @@ class SingleRoomAgent(Agent):
 
                     for required_tool in required_toolkit.tools:
                         tool_description = tools_by_name.get(required_tool, None)
-                        if tool_description == None:
+                        if tool_description is None:
                             raise RoomException(
                                 f"unable to locate required tool {required_tool}"
                             )
@@ -353,19 +353,19 @@ class TaskRunner(SingleRoomAgent):
             labels=labels,
         )
 
-        if toolkits == None:
+        if toolkits is None:
             toolkits = []
 
         self._toolkits = toolkits
 
         self._registration_id = None
 
-        if input_schema == None:
+        if input_schema is None:
             input_schema = no_arguments_schema(
                 description="execute the agent",
             )
 
-        if supports_tools == None:
+        if supports_tools is None:
             supports_tools = False
 
         self._supports_tools = supports_tools
@@ -376,7 +376,7 @@ class TaskRunner(SingleRoomAgent):
         validate(arguments, self.input_schema)
 
     async def validate_response(self, response: dict):
-        if self.output_schema != None:
+        if self.output_schema is not None:
             validate(response, self.output_schema)
 
     async def ask(self, *, context: AgentCallContext, arguments: dict) -> dict:
@@ -479,18 +479,18 @@ class TaskRunner(SingleRoomAgent):
                         on_behalf_of = participant
                         break
 
-                if caller == None:
+                if caller is None:
                     caller = RemoteParticipant(
                         id=message["caller_id"], role="user", attributes={}
                     )
 
-                if on_behalf_of_id != None and on_behalf_of == None:
+                if on_behalf_of_id is not None and on_behalf_of is None:
                     on_behalf_of = RemoteParticipant(
                         id=message["on_behalf_of_id"], role="user", attributes={}
                     )
 
                 tool_target = caller
-                if on_behalf_of != None:
+                if on_behalf_of is not None:
                     tool_target = on_behalf_of
 
                 toolkits = [
@@ -555,7 +555,7 @@ class TaskRunner(SingleRoomAgent):
 
             except Exception as e:
                 logger.error("Task runner failed to complete task", exc_info=e)
-                if chat_context != None:
+                if chat_context is not None:
                     await protocol.send(
                         type="agent.ask_response",
                         data=pack_message(
@@ -617,7 +617,7 @@ async def make_run_task_tool(context: ToolContext, toolkit: RequiredToolkit):
     for agent_name in toolkit.tools:
         agent = next((x for x in agents if x.name == agent_name), None)
 
-        if agent == None:
+        if agent is None:
             raise RoomException(f"agent was not found in the room {agent_name}")
 
         tools.append(

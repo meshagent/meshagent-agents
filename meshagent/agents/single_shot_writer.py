@@ -45,7 +45,7 @@ class SingleShotWriter(Writer):
         self._rules = rules
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
-        if toolkits == None:
+        if toolkits is None:
             toolkits = []
         self._toolkits = toolkits
         self._labels = labels

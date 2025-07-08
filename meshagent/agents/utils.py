@@ -22,17 +22,17 @@ async def generate_json(
                 agent = a
                 break
 
-        if agent != None:
+        if agent is not None:
             break
 
         await asyncio.sleep(1)
 
-    if agent == None:
+    if agent is None:
         raise RoomException(
             "unable to locate required agent (meshagent.schema_planner)"
         )
 
-    if prompt == None:
+    if prompt is None:
         prompt = f"ask me a series of questions to completely fill out the data structure described by this JSON schema ${json.dumps(output_schema)}. If you need to ask multiple questions, try to include all of them in a single form."
 
     validate_openai_schema(output_schema)

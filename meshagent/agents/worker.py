@@ -36,7 +36,7 @@ class Worker(SingleRoomAgent):
 
         self._queue = queue
 
-        if toolkits == None:
+        if toolkits is None:
             toolkits = []
 
         self._llm_adapter = llm_adapter
@@ -47,7 +47,7 @@ class Worker(SingleRoomAgent):
         self._room: RoomClient | None = None
         self._toolkits = toolkits
 
-        if rules == None:
+        if rules is None:
             rules = []
 
         self._rules = rules
@@ -99,7 +99,7 @@ class Worker(SingleRoomAgent):
             message = await room.queues.receive(
                 name=self._queue, create=True, wait=True
             )
-            if message != None:
+            if message is not None:
                 logger.info(f"received message on worker queue {message}")
                 try:
                     chat_context = await self.init_chat_context()

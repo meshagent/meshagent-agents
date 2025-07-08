@@ -37,7 +37,7 @@ class RemoteTaskRunnerServer[T: TaskRunner](WebhookServer):
             validate_webhook_secret=validate_webhook_secret,
         )
 
-        if create_agent == None:
+        if create_agent is None:
 
             def default_create_agent(arguments: dict) -> TaskRunner:
                 return cls(**arguments)
@@ -120,7 +120,7 @@ class RemoteAgentServer[T: SingleRoomAgent](WebhookServer):
             validate_webhook_secret=validate_webhook_secret,
         )
 
-        if create_agent == None:
+        if create_agent is None:
 
             def default_create_agent(arguments: dict) -> SingleRoomAgent:
                 return cls(**arguments)

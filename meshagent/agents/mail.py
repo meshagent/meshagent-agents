@@ -59,7 +59,7 @@ def message_to_json(*, message: EmailMessage, role: MessageRole):
         body = message.get_content()
 
     id = message.get("Message-ID")
-    if id == None:
+    if id is None:
         mfrom = message.get("From")
         _, addr = email.utils.parseaddr(mfrom)
         domain = addr.split("@")[-1].lower()
@@ -180,10 +180,10 @@ async def save_email_message(
 
 async def load_thread(*, room: RoomClient, message: dict, thread: list[dict]):
     in_reply_to = message.get("in_reply_to", None)
-    if in_reply_to != None:
+    if in_reply_to is not None:
         source = await load_message(room=room, message_id=in_reply_to)
 
-        if source != None:
+        if source is not None:
             thread.insert(0, source)
 
             await load_thread(room=room, message=source, thread=thread)
@@ -200,16 +200,16 @@ class SmtpConfiguration:
         port: Optional[int] = None,
         hostname: Optional[str] = None,
     ):
-        if username == None:
+        if username is None:
             username = os.getenv("SMTP_USERNAME")
 
-        if password == None:
+        if password is None:
             password = os.getenv("SMTP_PASSWORD")
 
-        if port == None:
+        if port is None:
             port = int(os.getenv("SMTP_PORT", "587"))
 
-        if hostname == None:
+        if hostname is None:
             hostname = os.getenv("SMTP_HOSTNAME")
 
         self.username = username
@@ -234,7 +234,7 @@ class MailWorker(Worker):
         domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
         smtp: Optional[SmtpConfiguration] = None,
     ):
-        if smtp == None:
+        if smtp is None:
             smtp = SmtpConfiguration()
 
         self._domain = domain
@@ -293,11 +293,11 @@ class MailWorker(Worker):
         logger.info(f"replying with message {reply_msg_dict}")
 
         username = self._smtp.username
-        if username == None:
+        if username is None:
             username = self.room.local_participant.get_attribute("name")
 
         password = self._smtp.password
-        if password == None:
+        if password is None:
             password = self.room.protocol.token
 
         await aiosmtplib.send(

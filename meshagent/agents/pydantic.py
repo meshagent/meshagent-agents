@@ -166,7 +166,7 @@ class PydanicAgentHost[TInput: BaseModel, TOutput: BaseModel](
         self._model = model
         self._system_prompt = system_prompt
         self._response_adapter = response_adapter
-        if tools == None:
+        if tools is None:
             tools = []
 
         self._tools = tools

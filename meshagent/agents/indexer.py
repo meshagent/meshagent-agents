@@ -66,7 +66,7 @@ class ChonkieChunker(Chunker):
     def __init__(self, chunker: Optional[chonkie.BaseChunker] = None):
         super().__init__()
 
-        if chunker == None:
+        if chunker is None:
             chunker = chonkie.SemanticChunker()
 
         self._chunker = chunker
@@ -101,7 +101,7 @@ class OpenAIEmbedder(Embedder):
         model: str,
         openai: Optional[AsyncOpenAI] = None,
     ):
-        if openai == None:
+        if openai is None:
             openai = AsyncOpenAI()
 
         self._openai = openai
@@ -152,7 +152,7 @@ class RagTool(Tool):
         self._embedder = embedder
 
     async def execute(self, context: ToolContext, query: str):
-        if self._embedder == None:
+        if self._embedder is None:
             results = await context.room.database.search(
                 table=self.table, text=query, limit=10
             )
@@ -181,7 +181,7 @@ def open_ai_embedding_ada_2():
 
 class RagToolkit(Toolkit):
     def __init__(self, table: str, embedder: Optional[Embedder] = None):
-        if embedder == None:
+        if embedder is None:
             embedder = open_ai_embedding_3_large()
 
         super().__init__(
@@ -221,10 +221,10 @@ class StorageIndexer(SingleRoomAgent):
 
         self._chan = Chan[FileIndexEvent]()
 
-        if chunker == None:
+        if chunker is None:
             chunker = ChonkieChunker()
 
-        if embedder == None:
+        if embedder is None:
             embedder = open_ai_embedding_3_large()
 
         self.chunker = chunker
@@ -372,7 +372,7 @@ class StorageIndexer(SingleRoomAgent):
                     )
 
                     text = await self.read_file(path=e.path)
-                    if text != None:
+                    if text is not None:
                         # the content will be transformed into additional chunks
                         for chunk in await self.chunker.chunk(
                             text=text, max_length=self.embedder.max_length
@@ -421,10 +421,10 @@ class SiteIndexer(TaskRunner):
         supports_tools=None,
         labels: Optional[list[str]] = None,
     ):
-        if chunker == None:
+        if chunker is None:
             chunker = ChonkieChunker()
 
-        if embedder == None:
+        if embedder is None:
             embedder = open_ai_embedding_3_large()
 
         self.chunker = chunker
@@ -518,7 +518,7 @@ class SiteIndexer(TaskRunner):
                 name=queue, create=True, wait=True
             )
 
-            if message == None:
+            if message is None:
                 break
 
             if message.get("type", None) == "crawl.completed":

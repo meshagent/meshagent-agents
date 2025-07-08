@@ -61,7 +61,7 @@ def reasoning_schema(
     has_done_property: bool = True,
     has_abort: bool = True,
 ) -> MeshSchema:
-    if elements == None:
+    if elements is None:
         elements = []
 
     progress_properties = [
@@ -205,7 +205,7 @@ class PlanningWriter(Writer):
             supports_tools=supports_tools,
         )
 
-        if rules == None:
+        if rules is None:
             rules = []
 
         self._rules = rules
@@ -213,7 +213,7 @@ class PlanningWriter(Writer):
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
         self._max_iterations = max_iterations
-        if toolkits == None:
+        if toolkits is None:
             toolkits = []
         self.toolkits = toolkits
 
@@ -337,7 +337,7 @@ class PlanningResponder(TaskRunner):
 
         self._input_prompt = input_prompt
 
-        if rules == None:
+        if rules is None:
             rules = []
 
         if input_prompt:
@@ -530,7 +530,7 @@ class DynamicPlanningResponder(TaskRunner):
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
 
-        if toolkits == None:
+        if toolkits is None:
             toolkits = []
 
         self.toolkits = toolkits

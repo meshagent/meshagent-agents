@@ -76,7 +76,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         **extra,
     ):
         output_format = self.output_format
-        if output_format == None:
+        if output_format is None:
             output_format = "png"
 
         image_name = f"{str(uuid.uuid4())}.{output_format}"
@@ -127,7 +127,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         **extra,
     ):
         output_format = self.output_format
-        if output_format == None:
+        if output_format is None:
             output_format = "png"
 
         image_name = f"{str(uuid.uuid4())}.{output_format}"
@@ -191,7 +191,7 @@ class ChatThreadContext:
         participants: Optional[list[RemoteParticipant]] = None,
     ):
         self.thread = thread
-        if participants == None:
+        if participants is None:
             participants = []
 
         self.participants = participants
@@ -223,7 +223,7 @@ class ChatBot(SingleRoomAgent):
             labels=labels,
         )
 
-        if toolkits == None:
+        if toolkits is None:
             toolkits = []
 
         self._llm_adapter = llm_adapter
@@ -234,21 +234,21 @@ class ChatBot(SingleRoomAgent):
         self._room: RoomClient | None = None
         self._toolkits = toolkits
 
-        if rules == None:
+        if rules is None:
             rules = []
 
         self._rules = rules
         self._is_typing = dict[str, asyncio.Task]()
         self._auto_greet_message = auto_greet_message
 
-        if empty_state_title == None:
+        if empty_state_title is None:
             empty_state_title = "How can I help you?"
         self._empty_state_title = empty_state_title
 
         self._thread_tasks = dict[str, asyncio.Task]()
 
     def init_requirements(self, requires: list[Requirement]):
-        if requires == None:
+        if requires is None:
             requires = [RequiredSchema(name="thread")]
 
         else:
@@ -303,7 +303,7 @@ class ChatBot(SingleRoomAgent):
         participant: RemoteParticipant,
         thread_attributes: dict,
     ):
-        if self._auto_greet_message != None:
+        if self._auto_greet_message is not None:
             chat_context.append_user_message(self._auto_greet_message)
             await self._send_and_save_chat(
                 id=str(uuid.uuid4()),
@@ -335,7 +335,7 @@ class ChatBot(SingleRoomAgent):
                     if tool.name == "show_toast":
                         toaster = tool
 
-        if toaster != None:
+        if toaster is not None:
 
             def multi_tool(toolkit: Toolkit):
                 if toaster in toolkit.tools:
@@ -448,7 +448,7 @@ class ChatBot(SingleRoomAgent):
                             chat_with_participant = participant
                             break
 
-                    if chat_with_participant == None:
+                    if chat_with_participant is None:
                         logger.warning(
                             "participant does not have messaging enabled, skipping message"
                         )
@@ -477,17 +477,17 @@ class ChatBot(SingleRoomAgent):
                             "current_file"
                         )
 
-                    if current_file != None:
+                    if current_file is not None:
                         chat_context.append_assistant_message(
                             message=f"the user is currently viewing the file at the path: {current_file}"
                         )
 
-                    elif current_file != None:
+                    elif current_file is not None:
                         chat_context.append_assistant_message(
                             message="the user is not current viewing any files"
                         )
 
-                    if thread == None:
+                    if thread is None:
                         with tracer.start_as_current_span(
                             "chatbot.thread.open"
                         ) as span:
@@ -520,7 +520,7 @@ class ChatBot(SingleRoomAgent):
                                                         f"the user attached a file with the path '{child.get_attribute('path')}'"
                                                     )
 
-                            if doc_messages == None:
+                            if doc_messages is None:
                                 raise Exception("thread was not properly initialized")
 
                     if received.type == "opened":
@@ -536,7 +536,7 @@ class ChatBot(SingleRoomAgent):
                             )
 
                     if received.type == "chat":
-                        if thread == None:
+                        if thread is None:
                             self.room.developer.log_nowait(
                                 type="thread is not open", data={}
                             )
@@ -590,7 +590,7 @@ class ChatBot(SingleRoomAgent):
                         if messages.empty() == True:
                             break
 
-                if received != None:
+                if received is not None:
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
                         span.set_attributes(thread_attributes)
                         span.set_attribute("role", "user")
@@ -606,7 +606,7 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes({"text": text})
 
                         try:
-                            if thread_context == None:
+                            if thread_context is None:
                                 thread_context = ChatThreadContext(
                                     chat=chat_context,
                                     thread=thread,
@@ -662,13 +662,13 @@ class ChatBot(SingleRoomAgent):
         finally:
             llm_messages.close()
 
-            if self.room != None:
+            if self.room is not None:
                 logger.info("thread was ended {path}")
                 self.room.developer.log_nowait(
                     type="chatbot.thread.ended", data={"path": path}
                 )
 
-                if thread != None:
+                if thread is not None:
                     await self.close_thread(path=path)
 
     def _get_message_channel(self, key: str) -> Chan[RoomMessage]:
@@ -754,7 +754,7 @@ class ChatBot(SingleRoomAgent):
 
         room.messaging.on("message", on_message)
 
-        if self._auto_greet_message != None:
+        if self._auto_greet_message is not None:
 
             def on_participant_added(participant: RemoteParticipant):
                 # will spawn the initial thread
