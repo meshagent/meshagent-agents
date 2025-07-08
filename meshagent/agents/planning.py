@@ -1,6 +1,7 @@
 from meshagent.agents.agent import AgentCallContext, AgentException
 from meshagent.api import Requirement
-from meshagent.tools.toolkit import Toolkit, TextResponse, Tool, ToolContext
+from meshagent.api.messaging import TextResponse
+from meshagent.tools.toolkit import Toolkit, Tool, ToolContext
 from meshagent.api.schema import MeshSchema
 from meshagent.agents.writer import Writer, WriterContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
