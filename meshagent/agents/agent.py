@@ -456,7 +456,6 @@ class TaskRunner(SingleRoomAgent):
             logger.info("agent got message %s", message)
             args = message["arguments"]
             task_id = message["task_id"]
-            context_json = message["context"]
             toolkits_json = message["toolkits"]
 
             # context_json = message["context"]

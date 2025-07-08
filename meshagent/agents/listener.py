@@ -5,12 +5,9 @@ from typing import Optional
 from meshagent.agents import TaskRunner
 from meshagent.api.schema_document import Element, Text
 from meshagent.api.room_server_client import RoomClient, MeshDocument
-
+from meshagent.agents.agent import AgentCallContext
 
 logger = logging.getLogger(__name__)
-
-
-from meshagent.agents.agent import TaskRunner, AgentCallContext
 
 
 class ListenerContext:
@@ -94,7 +91,7 @@ class Listener(TaskRunner):
                     if isinstance(child, Element):
                         append_children(child)
 
-            if self.wait_for_synchronize == False:
+            if not self.wait_for_synchronize:
                 change_queue.append([doc.root])
                 append_children(doc.root)
             else:
@@ -111,7 +108,7 @@ class Listener(TaskRunner):
                     change_queue.append([e])
                     append_children(e)
 
-                if wait_for_changes.done() == False:
+                if not wait_for_changes.done():
                     wait_for_changes.set_result(True)
 
             @doc.on("updated")
@@ -122,7 +119,7 @@ class Listener(TaskRunner):
                     #
                     # append_children(e)
 
-                if wait_for_changes.done() == False:
+                if not wait_for_changes.done():
                     wait_for_changes.set_result(True)
 
             waiting_for_end = True

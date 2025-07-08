@@ -1,7 +1,7 @@
 from meshagent.agents.agent import AgentCallContext
 from meshagent.api.room_server_client import RoomClient
 from meshagent.api.schema_document import Document
-from meshagent.api import RoomClient, Requirement
+from meshagent.api import Requirement
 
 # from meshagent.tools.document_tools import DocumentToolkit
 from typing import Optional
