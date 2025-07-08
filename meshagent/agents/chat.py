@@ -1,6 +1,6 @@
-from .agent import SingleRoomAgent, AgentChatContext, AgentCallContext
+from .agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
-from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element, MeshDocument
+from meshagent.api import RoomMessage, RoomClient, RemoteParticipant, RequiredSchema, Requirement, Element, MeshDocument
 from meshagent.tools import Toolkit, ToolContext
 from .adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import ImageGenerationTool
@@ -8,11 +8,9 @@ import asyncio
 from typing import Optional
 import logging
 from meshagent.tools import MultiToolkit
-import urllib
 import uuid
 import datetime
-import json
-from typing import Literal, Optional
+from typing import Literal
 import base64
 from openai.types.responses import ResponseStreamEvent
 from asyncio import CancelledError
@@ -315,7 +313,7 @@ class ChatBot(SingleRoomAgent):
         def done_processing_llm_events(task: asyncio.Task):
             try:
                 task.result()
-            except CancelledError as e:
+            except CancelledError:
                 pass
             except Exception as e:
                 logger.error("error sending delta", exc_info=e)
@@ -407,7 +405,7 @@ class ChatBot(SingleRoomAgent):
                         chat_context.append_assistant_message(message=f"the user is currently viewing the file at the path: {current_file}")
 
                     elif current_file != None:
-                        chat_context.append_assistant_message(message=f"the user is not current viewing any files")
+                        chat_context.append_assistant_message(message="the user is not current viewing any files")
 
                     if thread == None:
 
@@ -595,7 +593,7 @@ class ChatBot(SingleRoomAgent):
                         self._message_channels.pop(path)
                         try:
                             task.result()
-                        except CancelledError as e:
+                        except CancelledError:
                             pass
                         except Exception as e:
                             logger.error(f"The chat thread ended with an error {e}", exc_info=e)

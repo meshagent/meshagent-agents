@@ -6,14 +6,12 @@ from typing import Optional
 from meshagent.agents import TaskRunner
 from meshagent.api.schema_document import Element,Text
 from meshagent.api.room_server_client import RoomClient, MeshDocument
-from meshagent.api.websocket_protocol import WebSocketClientProtocol
 
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-from meshagent.agents.agent import TaskRunner, AgentChatContext, AgentCallContext
+from meshagent.agents.agent import TaskRunner, AgentCallContext
 
 class ListenerContext:
     def __init__(self, document: MeshDocument, room: RoomClient, call_context: AgentCallContext):

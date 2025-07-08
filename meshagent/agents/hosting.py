@@ -1,14 +1,13 @@
 import logging
 
-from meshagent.api import websocket_protocol, RoomMessage
-from meshagent.api.webhooks import WebhookServer, RoomStartedEvent, RoomEndedEvent, CallEvent
+from meshagent.api import RoomMessage
+from meshagent.api.webhooks import WebhookServer, CallEvent
 from meshagent.api import WebSocketClientProtocol
 from meshagent.api.room_server_client import RoomClient
 from meshagent.agents import SingleRoomAgent
 from aiohttp import web
 import asyncio
 
-import logging
 from typing import Callable, Optional
 
 from .agent import TaskRunner

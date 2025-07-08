@@ -1,5 +1,5 @@
 from meshagent.api import RoomClient, Requirement, RoomException, Participant
-from meshagent.tools import validate_openai_schema, Toolkit
+from meshagent.tools import validate_openai_schema
 import json
 from typing import Optional
 import asyncio

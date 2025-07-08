@@ -16,7 +16,6 @@ import os
 
 # TODO: install chonkie, chonkie[semantic], openai
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _async_debounce(wait):
     def decorator(func):
@@ -230,7 +229,7 @@ class StorageIndexer(SingleRoomAgent):
                 logger.info("attempting to create embedding index")
                 await self.room.database.create_vector_index(table=self.table, column="embedding", replace=False)
                 self._vector_index_created = True
-            except Exception as e:
+            except Exception:
                 # Will fail if there aren't enough rows
                 pass
 
@@ -239,7 +238,7 @@ class StorageIndexer(SingleRoomAgent):
                 logger.info("attempting to create fts index")
                 await self.room.database.create_full_text_search_index(table=self.table, column="text", replace=False)
                 self._fts_created = True
-            except Exception as e:
+            except Exception:
                 # Will fail if there aren't enough rows
                 pass
 

@@ -1,21 +1,17 @@
-import json
-from copy import deepcopy
 
 from typing import Optional
 
 from meshagent.api.messaging import unpack_message, pack_message
 from meshagent.api.room_server_client import RoomException, RequiredToolkit, Requirement, RequiredSchema
-from meshagent.api import WebSocketClientProtocol, ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry, JsonResponse
+from meshagent.api import ToolDescription, ToolkitDescription, Participant, RemoteParticipant, meshagent_base_url, StorageEntry
 from meshagent.api.protocol import Protocol
 from meshagent.tools.toolkit import Toolkit, Tool, ToolContext, toolkit_factory, register_toolkit_factory
-from meshagent.api.room_server_client import RoomClient, RoomException
+from meshagent.api.room_server_client import RoomClient
 from jsonschema import validate
 from .context import AgentCallContext, AgentChatContext
 from meshagent.api.schema_util import no_arguments_schema
-from meshagent.api import MeshSchema
 import logging
 import asyncio
-from typing import Optional, Dict, Callable, Coroutine
 
 logger = logging.getLogger("agent")
 

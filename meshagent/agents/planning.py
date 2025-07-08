@@ -1,12 +1,10 @@
-from meshagent.agents.agent import AgentCallContext, AgentChatContext, AgentException
-from meshagent.api import WebSocketClientProtocol, RequiredToolkit, RequiredSchema, Requirement
-from meshagent.api.schema_document import Document
-from meshagent.api.room_server_client import RoomClient
+from meshagent.agents.agent import AgentCallContext, AgentException
+from meshagent.api import Requirement
 from meshagent.tools.toolkit import Toolkit, TextResponse, Tool, ToolContext
 from meshagent.api.schema import MeshSchema
 from meshagent.agents.writer import Writer, WriterContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
-from meshagent.api.schema import MeshSchema, ElementType, ChildProperty, ValueProperty
+from meshagent.api.schema import ElementType, ChildProperty, ValueProperty
 from meshagent.api.schema_util import merge
 from meshagent.tools.document_tools import build_tools, DocumentAuthoringToolkit
 from meshagent.agents import TaskRunner

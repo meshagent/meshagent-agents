@@ -1,10 +1,8 @@
 from .agent import SingleRoomAgent
-from meshagent.api import websocket_protocol, RoomClient, MeshSchema, RoomException
+from meshagent.api import websocket_protocol, RoomClient
 import asyncio
 import signal
-import json
 
-from aiohttp import web
 
 
 async def connect_development_agent(*, room_name:str, agent: SingleRoomAgent):

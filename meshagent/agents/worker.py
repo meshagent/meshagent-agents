@@ -1,6 +1,6 @@
 from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
-from meshagent.api import RoomMessage, RoomException, RoomClient, RemoteParticipant
+from meshagent.api import RoomMessage, RoomClient
 from meshagent.agents import AgentChatContext
 from meshagent.tools import Toolkit
 from .adapter import LLMAdapter, ToolResponseAdapter

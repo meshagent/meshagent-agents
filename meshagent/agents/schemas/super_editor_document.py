@@ -1,4 +1,4 @@
-from meshagent.api.schema import MeshSchema, ElementType,  ChildProperty, ValueProperty, SimpleValue
+from meshagent.api.schema import MeshSchema, ElementType,  ChildProperty, ValueProperty
 
 super_editor_document_schema = MeshSchema(root_tag_name='document', elements=[
     ElementType(
