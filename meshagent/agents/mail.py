@@ -116,7 +116,7 @@ async def save_email_message(
         fname = (
             part.get_filename() or "attachment.bin"
         )  # RFC 2183 filename, if any :contentReference[oaicite:1]{index=1}
-        ctype = part.get_content_type()  # e.g. image/png, application/pdf
+
         # get_content() auto-decodes transfer-encodings; returns
         # *str* for text/*, *bytes* for everything else :contentReference[oaicite:2]{index=2}
         data = part.get_content()

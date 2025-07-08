@@ -7,5 +7,5 @@ __all__ = [
     document_schema,
     gallery_schema,
     presentation_schema,
-    super_editor_document_schema
+    super_editor_document_schema,
 ]
