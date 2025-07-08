@@ -251,7 +251,7 @@ class StorageIndexer(SingleRoomAgent):
             if "text" in index["columns"]:
                 self._fts_created = True
 
-        if self._vector_index_created == False:
+        if not self._vector_index_created:
             try:
                 logger.info("attempting to create embedding index")
                 await self.room.database.create_vector_index(
@@ -262,7 +262,7 @@ class StorageIndexer(SingleRoomAgent):
                 # Will fail if there aren't enough rows
                 pass
 
-        if self._fts_created == False:
+        if not self._fts_created:
             try:
                 logger.info("attempting to create fts index")
                 await self.room.database.create_full_text_search_index(
@@ -273,7 +273,7 @@ class StorageIndexer(SingleRoomAgent):
                 # Will fail if there aren't enough rows
                 pass
 
-        if self._fts_created == True or self._vector_index_created == True:
+        if self._fts_created or self._vector_index_created:
             logger.info("optimizing existing index")
             await self.room.database.optimize(table=self.table)
 
@@ -299,7 +299,7 @@ class StorageIndexer(SingleRoomAgent):
 
         def index_task(task: asyncio.Task):
             try:
-                result = task.result()
+                task.result()
             except Exception as e:
                 logger.error("Index task failed", exc_info=e)
 

@@ -524,7 +524,7 @@ class ChatBot(SingleRoomAgent):
                                 raise Exception("thread was not properly initialized")
 
                     if received.type == "opened":
-                        if opened == False:
+                        if not opened:
                             opened = True
 
                             await self.greet(
@@ -587,7 +587,7 @@ class ChatBot(SingleRoomAgent):
 
                             await asyncio.sleep(0.5)
 
-                        if messages.empty() == True:
+                        if messages.empty():
                             break
 
                 if received is not None:
@@ -630,7 +630,7 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
-                                    response = await self._llm_adapter.next(
+                                    await self._llm_adapter.next(
                                         context=chat_context,
                                         room=self._room,
                                         toolkits=thread_toolkits,
@@ -735,7 +735,7 @@ class ChatBot(SingleRoomAgent):
                 def callback(task: asyncio.Task):
                     try:
                         task.result()
-                    except:
+                    except Exception:
                         pass
 
                 async def remove_timeout(id: str):

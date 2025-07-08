@@ -82,7 +82,7 @@ class RemoteTaskRunnerServer[T: TaskRunner](WebhookServer):
 
         def on_done(task: asyncio.Task):
             try:
-                result = task.result()
+                task.result()
             except Exception as e:
                 logger.error("agent encountered an error", exc_info=e)
 
@@ -166,7 +166,7 @@ class RemoteAgentServer[T: SingleRoomAgent](WebhookServer):
 
         def on_done(task: asyncio.Task):
             try:
-                result = task.result()
+                task.result()
             except Exception as e:
                 logger.error("agent encountered an error", exc_info=e)
 

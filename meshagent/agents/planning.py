@@ -12,6 +12,9 @@ from meshagent.agents import TaskRunner
 from copy import deepcopy
 from typing import Optional
 
+from meshagent.api.schema_util import prompt_schema
+import logging
+
 reasoning_rules = [
     "If an ask_user tool call is available, plans should include a series of questions to ask the user to help refine.",
     "If an ask_user tool call is available, ask a maximum of one question per step",
@@ -46,7 +49,6 @@ def is_reasoning_done(*, context: AgentCallContext, response: dict) -> bool:
             return False
 
     elif "plan" in parsed:
-        plan = parsed["plan"]
         context.chat.append_user_message(goto_next_step_message)
         return False
     else:
@@ -166,10 +168,6 @@ def reasoning_schema(
         ],
     )
 
-
-from meshagent.api.schema_util import prompt_schema
-import logging
-
 logger = logging.getLogger("planning_agent")
 
 
@@ -237,10 +235,6 @@ class PlanningWriter(Writer):
 
         execute = goto_next_step_message
 
-        react = """
-        based on what you know know, either execute the next task or formulate a new plan. If you have sufficient information to complete the task, return a final answer.
-        """
-
         prompt = arguments["prompt"]
 
         writer_context.call_context.chat.append_user_message(message=prompt)
@@ -302,7 +296,6 @@ class PlanningWriter(Writer):
                     writer_context.call_context.chat.append_user_message(execute)
                     continue
             elif "plan" in parsed:
-                plan = parsed["plan"]
                 writer_context.call_context.chat.append_user_message(execute)
                 continue
             else:
@@ -331,7 +324,7 @@ class PlanningResponder(TaskRunner):
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
     ):
-        if isinstance(output_schema, dict) == False:
+        if not isinstance(output_schema, dict):
             raise Exception(
                 "schema must be a dict, got: {type}".format(type=type(output_schema))
             )
@@ -423,10 +416,6 @@ class PlanningResponder(TaskRunner):
 
         execute = goto_next_step_message
 
-        react = """
-        based on what you know know, either execute the next task or formulate a new plan. If you have sufficient information to complete the task, return a final answer.
-        """
-
         rs = reasoning_schema(
             description="uses tools",
             elements=[],
@@ -486,7 +475,6 @@ class PlanningResponder(TaskRunner):
                     context.chat.append_user_message(execute)
                     continue
             elif "plan" in parsed:
-                plan = parsed["plan"]
                 context.chat.append_user_message(execute)
                 continue
             else:
@@ -602,10 +590,6 @@ class DynamicPlanningResponder(TaskRunner):
 
         execute = goto_next_step_message
 
-        react = """
-        based on what you know know, either execute the next task or formulate a new plan. If you have sufficient information to complete the task, return a final answer.
-        """
-
         rs = reasoning_schema(description="uses tools", elements=[]).to_json()
 
         prompt = arguments["prompt"]
@@ -664,7 +648,6 @@ class DynamicPlanningResponder(TaskRunner):
                     context.chat.append_user_message(execute)
                     continue
             elif "plan" in parsed:
-                plan = parsed["plan"]
                 context.chat.append_user_message(execute)
                 continue
             else:
