@@ -10,8 +10,6 @@ from meshagent.agents.agent import AgentCallContext
 logger = logging.getLogger(__name__)
 
 
-
-
 class ListenerContext:
     def __init__(
         self, document: MeshDocument, room: RoomClient, call_context: AgentCallContext
