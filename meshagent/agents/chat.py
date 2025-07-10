@@ -735,6 +735,8 @@ class ChatBot(SingleRoomAgent):
                 def callback(task: asyncio.Task):
                     try:
                         task.result()
+                    except CancelledError:
+                        pass
                     except Exception:
                         pass
 
