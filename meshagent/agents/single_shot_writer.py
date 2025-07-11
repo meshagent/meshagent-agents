@@ -66,7 +66,6 @@ class SingleShotWriter(Writer):
         toolkits = [*self._toolkits, *writer_context.call_context.toolkits]
 
         try:
-    
             response = await self._llm_adapter.next(
                 context=writer_context.call_context.chat,
                 room=writer_context.room,
@@ -74,7 +73,6 @@ class SingleShotWriter(Writer):
                 tool_adapter=self._tool_adapter,
                 output_schema=writer_context.document.schema.to_json(),
             )
-
 
         except Exception as e:
             logger.error("Unable to execute reasoning completion task", exc_info=e)

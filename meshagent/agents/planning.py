@@ -432,7 +432,6 @@ class PlanningResponder(TaskRunner):
             i += 1
 
             try:
-
                 responses = await self._llm_adapter.next(
                     context=context.chat,
                     room=room,
