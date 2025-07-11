@@ -66,8 +66,7 @@ class SingleShotWriter(Writer):
         toolkits = [*self._toolkits, *writer_context.call_context.toolkits]
 
         try:
-            logger.info("SINGLE SHOT COMPLETION STARTING")
-
+    
             response = await self._llm_adapter.next(
                 context=writer_context.call_context.chat,
                 room=writer_context.room,
@@ -76,7 +75,6 @@ class SingleShotWriter(Writer):
                 output_schema=writer_context.document.schema.to_json(),
             )
 
-            logger.info("SINGLE SHOT COMPLETION RESPONSE %s", response)
 
         except Exception as e:
             logger.error("Unable to execute reasoning completion task", exc_info=e)

@@ -274,8 +274,6 @@ class PlanningWriter(Writer):
                     output_schema=rs,
                 )
 
-                logger.info("COMPLETION RESPONSE %s", responses)
-
             except Exception as e:
                 logger.error("Unable to execute reasoning completion task", exc_info=e)
                 # retry
@@ -434,7 +432,6 @@ class PlanningResponder(TaskRunner):
             i += 1
 
             try:
-                logger.info("COMPLETION STARTING: Step %s", i)
 
                 responses = await self._llm_adapter.next(
                     context=context.chat,
@@ -443,8 +440,6 @@ class PlanningResponder(TaskRunner):
                     tool_adapter=self._tool_adapter,
                     output_schema=rs,
                 )
-
-                logger.info("COMPLETION RESPONSE %s", responses)
 
             except Exception as e:
                 logger.error("Unable to execute reasoning completion task", exc_info=e)
@@ -615,8 +610,6 @@ class DynamicPlanningResponder(TaskRunner):
                     tool_adapter=self._tool_adapter,
                     output_schema=rs,
                 )
-
-                logger.info("COMPLETION RESPONSE %s", responses)
 
             except Exception as e:
                 logger.error("Unable to execute reasoning completion task", exc_info=e)
