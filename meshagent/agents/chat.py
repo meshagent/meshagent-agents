@@ -760,7 +760,7 @@ class ChatBot(SingleRoomAgent):
 
             def on_participant_added(participant: RemoteParticipant):
                 # will spawn the initial thread
-                self._get_message_channel(participant_id=participant.id)
+                self._get_message_channel(participant.id)
 
             room.messaging.on("participant_added", on_participant_added)
 
