@@ -126,10 +126,11 @@ class Worker(SingleRoomAgent):
 
                     except Exception as e:
                         logger.error(f"Failed to process: {e}\n{message}", exc_info=e)
-            
+
             except Exception as e:
-                logger.error(f"Worker error while receiving: {e}, will retry", exc_info=e)
-                
+                logger.error(
+                    f"Worker error while receiving: {e}, will retry", exc_info=e
+                )
+
                 asyncio.sleep(0.1 * pow(2, backoff))
                 backoff = backoff + 1
-
