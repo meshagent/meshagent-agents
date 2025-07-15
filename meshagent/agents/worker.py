@@ -95,31 +95,41 @@ class Worker(SingleRoomAgent):
             *self._toolkits,
         ]
 
+        backoff = 0
         while not self._done:
-            message = await room.queues.receive(
-                name=self._queue, create=True, wait=True
-            )
-            if message is not None:
-                logger.info(f"received message on worker queue {message}")
-                try:
-                    chat_context = await self.init_chat_context()
+            try:
+                message = await room.queues.receive(
+                    name=self._queue, create=True, wait=True
+                )
+                backoff = 0
+                if message is not None:
+                    logger.info(f"received message on worker queue {message}")
+                    try:
+                        chat_context = await self.init_chat_context()
 
-                    chat_context.append_rules(
-                        rules=[
-                            *self._rules,
-                        ]
-                    )
+                        chat_context.append_rules(
+                            rules=[
+                                *self._rules,
+                            ]
+                        )
 
-                    await self.append_message_context(
-                        room=room, message=message, chat_context=chat_context
-                    )
+                        await self.append_message_context(
+                            room=room, message=message, chat_context=chat_context
+                        )
 
-                    await self.process_message(
-                        chat_context=chat_context,
-                        room=room,
-                        message=message,
-                        toolkits=toolkits,
-                    )
+                        await self.process_message(
+                            chat_context=chat_context,
+                            room=room,
+                            message=message,
+                            toolkits=toolkits,
+                        )
 
-                except Exception as e:
-                    logger.error(f"Failed to process a message {message}", exc_info=e)
+                    except Exception as e:
+                        logger.error(f"Failed to process: {e}\n{message}", exc_info=e)
+            
+            except Exception as e:
+                logger.error(f"Worker error while receiving: {e}, will retry", exc_info=e)
+                
+                asyncio.sleep(0.1 * pow(2, backoff))
+                backoff = backoff + 1
+
