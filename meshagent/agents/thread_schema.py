@@ -35,7 +35,7 @@ thread_schema = MeshSchema(
             properties=[
                 ChildProperty(
                     name="items",
-                    child_tag_names=["message"],
+                    child_tag_names=["message", "exec"],
                     description="the messages in this thread",
                 )
             ],
@@ -62,6 +62,27 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="path",
                     description="the path of the file in the room",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
+            tag_name="exec",
+            description="a command execution",
+            properties=[
+                ValueProperty(
+                    name="command",
+                    description="a command that was executed",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="result",
+                    description="the result of the command",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="pwd",
+                    description="the working directory the command was executed in",
                     type="string",
                 ),
             ],

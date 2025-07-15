@@ -11,7 +11,7 @@ from meshagent.api import (
 )
 from meshagent.tools import Toolkit, ToolContext
 from .adapter import LLMAdapter, ToolResponseAdapter
-from meshagent.openai.tools.responses_adapter import ImageGenerationTool
+from meshagent.openai.tools.responses_adapter import ImageGenerationTool, LocalShellTool
 import asyncio
 from typing import Optional
 import logging
@@ -24,10 +24,53 @@ from openai.types.responses import ResponseStreamEvent
 from asyncio import CancelledError
 
 from opentelemetry import trace
+import shlex
 
 tracer = trace.get_tracer("meshagent.chatbot")
 
 logger = logging.getLogger("chat")
+
+
+class ChatBotThreadLocalShellTool(LocalShellTool):
+    def __init__(self, *, thread_context: "ChatThreadContext"):
+        super().__init__()
+        self.thread_context = thread_context
+
+    async def execute_shell_command(
+        self,
+        context,
+        *,
+        command,
+        env,
+        type,
+        timeout_ms=None,
+        user=None,
+        working_directory=None,
+    ):
+        messages = None
+
+        for prop in self.thread_context.thread.root.get_children():
+            if prop.tag_name == "messages":
+                messages = prop
+
+        exec_element = messages.append_child(
+            tag_name="exec",
+            attributes={"command":  shlex.join(command), "pwd": working_directory},
+        )
+
+        result = await super().execute_shell_command(
+            context,
+            command=command,
+            env=env,
+            type=type,
+            timeout_ms=timeout_ms,
+            user=user,
+            working_directory=working_directory,
+        )
+
+        exec_element.set_attribute("result", result)
+
+        return result
 
 
 class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
@@ -188,6 +231,7 @@ class ChatThreadContext:
         *,
         chat: AgentChatContext,
         thread: MeshDocument,
+        path: str,
         participants: Optional[list[RemoteParticipant]] = None,
     ):
         self.thread = thread
@@ -196,6 +240,7 @@ class ChatThreadContext:
 
         self.participants = participants
         self.chat = chat
+        self.path = path
 
 
 # todo: thread should stop when participant stops?
@@ -500,7 +545,7 @@ class ChatBot(SingleRoomAgent):
                                     doc_messages = prop
 
                                     for element in doc_messages.get_children():
-                                        if isinstance(element, Element):
+                                        if isinstance(element, Element) and element.tag_name == "message":
                                             msg = element["text"]
                                             if (
                                                 element["author_name"]
@@ -608,11 +653,16 @@ class ChatBot(SingleRoomAgent):
                         try:
                             if thread_context is None:
                                 thread_context = ChatThreadContext(
+                                    path=path,
                                     chat=chat_context,
                                     thread=thread,
                                     participants=get_thread_participants(
                                         room=self.room, thread=thread
                                     ),
+                                )
+                            else:
+                                thread_context.participants = get_thread_participants(
+                                    room=self.room, thread=thread
                                 )
 
                             def handle_event(evt):
