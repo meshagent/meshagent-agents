@@ -221,7 +221,7 @@ class SingleRoomAgent(Agent):
             elif isinstance(requirement, RequiredSchema):
                 if requirement.name not in schemas_by_name:
                     installed = True
-            
+
                     logger.info(f"Installing required schema {requirement.name}")
 
                     if requirement.name.startswith("https://"):

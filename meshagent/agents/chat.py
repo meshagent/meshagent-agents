@@ -55,7 +55,7 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
 
         exec_element = messages.append_child(
             tag_name="exec",
-            attributes={"command":  shlex.join(command), "pwd": working_directory},
+            attributes={"command": shlex.join(command), "pwd": working_directory},
         )
 
         result = await super().execute_shell_command(
@@ -545,7 +545,10 @@ class ChatBot(SingleRoomAgent):
                                     doc_messages = prop
 
                                     for element in doc_messages.get_children():
-                                        if isinstance(element, Element) and element.tag_name == "message":
+                                        if (
+                                            isinstance(element, Element)
+                                            and element.tag_name == "message"
+                                        ):
                                             msg = element["text"]
                                             if (
                                                 element["author_name"]
