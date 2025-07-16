@@ -1,15 +1,17 @@
 from meshagent.agents.worker import Worker
+from meshagent.api import RemoteParticipant
 from meshagent.api.room_server_client import TextDataType
 from email import message_from_bytes
 from email.message import EmailMessage
 from email.policy import default
+from meshagent.tools import ToolContext, Toolkit
 import email.utils
 from meshagent.api import ParticipantToken
-
 from meshagent.api import RoomClient
-
+from meshagent.agents import AgentChatContext
 from datetime import datetime, timezone
 
+import asyncio
 import secrets
 
 from typing import Literal, Optional
@@ -24,6 +26,12 @@ import aiosmtplib
 logger = logging.getLogger("mail")
 
 type MessageRole = Literal["user", "agent"]
+
+
+class MailThreadContext:
+    def __init__(self, *, chat: AgentChatContext, room_address: str):
+        self.chat = chat
+        self.room_address = room_address
 
 
 def create_reply_email_message(
@@ -277,13 +285,24 @@ class MailWorker(Worker):
         )
 
     async def process_message(self, *, chat_context, room, message, toolkits):
-        logger.info(f"processing message {message}")
-        body = await super().process_message(
-            chat_context=chat_context, room=room, message=message, toolkits=toolkits
-        )
+        thread_context = MailThreadContext(chat=chat_context, room_address=message)
+        toolkits = [
+            *toolkits,
+            *await self.get_thread_toolkits(thread_context=thread_context),
+        ]
 
+        logger.info(f"processing message {message}")
+        reply = await super().process_message(
+            chat_context=thread_context.chat,
+            room=room,
+            message=message,
+            toolkits=toolkits,
+        )
+        return await self.send_reply_message(room=room, mesage=message, reply=reply)
+
+    async def send_reply_message(self, *, room: RoomClient, message: dict, reply: str):
         msg = create_reply_email_message(
-            message=message, from_address=self._email_address, body=body
+            message=message, from_address=self._email_address, body=reply
         )
 
         reply_msg_dict = await save_email_message(
@@ -307,6 +326,21 @@ class MailWorker(Worker):
             username=username,
             password=password,
         )
+
+    async def get_thread_toolkits(
+        self,
+        *,
+        thread_context: MailThreadContext,
+    ) -> list[Toolkit]:
+        toolkits = await self.get_required_toolkits(
+            context=ToolContext(
+                room=self.room,
+                caller=self.room.local_participant,
+                caller_context={"chat": thread_context.chat.to_json()},
+            )
+        )
+
+        return [*self._toolkits, *toolkits]
 
 
 def base36encode(number: int):
