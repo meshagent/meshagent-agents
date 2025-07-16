@@ -1,5 +1,4 @@
 from meshagent.agents.worker import Worker
-from meshagent.api import RemoteParticipant
 from meshagent.api.room_server_client import TextDataType
 from email import message_from_bytes
 from email.message import EmailMessage
@@ -11,7 +10,6 @@ from meshagent.api import RoomClient
 from meshagent.agents import AgentChatContext
 from datetime import datetime, timezone
 
-import asyncio
 import secrets
 
 from typing import Literal, Optional
