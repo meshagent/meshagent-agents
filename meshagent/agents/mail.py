@@ -296,7 +296,7 @@ class MailWorker(Worker):
             message=message,
             toolkits=toolkits,
         )
-        return await self.send_reply_message(room=room, mesage=message, reply=reply)
+        return await self.send_reply_message(room=room, message=message, reply=reply)
 
     async def send_reply_message(self, *, room: RoomClient, message: dict, reply: str):
         msg = create_reply_email_message(
@@ -317,10 +317,18 @@ class MailWorker(Worker):
         if password is None:
             password = self.room.protocol.token
 
+        hostname = self._smtp.hostname
+        if hostname is None:
+            hostname = self._domain
+
+        port = self._smtp.port
+
+        logger.info(f"using smtp {hostname}:{port}, {username},{password}")
+
         await aiosmtplib.send(
             msg,
-            hostname=self._smtp.hostname,
-            port=self._smtp.port,
+            hostname=hostname,
+            port=port,
             username=username,
             password=password,
         )
