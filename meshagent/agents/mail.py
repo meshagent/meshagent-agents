@@ -323,7 +323,7 @@ class MailWorker(Worker):
 
         port = self._smtp.port
 
-        logger.info(f"using smtp {hostname}:{port}, {username},{password}")
+        logger.info(f"using smtp {username}@{hostname}:{port}")
 
         await aiosmtplib.send(
             msg,
