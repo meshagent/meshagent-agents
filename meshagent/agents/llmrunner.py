@@ -1,11 +1,7 @@
-import os
 import json
-import asyncio
-import logging
 from typing import Optional
 
 from jsonschema import validate, ValidationError
-from meshagent.api.services import ServiceHost
 from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
 from meshagent.tools import Toolkit
@@ -93,9 +89,6 @@ class LLMTaskRunner(TaskRunner):
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
 
-        log.info(f"Running agent with prompt: {prompt}")
-        log.info(f"Running agent with toolkits: {combined_toolkits}")
-
         resp = await self._llm_adapter.next(
             context=context.chat,
             room=context.room,
@@ -108,7 +101,6 @@ class LLMTaskRunner(TaskRunner):
         try:
             validate(instance=resp, schema=self.output_schema)
         except ValidationError as exc:
-            log.error(f"LLM output failed schema validation: {exc}")
             raise RuntimeError("LLM output failed schema validation") from exc
 
         return resp
@@ -170,9 +162,6 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
 
-        log.info(f"Running agent with prompt: {prompt}")
-        log.info(f"Running agent with toolkits: {combined_toolkits}")
-
         resp = await self._llm_adapter.next(
             context=context.chat,
             room=context.room,
@@ -184,7 +173,6 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
         try:
             validate(instance=resp, schema=output_schema_raw)
         except ValidationError as exc:
-            log.error(f"LLM output failed caller schema validation: {exc}")
             raise RuntimeError("LLM output failed caller schema validation") from exc
 
         return resp
