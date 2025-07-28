@@ -293,6 +293,7 @@ class ChatBot(SingleRoomAgent):
         self._thread_tasks = dict[str, asyncio.Task]()
 
     def init_requirements(self, requires: list[Requirement]):
+        
         if requires is None:
             requires = [RequiredSchema(name="thread")]
 
@@ -420,8 +421,6 @@ class ChatBot(SingleRoomAgent):
         def done_processing_llm_events(task: asyncio.Task):
             try:
                 task.result()
-            except CancelledError:
-                pass
             except Exception as e:
                 logger.error("error sending delta", exc_info=e)
 
@@ -590,15 +589,6 @@ class ChatBot(SingleRoomAgent):
                             )
                             break
 
-                        for participant in get_thread_participants(
-                            room=self._room, thread=thread
-                        ):
-                            # TODO: async gather
-                            self._room.messaging.send_message_nowait(
-                                to=participant,
-                                type="thinking",
-                                message={"thinking": True, "path": path},
-                            )
 
                         if chat_with_participant.id == received.from_participant_id:
                             self.room.developer.log_nowait(
@@ -628,13 +618,6 @@ class ChatBot(SingleRoomAgent):
 
                             chat_context.append_user_message(message=text)
 
-                        # if user is typing, wait for typing to stop
-                        while True:
-                            if chat_with_participant.id not in self._is_typing:
-                                break
-
-                            await asyncio.sleep(0.5)
-
                         if messages.empty():
                             break
 
@@ -654,6 +637,17 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes({"text": text})
 
                         try:
+
+                            for participant in get_thread_participants(
+                                room=self._room, thread=thread
+                            ):
+                                # TODO: async gather
+                                self._room.messaging.send_message_nowait(
+                                    to=participant,
+                                    type="thinking",
+                                    message={"thinking": True, "path": path},
+                                )
+
                             if thread_context is None:
                                 thread_context = ChatThreadContext(
                                     path=path,
@@ -690,6 +684,7 @@ class ChatBot(SingleRoomAgent):
                                         tool_adapter=self._tool_adapter,
                                         event_handler=handle_event,
                                     )
+                                
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
                                     await self._send_and_save_chat(
@@ -702,27 +697,35 @@ class ChatBot(SingleRoomAgent):
                                     )
 
                         finally:
-                            for participant in get_thread_participants(
-                                room=self._room, thread=thread
-                            ):
-                                # TODO: async gather
-                                self._room.messaging.send_message_nowait(
-                                    to=participant,
-                                    type="thinking",
-                                    message={"thinking": False, "path": path},
-                                )
+
+                            async def cleanup():
+                                for participant in get_thread_participants(
+                                    room=self._room, thread=thread
+                                ):
+                                    self._room.messaging.send_message_nowait(
+                                        to=participant,
+                                        type="thinking",
+                                        message={"thinking": False, "path": path},
+                                    )
+
+                            
+                            asyncio.shield(cleanup())
 
         finally:
-            llm_messages.close()
+            
+            async def cleanup():
+                llm_messages.close()
 
-            if self.room is not None:
-                logger.info("thread was ended {path}")
-                self.room.developer.log_nowait(
-                    type="chatbot.thread.ended", data={"path": path}
-                )
+                if self.room is not None:
+                    logger.info(f"thread was ended {path}")
+                    self.room.developer.log_nowait(
+                        type="chatbot.thread.ended", data={"path": path}
+                    )
 
-                if thread is not None:
-                    await self.close_thread(path=path)
+                    if thread is not None:
+                        await self.close_thread(path=path)
+
+            asyncio.shield(cleanup())
 
     def _get_message_channel(self, key: str) -> Chan[RoomMessage]:
         if key not in self._message_channels:
@@ -765,6 +768,8 @@ class ChatBot(SingleRoomAgent):
                 if path not in self._thread_tasks or self._thread_tasks[path].done():
 
                     def thread_done(task: asyncio.Task):
+                        
+                        self._thread_tasks.pop(path)
                         self._message_channels.pop(path)
                         try:
                             task.result()
@@ -782,6 +787,11 @@ class ChatBot(SingleRoomAgent):
                     task.add_done_callback(thread_done)
 
                     self._thread_tasks[path] = task
+    
+            elif message.type == "cancel":
+                path = message.message["path"]
+                if path in self._thread_tasks:
+                    self._thread_tasks[path].cancel()
 
             elif message.type == "typing":
 
