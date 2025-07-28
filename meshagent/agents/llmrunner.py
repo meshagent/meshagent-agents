@@ -6,22 +6,13 @@ import logging
 from typing import Optional
 
 from jsonschema import validate, ValidationError
-from meshagent.otel import otel_config
 from meshagent.api.services import ServiceHost
 from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
 from meshagent.tools import Toolkit
-from meshagent.openai import OpenAIResponsesAdapter
 from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
-
-from meshagent.agents.planning import DynamicPlanningResponder
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-
-otel_config(service_name="task-runner-v-alot")
 
 class LLMTaskRunner(TaskRunner):
     """
