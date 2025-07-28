@@ -116,9 +116,7 @@ class AgentCallContext:
         on_behalf_of: Optional[Participant] = None,
     ):
         self._room = room
-        if toolkits is None:
-            toolkits = list[Toolkit]()
-        self._toolkits = toolkits
+        self._toolkits = list(toolkits or [])
         self._chat = chat
         self._caller = caller
         self._on_behalf_of = on_behalf_of
