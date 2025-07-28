@@ -1,4 +1,3 @@
-
 import os
 import json
 import asyncio
@@ -14,10 +13,12 @@ from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 
+
 class LLMTaskRunner(TaskRunner):
     """
-    A Task Runner that uses an LLM execution loop until the task is complete.    
+    A Task Runner that uses an LLM execution loop until the task is complete.
     """
+
     def __init__(
         self,
         *,
@@ -26,7 +27,7 @@ class LLMTaskRunner(TaskRunner):
         title: Optional[str] = None,
         description: Optional[str] = None,
         tool_adapter: Optional[ToolResponseAdapter] = None,
-        toolkits: Optional[list[Toolkit]] = None,  
+        toolkits: Optional[list[Toolkit]] = None,
         requires: Optional[list[Requirement]] = None,
         supports_tools: bool = True,
         input_prompt: bool = True,
@@ -34,11 +35,12 @@ class LLMTaskRunner(TaskRunner):
         output_schema: dict | None = None,
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
-    ):  
-
+    ):
         if input_schema is None:
             if input_prompt:
-                input_schema = prompt_schema(description="use a prompt to generate content")
+                input_schema = prompt_schema(
+                    description="use a prompt to generate content"
+                )
             else:
                 input_schema = {
                     "type": "object",
@@ -75,7 +77,7 @@ class LLMTaskRunner(TaskRunner):
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
         self.toolkits = static_toolkits
-        
+
     async def init_chat_context(self):
         chat = self._llm_adapter.create_chat_context()
         if self._extra_rules:
@@ -86,7 +88,7 @@ class LLMTaskRunner(TaskRunner):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
-        
+
         context.chat.append_user_message(prompt)
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
@@ -105,7 +107,7 @@ class LLMTaskRunner(TaskRunner):
         # Validate the LLM output against the declared schema
         try:
             validate(instance=resp, schema=self.output_schema)
-        except ValidationError as exc: 
+        except ValidationError as exc:
             log.error(f"LLM output failed schema validation: {exc}")
             raise RuntimeError("LLM output failed schema validation") from exc
 
@@ -116,17 +118,18 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
     """
     Same capabilities as LLMTaskRunner, but the caller supplies an arbitrary JSON-schema (`output_schema`) at runtime
     """
+
     def __init__(
-            self,
-            *, 
-            name:str,
-            llm_adapter: LLMAdapter,
-            supports_tools: bool = True,
-            title: Optional[str] = None,
-            description: Optional[str] = None,
-            tool_adapter: Optional[ToolResponseAdapter] = None,
-            toolkits: Optional[list[Toolkit]] = None,  
-            rules: Optional[list[str]] = None
+        self,
+        *,
+        name: str,
+        llm_adapter: LLMAdapter,
+        supports_tools: bool = True,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        tool_adapter: Optional[ToolResponseAdapter] = None,
+        toolkits: Optional[list[Toolkit]] = None,
+        rules: Optional[list[str]] = None,
     ):
         input_schema = merge(
             schema=prompt_schema(description="use a prompt to generate content"),
@@ -139,31 +142,30 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             title=title,
             description=description,
             tool_adapter=tool_adapter,
-            toolkits= toolkits,
+            toolkits=toolkits,
             rules=rules,
             input_prompt=True,
             input_schema=input_schema,
-            output_schema={"type":"object"}
+            output_schema={"type": "object"},
         )
-        
-            
-    async def ask(self, *, context:AgentCallContext, arguments:dict):
+
+    async def ask(self, *, context: AgentCallContext, arguments: dict):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
-        
+
         # Parse and pass JSON output schema provided at runtime
         output_schema_raw = arguments.get("output_schema")
         if output_schema_raw is None:
             raise ValueError("`output_schema` is required for DynamicLLMTaskRunner")
-        
+
         # Convert JSON string → dict if needed
         if isinstance(output_schema_raw, str):
             try:
                 output_schema_raw = json.loads(output_schema_raw)
             except json.JSONDecodeError as exc:
                 raise ValueError("`output_schema` must be valid JSON") from exc
-            
+
         context.chat.append_user_message(prompt)
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
@@ -181,7 +183,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
 
         try:
             validate(instance=resp, schema=output_schema_raw)
-        except ValidationError as exc: 
+        except ValidationError as exc:
             log.error(f"LLM output failed caller schema validation: {exc}")
             raise RuntimeError("LLM output failed caller schema validation") from exc
 
