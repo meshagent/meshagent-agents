@@ -8,6 +8,7 @@ from meshagent.tools import Toolkit
 from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.api.messaging import TextResponse
 
 
 class LLMTaskRunner(TaskRunner):
@@ -28,7 +29,7 @@ class LLMTaskRunner(TaskRunner):
         supports_tools: bool = True,
         input_prompt: bool = True,
         input_schema: Optional[dict] = None,
-        output_schema: dict | None = None,
+        output_schema: Optional[dict] = None,
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
     ):
@@ -44,16 +45,6 @@ class LLMTaskRunner(TaskRunner):
                     "required": [],
                     "properties": {},
                 }
-
-        if output_schema is None:
-            output_schema = {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["result"],
-                "properties": {"result": {"type": "string"}},
-            }
-        elif not isinstance(output_schema, dict):
-            raise TypeError("output_schema must be a dict or None")
 
         static_toolkits = list(toolkits or [])
 
@@ -97,14 +88,17 @@ class LLMTaskRunner(TaskRunner):
             output_schema=self.output_schema,
         )
 
-        # Validate the LLM output against the declared schema
-        try:
-            validate(instance=resp, schema=self.output_schema)
-        except ValidationError as exc:
-            raise RuntimeError("LLM output failed schema validation") from exc
+        # Validate the LLM output against the declared output schema if one was provided
+        if self.output_schema:
+            try:
+                validate(instance=resp, schema=self.output_schema)
+            except ValidationError as exc: 
+                raise RuntimeError("LLM output failed schema validation") from exc
+        # If no output schema was provided return a TextResponse
+        else: 
+            resp = TextResponse(text=resp)
 
         return resp
-
 
 class DynamicLLMTaskRunner(LLMTaskRunner):
     """
@@ -138,7 +132,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             rules=rules,
             input_prompt=True,
             input_schema=input_schema,
-            output_schema={"type": "object"},
+            output_schema=None,
         )
 
     async def ask(self, *, context: AgentCallContext, arguments: dict):
@@ -151,13 +145,10 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
         if output_schema_raw is None:
             raise ValueError("`output_schema` is required for DynamicLLMTaskRunner")
 
-        # Convert JSON string → dict if needed
-        if isinstance(output_schema_raw, str):
-            try:
-                output_schema_raw = json.loads(output_schema_raw)
-            except json.JSONDecodeError as exc:
-                raise ValueError("`output_schema` must be valid JSON") from exc
-
+        # Make sure provided schema is a dict
+        if not isinstance(output_schema_raw, dict):
+            raise TypeError("`output_schema` must be a dict (JSON-schema object)")
+            
         context.chat.append_user_message(prompt)
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
