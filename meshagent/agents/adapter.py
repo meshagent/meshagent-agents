@@ -44,7 +44,7 @@ class LLMAdapter(Generic[T]):
         *,
         context: AgentChatContext,
         room: RoomClient,
-        toolkits: Toolkit,
+        toolkits: list[Toolkit],
         tool_adapter: Optional[ToolResponseAdapter] = None,
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[T], None]] = None,

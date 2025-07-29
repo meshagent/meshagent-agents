@@ -335,7 +335,7 @@ class TaskRunner(SingleRoomAgent):
         requires=None,
         supports_tools: Optional[bool] = None,
         input_schema: dict,
-        output_schema: dict,
+        output_schema: Optional[dict] = None,
         labels: Optional[list[str]] = None,
         toolkits: Optional[list[Toolkit]] = None,
     ):

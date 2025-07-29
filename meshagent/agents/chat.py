@@ -420,58 +420,87 @@ class ChatBot(SingleRoomAgent):
         def done_processing_llm_events(task: asyncio.Task):
             try:
                 task.result()
-            except CancelledError:
-                pass
             except Exception as e:
                 logger.error("error sending delta", exc_info=e)
 
         async def process_llm_events():
-            partial = ""
-            content_element = None
             context_message = None
+            updates = asyncio.Queue()
 
-            async for evt in llm_messages:
-                for participant in self._room.messaging.get_participants():
-                    logger.debug(
-                        f"sending event {evt.type} to {participant.get_attribute('name')}"
-                    )
+            # throttle updates so we don't send too many syncs over the wire at once
+            async def update_thread():
+                try:
+                    changes = {}
+                    while True:
+                        try:
+                            element, partial = updates.get_nowait()
+                            changes[element] = partial
 
-                    # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
+                        except asyncio.QueueEmpty:
+                            for e, p in changes.items():
+                                e["text"] = p
 
-                if evt.type == "response.content_part.added":
-                    partial = ""
-                    content_element = doc_messages.append_child(
-                        tag_name="message",
-                        attributes={
-                            "text": "",
-                            "created_at": datetime.datetime.now(datetime.timezone.utc)
-                            .isoformat()
-                            .replace("+00:00", "Z"),
-                            "author_name": self.room.local_participant.get_attribute(
-                                "name"
-                            ),
-                        },
-                    )
+                            changes.clear()
 
-                    context_message = {"role": "assistant", "content": ""}
-                    chat_context.messages.append(context_message)
+                            e, p = await updates.get()
+                            changes[e] = p
 
-                elif evt.type == "response.output_text.delta":
-                    partial += evt.delta
-                    content_element["text"] = partial
-                    context_message["content"] = partial
+                            await asyncio.sleep(0.1)
 
-                elif evt.type == "response.output_text.done":
-                    content_element = None
+                except asyncio.QueueShutDown:
+                    pass
 
-                    with tracer.start_as_current_span("chatbot.thread.message") as span:
-                        span.set_attribute(
-                            "from_participant_name",
-                            self.room.local_participant.get_attribute("name"),
+            update_thread_task = asyncio.create_task(update_thread())
+            try:
+                async for evt in llm_messages:
+                    for participant in self._room.messaging.get_participants():
+                        logger.debug(
+                            f"sending event {evt.type} to {participant.get_attribute('name')}"
                         )
-                        span.set_attribute("role", "assistant")
-                        span.set_attributes(thread_attributes)
-                        span.set_attributes({"text": evt.text})
+
+                        # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
+
+                    if evt.type == "response.content_part.added":
+                        partial = ""
+                        content_element = doc_messages.append_child(
+                            tag_name="message",
+                            attributes={
+                                "text": "",
+                                "created_at": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                )
+                                .isoformat()
+                                .replace("+00:00", "Z"),
+                                "author_name": self.room.local_participant.get_attribute(
+                                    "name"
+                                ),
+                            },
+                        )
+
+                        context_message = {"role": "assistant", "content": ""}
+                        chat_context.messages.append(context_message)
+
+                    elif evt.type == "response.output_text.delta":
+                        partial += evt.delta
+                        updates.put_nowait((content_element, partial))
+                        context_message["content"] = partial
+
+                    elif evt.type == "response.output_text.done":
+                        content_element = None
+
+                        with tracer.start_as_current_span(
+                            "chatbot.thread.message"
+                        ) as span:
+                            span.set_attribute(
+                                "from_participant_name",
+                                self.room.local_participant.get_attribute("name"),
+                            )
+                            span.set_attribute("role", "assistant")
+                            span.set_attributes(thread_attributes)
+                            span.set_attributes({"text": evt.text})
+            finally:
+                await updates.shutdown()
+                await update_thread_task
 
         llm_task = asyncio.create_task(process_llm_events())
         llm_task.add_done_callback(done_processing_llm_events)
@@ -590,16 +619,6 @@ class ChatBot(SingleRoomAgent):
                             )
                             break
 
-                        for participant in get_thread_participants(
-                            room=self._room, thread=thread
-                        ):
-                            # TODO: async gather
-                            self._room.messaging.send_message_nowait(
-                                to=participant,
-                                type="thinking",
-                                message={"thinking": True, "path": path},
-                            )
-
                         if chat_with_participant.id == received.from_participant_id:
                             self.room.developer.log_nowait(
                                 type="llm.message",
@@ -628,13 +647,6 @@ class ChatBot(SingleRoomAgent):
 
                             chat_context.append_user_message(message=text)
 
-                        # if user is typing, wait for typing to stop
-                        while True:
-                            if chat_with_participant.id not in self._is_typing:
-                                break
-
-                            await asyncio.sleep(0.5)
-
                         if messages.empty():
                             break
 
@@ -654,6 +666,16 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes({"text": text})
 
                         try:
+                            for participant in get_thread_participants(
+                                room=self._room, thread=thread
+                            ):
+                                # TODO: async gather
+                                self._room.messaging.send_message_nowait(
+                                    to=participant,
+                                    type="thinking",
+                                    message={"thinking": True, "path": path},
+                                )
+
                             if thread_context is None:
                                 thread_context = ChatThreadContext(
                                     path=path,
@@ -690,6 +712,7 @@ class ChatBot(SingleRoomAgent):
                                         tool_adapter=self._tool_adapter,
                                         event_handler=handle_event,
                                     )
+
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
                                     await self._send_and_save_chat(
@@ -702,27 +725,34 @@ class ChatBot(SingleRoomAgent):
                                     )
 
                         finally:
-                            for participant in get_thread_participants(
-                                room=self._room, thread=thread
-                            ):
-                                # TODO: async gather
-                                self._room.messaging.send_message_nowait(
-                                    to=participant,
-                                    type="thinking",
-                                    message={"thinking": False, "path": path},
-                                )
+
+                            async def cleanup():
+                                for participant in get_thread_participants(
+                                    room=self._room, thread=thread
+                                ):
+                                    self._room.messaging.send_message_nowait(
+                                        to=participant,
+                                        type="thinking",
+                                        message={"thinking": False, "path": path},
+                                    )
+
+                            asyncio.shield(cleanup())
 
         finally:
-            llm_messages.close()
 
-            if self.room is not None:
-                logger.info("thread was ended {path}")
-                self.room.developer.log_nowait(
-                    type="chatbot.thread.ended", data={"path": path}
-                )
+            async def cleanup():
+                llm_messages.close()
 
-                if thread is not None:
-                    await self.close_thread(path=path)
+                if self.room is not None:
+                    logger.info(f"thread was ended {path}")
+                    self.room.developer.log_nowait(
+                        type="chatbot.thread.ended", data={"path": path}
+                    )
+
+                    if thread is not None:
+                        await self.close_thread(path=path)
+
+            asyncio.shield(cleanup())
 
     def _get_message_channel(self, key: str) -> Chan[RoomMessage]:
         if key not in self._message_channels:
@@ -765,6 +795,7 @@ class ChatBot(SingleRoomAgent):
                 if path not in self._thread_tasks or self._thread_tasks[path].done():
 
                     def thread_done(task: asyncio.Task):
+                        self._thread_tasks.pop(path)
                         self._message_channels.pop(path)
                         try:
                             task.result()
@@ -782,6 +813,11 @@ class ChatBot(SingleRoomAgent):
                     task.add_done_callback(thread_done)
 
                     self._thread_tasks[path] = task
+
+            elif message.type == "cancel":
+                path = message.message["path"]
+                if path in self._thread_tasks:
+                    self._thread_tasks[path].cancel()
 
             elif message.type == "typing":
 
