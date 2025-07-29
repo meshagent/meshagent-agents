@@ -92,13 +92,14 @@ class LLMTaskRunner(TaskRunner):
         if self.output_schema:
             try:
                 validate(instance=resp, schema=self.output_schema)
-            except ValidationError as exc: 
+            except ValidationError as exc:
                 raise RuntimeError("LLM output failed schema validation") from exc
         # If no output schema was provided return a TextResponse
-        else: 
+        else:
             resp = TextResponse(text=resp)
 
         return resp
+
 
 class DynamicLLMTaskRunner(LLMTaskRunner):
     """
@@ -148,7 +149,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
         # Make sure provided schema is a dict
         if not isinstance(output_schema_raw, dict):
             raise TypeError("`output_schema` must be a dict (JSON-schema object)")
-            
+
         context.chat.append_user_message(prompt)
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
