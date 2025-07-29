@@ -427,6 +427,7 @@ class ChatBot(SingleRoomAgent):
             context_message = None
             updates = asyncio.Queue()
 
+            # throttle updates so we don't send too many syncs over the wire at once
             async def update_thread():
                 try:
                     changes = {}
