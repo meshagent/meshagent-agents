@@ -499,7 +499,7 @@ class ChatBot(SingleRoomAgent):
                             span.set_attributes(thread_attributes)
                             span.set_attributes({"text": evt.text})
             finally:
-                await updates.shutdown()
+                updates.shutdown()
                 await update_thread_task
 
         llm_task = asyncio.create_task(process_llm_events())
