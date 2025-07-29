@@ -424,52 +424,82 @@ class ChatBot(SingleRoomAgent):
                 logger.error("error sending delta", exc_info=e)
 
         async def process_llm_events():
-            partial = ""
-            content_element = None
             context_message = None
+            updates = asyncio.Queue()
 
-            async for evt in llm_messages:
-                for participant in self._room.messaging.get_participants():
-                    logger.debug(
-                        f"sending event {evt.type} to {participant.get_attribute('name')}"
-                    )
+            async def update_thread():
+                try:
+                    changes = {}
+                    while True:
+                        try:
+                            element, partial = updates.get_nowait()
+                            changes[element] = partial
 
-                    # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
+                        except asyncio.QueueEmpty:
+                            for e, p in changes.items():
+                                e["text"] = p
 
-                if evt.type == "response.content_part.added":
-                    partial = ""
-                    content_element = doc_messages.append_child(
-                        tag_name="message",
-                        attributes={
-                            "text": "",
-                            "created_at": datetime.datetime.now(datetime.timezone.utc)
-                            .isoformat()
-                            .replace("+00:00", "Z"),
-                            "author_name": self.room.local_participant.get_attribute(
-                                "name"
-                            ),
-                        },
-                    )
+                            changes.clear()
 
-                    context_message = {"role": "assistant", "content": ""}
-                    chat_context.messages.append(context_message)
+                            e, p = await updates.get()
+                            changes[e] = p
 
-                elif evt.type == "response.output_text.delta":
-                    partial += evt.delta
-                    content_element["text"] = partial
-                    context_message["content"] = partial
+                            await asyncio.sleep(0.1)
 
-                elif evt.type == "response.output_text.done":
-                    content_element = None
+                except asyncio.QueueShutDown:
+                    pass
 
-                    with tracer.start_as_current_span("chatbot.thread.message") as span:
-                        span.set_attribute(
-                            "from_participant_name",
-                            self.room.local_participant.get_attribute("name"),
+            update_thread_task = asyncio.create_task(update_thread())
+            try:
+                async for evt in llm_messages:
+                    for participant in self._room.messaging.get_participants():
+                        logger.debug(
+                            f"sending event {evt.type} to {participant.get_attribute('name')}"
                         )
-                        span.set_attribute("role", "assistant")
-                        span.set_attributes(thread_attributes)
-                        span.set_attributes({"text": evt.text})
+
+                        # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
+
+                    if evt.type == "response.content_part.added":
+                        partial = ""
+                        content_element = doc_messages.append_child(
+                            tag_name="message",
+                            attributes={
+                                "text": "",
+                                "created_at": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                )
+                                .isoformat()
+                                .replace("+00:00", "Z"),
+                                "author_name": self.room.local_participant.get_attribute(
+                                    "name"
+                                ),
+                            },
+                        )
+
+                        context_message = {"role": "assistant", "content": ""}
+                        chat_context.messages.append(context_message)
+
+                    elif evt.type == "response.output_text.delta":
+                        partial += evt.delta
+                        updates.put_nowait((content_element, partial))
+                        context_message["content"] = partial
+
+                    elif evt.type == "response.output_text.done":
+                        content_element = None
+
+                        with tracer.start_as_current_span(
+                            "chatbot.thread.message"
+                        ) as span:
+                            span.set_attribute(
+                                "from_participant_name",
+                                self.room.local_participant.get_attribute("name"),
+                            )
+                            span.set_attribute("role", "assistant")
+                            span.set_attributes(thread_attributes)
+                            span.set_attributes({"text": evt.text})
+            finally:
+                await updates.shutdown()
+                await update_thread_task
 
         llm_task = asyncio.create_task(process_llm_events())
         llm_task.add_done_callback(done_processing_llm_events)
