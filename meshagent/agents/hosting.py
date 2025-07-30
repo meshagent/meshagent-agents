@@ -74,7 +74,7 @@ class RemoteTaskRunnerServer[T: TaskRunner](WebhookServer):
                 await agent.start(room=room)
 
                 done, pending = await asyncio.wait(
-                    [dismissed, asyncio.ensure_future(room.protocol.wait_for_close())],
+                    [dismissed, asyncio.create_task(room.protocol.wait_for_close())],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
 
@@ -158,7 +158,7 @@ class RemoteAgentServer[T: SingleRoomAgent](WebhookServer):
                 await agent.start(room=room)
 
                 done, pending = await asyncio.wait(
-                    [dismissed, asyncio.ensure_future(room.protocol.wait_for_close())],
+                    [dismissed, asyncio.create_task(room.protocol.wait_for_close())],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
 
