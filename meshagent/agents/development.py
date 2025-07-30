@@ -22,7 +22,7 @@ async def connect_development_agent(*, room_name: str, agent: SingleRoomAgent):
             signal.signal(signal.SIGABRT, clean_termination)
 
             await asyncio.wait(
-                [asyncio.ensure_future(room.protocol.wait_for_close()), term],
+                [asyncio.create_task(room.protocol.wait_for_close()), term],
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
