@@ -12,7 +12,6 @@ from meshagent.api import (
     ToolkitDescription,
     Participant,
     RemoteParticipant,
-    meshagent_base_url,
     StorageEntry,
 )
 from meshagent.api.protocol import Protocol
@@ -194,6 +193,8 @@ class SingleRoomAgent(Agent):
 
         installed = False
 
+        builtin_agents_url = "http://localhost:8080"
+
         for requirement in self.requires:
             if isinstance(requirement, RequiredToolkit):
                 if toolkit_factory(requirement.name) is not None:
@@ -207,12 +208,12 @@ class SingleRoomAgent(Agent):
                 if requirement.name not in toolkits_by_name:
                     installed = True
 
-                    logger.info(f"Installing required tool {requirement.name}")
+                    logger.info(f"calling required tool into room {requirement.name}")
 
                     if requirement.name.startswith("https://"):
                         url = requirement.name
                     else:
-                        url = f"{meshagent_base_url()}/toolkits/{requirement.name}"
+                        url = f"{builtin_agents_url}/toolkits/{requirement.name}"
 
                     await self._room.agents.make_call(
                         url=url, name=requirement.name, arguments={}
@@ -227,7 +228,7 @@ class SingleRoomAgent(Agent):
                     if requirement.name.startswith("https://"):
                         url = requirement.name
                     else:
-                        url = f"{meshagent_base_url()}/schemas/{requirement.name}"
+                        url = f"{builtin_agents_url}/schemas/{requirement.name}"
 
                     await self._room.agents.make_call(
                         url=url, name=requirement.name, arguments={}

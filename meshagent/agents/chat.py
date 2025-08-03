@@ -22,6 +22,7 @@ from typing import Literal
 import base64
 from openai.types.responses import ResponseStreamEvent
 from asyncio import CancelledError
+from meshagent.api import RoomException
 
 from opentelemetry import trace
 import shlex
@@ -307,13 +308,22 @@ class ChatBot(SingleRoomAgent):
 
     async def _send_and_save_chat(
         self,
-        messages: Element,
+        thread: MeshDocument,
         path: str,
         to: RemoteParticipant,
         id: str,
         text: str,
         thread_attributes: dict,
     ):
+        messages = None
+
+        for prop in thread.root.get_children():
+            if prop.tag_name == "messages":
+                messages = prop
+
+        if messages is None:
+            raise RoomException("messages element was not found in thread document")
+
         with tracer.start_as_current_span("chatbot.thread.message") as span:
             span.set_attributes(thread_attributes)
             span.set_attribute("role", "assistant")
@@ -339,10 +349,10 @@ class ChatBot(SingleRoomAgent):
                 },
             )
 
-    async def greet(
+    async def _greet(
         self,
         *,
-        messages: Element,
+        thread: MeshDocument,
         path: str,
         chat_context: AgentChatContext,
         participant: RemoteParticipant,
@@ -353,7 +363,7 @@ class ChatBot(SingleRoomAgent):
             await self._send_and_save_chat(
                 id=str(uuid.uuid4()),
                 to=RemoteParticipant(id=participant.id),
-                messages=messages,
+                thread=thread,
                 path=path,
                 text=self._auto_greet_message,
                 thread_attributes=thread_attributes,
@@ -403,6 +413,140 @@ class ChatBot(SingleRoomAgent):
     async def close_thread(self, *, path: str):
         return await self.room.sync.close(path=path)
 
+    async def load_thread_context(self, *, thread_context: ChatThreadContext):
+        """
+        load the thread from the thread document by inserting the current messages in the thread into the chat context
+        """
+        thread = thread_context.thread
+        chat_context = thread_context.chat
+        for prop in thread.root.get_children():
+            if prop.tag_name == "messages":
+                doc_messages = prop
+
+                for element in doc_messages.get_children():
+                    if isinstance(element, Element) and element.tag_name == "message":
+                        msg = element["text"]
+                        if element[
+                            "author_name"
+                        ] == self.room.local_participant.get_attribute("name"):
+                            chat_context.append_assistant_message(msg)
+                        else:
+                            chat_context.append_user_message(msg)
+
+                        for child in element.get_children():
+                            if child.tag_name == "file":
+                                chat_context.append_assistant_message(
+                                    f"the user attached a file with the path '{child.get_attribute('path')}'"
+                                )
+
+        if doc_messages is None:
+            raise Exception("thread was not properly initialized")
+
+    async def prepare_llm_context(self, *, context: ChatThreadContext):
+        """
+        called prior to sending the request to the LLM in case the agent needs to modify the context prior to sending
+        """
+        pass
+
+    async def _process_llm_events(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        llm_messages: asyncio.Queue,
+        thread_attributes: dict,
+    ):
+        thread = thread_context.thread
+        doc_messages = None
+        for prop in thread.root.get_children():
+            if prop.tag_name == "messages":
+                doc_messages = prop
+
+        if doc_messages is None:
+            raise RoomException("messages element is missing from thread document")
+
+        context_message = None
+        updates = asyncio.Queue()
+
+        # throttle updates so we don't send too many syncs over the wire at once
+        async def update_thread():
+            try:
+                changes = {}
+                while True:
+                    try:
+                        element, partial = updates.get_nowait()
+                        changes[element] = partial
+
+                    except asyncio.QueueEmpty:
+                        for e, p in changes.items():
+                            e["text"] = p
+
+                        changes.clear()
+
+                        e, p = await updates.get()
+                        changes[e] = p
+
+                        await asyncio.sleep(0.1)
+
+            except asyncio.QueueShutDown:
+                # flush any pending changes
+                for e, p in changes.items():
+                    e["text"] = p
+
+                changes.clear()
+                pass
+
+        update_thread_task = asyncio.create_task(update_thread())
+        try:
+            while True:
+                evt = await llm_messages.get()
+                for participant in self._room.messaging.get_participants():
+                    logger.debug(
+                        f"sending event {evt.type} to {participant.get_attribute('name')}"
+                    )
+
+                    # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
+
+                if evt.type == "response.content_part.added":
+                    partial = ""
+
+                    content_element = doc_messages.append_child(
+                        tag_name="message",
+                        attributes={
+                            "text": "",
+                            "created_at": datetime.datetime.now(datetime.timezone.utc)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                            "author_name": self.room.local_participant.get_attribute(
+                                "name"
+                            ),
+                        },
+                    )
+
+                    context_message = {"role": "assistant", "content": ""}
+                    thread_context.chat.messages.append(context_message)
+
+                elif evt.type == "response.output_text.delta":
+                    partial += evt.delta
+                    updates.put_nowait((content_element, partial))
+                    context_message["content"] = partial
+
+                elif evt.type == "response.output_text.done":
+                    content_element = None
+
+                    with tracer.start_as_current_span("chatbot.thread.message") as span:
+                        span.set_attribute(
+                            "from_participant_name",
+                            self.room.local_participant.get_attribute("name"),
+                        )
+                        span.set_attribute("role", "assistant")
+                        span.set_attributes(thread_attributes)
+                        span.set_attributes({"text": evt.text})
+        except asyncio.QueueShutDown:
+            pass
+        finally:
+            updates.shutdown()
+            await update_thread_task
+
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         self.room.developer.log_nowait(
             type="chatbot.thread.started", data={"path": path}
@@ -410,100 +554,10 @@ class ChatBot(SingleRoomAgent):
         chat_context = await self.init_chat_context()
         opened = False
 
-        doc_messages = None
         current_file = None
-        llm_messages = Chan[ResponseStreamEvent]()
         thread_context = None
 
         thread_attributes = None
-
-        def done_processing_llm_events(task: asyncio.Task):
-            try:
-                task.result()
-            except Exception as e:
-                logger.error("error sending delta", exc_info=e)
-
-        async def process_llm_events():
-            context_message = None
-            updates = asyncio.Queue()
-
-            # throttle updates so we don't send too many syncs over the wire at once
-            async def update_thread():
-                try:
-                    changes = {}
-                    while True:
-                        try:
-                            element, partial = updates.get_nowait()
-                            changes[element] = partial
-
-                        except asyncio.QueueEmpty:
-                            for e, p in changes.items():
-                                e["text"] = p
-
-                            changes.clear()
-
-                            e, p = await updates.get()
-                            changes[e] = p
-
-                            await asyncio.sleep(0.1)
-
-                except asyncio.QueueShutDown:
-                    pass
-
-            update_thread_task = asyncio.create_task(update_thread())
-            try:
-                async for evt in llm_messages:
-                    for participant in self._room.messaging.get_participants():
-                        logger.debug(
-                            f"sending event {evt.type} to {participant.get_attribute('name')}"
-                        )
-
-                        # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
-
-                    if evt.type == "response.content_part.added":
-                        partial = ""
-                        content_element = doc_messages.append_child(
-                            tag_name="message",
-                            attributes={
-                                "text": "",
-                                "created_at": datetime.datetime.now(
-                                    datetime.timezone.utc
-                                )
-                                .isoformat()
-                                .replace("+00:00", "Z"),
-                                "author_name": self.room.local_participant.get_attribute(
-                                    "name"
-                                ),
-                            },
-                        )
-
-                        context_message = {"role": "assistant", "content": ""}
-                        chat_context.messages.append(context_message)
-
-                    elif evt.type == "response.output_text.delta":
-                        partial += evt.delta
-                        updates.put_nowait((content_element, partial))
-                        context_message["content"] = partial
-
-                    elif evt.type == "response.output_text.done":
-                        content_element = None
-
-                        with tracer.start_as_current_span(
-                            "chatbot.thread.message"
-                        ) as span:
-                            span.set_attribute(
-                                "from_participant_name",
-                                self.room.local_participant.get_attribute("name"),
-                            )
-                            span.set_attribute("role", "assistant")
-                            span.set_attributes(thread_attributes)
-                            span.set_attributes({"text": evt.text})
-            finally:
-                updates.shutdown()
-                await update_thread_task
-
-        llm_task = asyncio.create_task(process_llm_events())
-        llm_task.add_done_callback(done_processing_llm_events)
 
         thread = None
 
@@ -512,9 +566,9 @@ class ChatBot(SingleRoomAgent):
 
             while True:
                 while True:
-                    logger.info(f"waiting for message on thread {path}")
+                    logger.debug(f"waiting for message on thread {path}")
                     received = await messages.recv()
-                    logger.info(f"received message on thread {path}: {received.type}")
+                    logger.debug(f"received message on thread {path}: {received.type}")
 
                     chat_with_participant = None
                     for participant in self._room.messaging.get_participants():
@@ -569,46 +623,28 @@ class ChatBot(SingleRoomAgent):
 
                             thread = await self.open_thread(path=path)
 
-                            for prop in thread.root.get_children():
-                                if prop.tag_name == "messages":
-                                    doc_messages = prop
+                            thread_context = ChatThreadContext(
+                                path=path,
+                                chat=chat_context,
+                                thread=thread,
+                                participants=get_thread_participants(
+                                    room=self.room, thread=thread
+                                ),
+                            )
 
-                                    for element in doc_messages.get_children():
-                                        if (
-                                            isinstance(element, Element)
-                                            and element.tag_name == "message"
-                                        ):
-                                            msg = element["text"]
-                                            if (
-                                                element["author_name"]
-                                                == self.room.local_participant.get_attribute(
-                                                    "name"
-                                                )
-                                            ):
-                                                chat_context.append_assistant_message(
-                                                    msg
-                                                )
-                                            else:
-                                                chat_context.append_user_message(msg)
-
-                                            for child in element.get_children():
-                                                if child.tag_name == "file":
-                                                    chat_context.append_assistant_message(
-                                                        f"the user attached a file with the path '{child.get_attribute('path')}'"
-                                                    )
-
-                            if doc_messages is None:
-                                raise Exception("thread was not properly initialized")
+                            await self.load_thread_context(
+                                thread_context=thread_context
+                            )
 
                     if received.type == "opened":
                         if not opened:
                             opened = True
 
-                            await self.greet(
+                            await self._greet(
                                 path=path,
                                 chat_context=chat_context,
                                 participant=chat_with_participant,
-                                messages=doc_messages,
+                                thread=thread,
                                 thread_attributes=thread_attributes,
                             )
 
@@ -690,9 +726,6 @@ class ChatBot(SingleRoomAgent):
                                     room=self.room, thread=thread
                                 )
 
-                            def handle_event(evt):
-                                llm_messages.send_nowait(evt)
-
                             with tracer.start_as_current_span("chatbot.llm") as span:
                                 try:
                                     with tracer.start_as_current_span(
@@ -705,6 +738,23 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
+                                    await self.prepare_llm_context(
+                                        context=thread_context
+                                    )
+
+                                    llm_messages = asyncio.Queue[ResponseStreamEvent]()
+
+                                    def handle_event(evt):
+                                        llm_messages.put_nowait(evt)
+
+                                    llm_task = asyncio.create_task(
+                                        self._process_llm_events(
+                                            thread_context=thread_context,
+                                            llm_messages=llm_messages,
+                                            thread_attributes=thread_attributes,
+                                        )
+                                    )
+
                                     await self._llm_adapter.next(
                                         context=chat_context,
                                         room=self._room,
@@ -713,10 +763,13 @@ class ChatBot(SingleRoomAgent):
                                         event_handler=handle_event,
                                     )
 
+                                    llm_messages.shutdown()
+                                    await llm_task
+
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
                                     await self._send_and_save_chat(
-                                        messages=doc_messages,
+                                        thread=thread,
                                         to=chat_with_participant,
                                         path=path,
                                         id=str(uuid.uuid4()),
@@ -741,8 +794,6 @@ class ChatBot(SingleRoomAgent):
         finally:
 
             async def cleanup():
-                llm_messages.close()
-
                 if self.room is not None:
                     logger.info(f"thread was ended {path}")
                     self.room.developer.log_nowait(
@@ -786,7 +837,7 @@ class ChatBot(SingleRoomAgent):
 
                 messages = self._get_message_channel(path)
 
-                logger.info(
+                logger.debug(
                     f"queued incoming message for thread {path}: {message.type}"
                 )
 
