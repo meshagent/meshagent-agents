@@ -442,7 +442,7 @@ class ChatBot(SingleRoomAgent):
                                 chat_context.append_assistant_message(
                                     f"the user attached a file with the path '{child.get_attribute('path')}'"
                                 )
-                
+
                 break
 
         if doc_messages is None:
