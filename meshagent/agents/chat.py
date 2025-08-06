@@ -466,7 +466,7 @@ class ChatBot(SingleRoomAgent):
         for prop in thread.root.get_children():
             if prop.tag_name == "messages":
                 doc_messages = prop
-            break
+                break
 
         if doc_messages is None:
             raise RoomException("messages element is missing from thread document")
