@@ -548,9 +548,7 @@ class ChatBot(SingleRoomAgent):
             await update_thread_task
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
-        self.room.developer.log_nowait(
-            type="chatbot.thread.started", data={"path": path}
-        )
+        logger.info("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
         opened = False
 
@@ -650,38 +648,35 @@ class ChatBot(SingleRoomAgent):
 
                     if received.type == "chat":
                         if thread is None:
-                            self.room.developer.log_nowait(
-                                type="thread is not open", data={}
-                            )
+                            logger.info("thread is not open", extra={"path": path})
                             break
 
-                        if chat_with_participant.id == received.from_participant_id:
-                            self.room.developer.log_nowait(
-                                type="llm.message",
-                                data={
-                                    "context": chat_context.id,
-                                    "participant_id": self.room.local_participant.id,
-                                    "participant_name": self.room.local_participant.get_attribute(
-                                        "name"
-                                    ),
-                                    "message": {
-                                        "content": {
-                                            "role": "user",
-                                            "text": received.message["text"],
-                                        }
-                                    },
+                        logger.info(
+                            "chatbot received a chat",
+                            extra={
+                                "context": chat_context.id,
+                                "participant_id": self.room.local_participant.id,
+                                "participant_name": self.room.local_participant.get_attribute(
+                                    "name"
+                                ),
+                                "message": {
+                                    "content": {
+                                        "role": "user",
+                                        "text": received.message["text"],
+                                    }
                                 },
+                            },
+                        )
+
+                        attachments = received.message.get("attachments", [])
+                        text = received.message["text"]
+
+                        for attachment in attachments:
+                            chat_context.append_assistant_message(
+                                message=f"the user attached a file at the path '{attachment['path']}'"
                             )
 
-                            attachments = received.message.get("attachments", [])
-                            text = received.message["text"]
-
-                            for attachment in attachments:
-                                chat_context.append_assistant_message(
-                                    message=f"the user attached a file at the path '{attachment['path']}'"
-                                )
-
-                            chat_context.append_user_message(message=text)
+                        chat_context.append_user_message(message=text)
 
                         if messages.empty():
                             break
@@ -796,9 +791,7 @@ class ChatBot(SingleRoomAgent):
             async def cleanup():
                 if self.room is not None:
                     logger.info(f"thread was ended {path}")
-                    self.room.developer.log_nowait(
-                        type="chatbot.thread.ended", data={"path": path}
-                    )
+                    logger.info("chatbot thread ended", extra={"path": path})
 
                     if thread is not None:
                         await self.close_thread(path=path)
