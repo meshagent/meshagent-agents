@@ -1,4 +1,4 @@
-from .agent import SingleRoomAgent, AgentChatContext
+from meshagent.agents.agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
 from meshagent.api import (
     RoomMessage,
@@ -10,7 +10,7 @@ from meshagent.api import (
     MeshDocument,
 )
 from meshagent.tools import Toolkit, ToolContext
-from .adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import ImageGenerationTool, LocalShellTool
 import asyncio
 from typing import Optional
