@@ -548,7 +548,7 @@ class ChatBot(SingleRoomAgent):
             await update_thread_task
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
-        logger.info("chatbot is starting a thread", extra={"path": path})
+        logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
         opened = False
 
@@ -651,7 +651,7 @@ class ChatBot(SingleRoomAgent):
                             logger.info("thread is not open", extra={"path": path})
                             break
 
-                        logger.info(
+                        logger.debug(
                             "chatbot received a chat",
                             extra={
                                 "context": chat_context.id,
@@ -845,7 +845,7 @@ class ChatBot(SingleRoomAgent):
                                 f"The chat thread ended with an error {e}", exc_info=e
                             )
 
-                    logger.info(f"spawning chat thread for {path}")
+                    logger.debug(f"spawning chat thread for {path}")
                     task = asyncio.create_task(
                         self._spawn_thread(messages=messages, path=path)
                     )
