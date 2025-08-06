@@ -1,5 +1,4 @@
 from meshagent.api import RoomClient, Requirement, RoomException, Participant
-from meshagent.tools import validate_openai_schema
 import json
 from typing import Optional
 import asyncio
@@ -35,7 +34,6 @@ async def generate_json(
     if prompt is None:
         prompt = f"ask me a series of questions to completely fill out the data structure described by this JSON schema ${json.dumps(output_schema)}. If you need to ask multiple questions, try to include all of them in a single form."
 
-    validate_openai_schema(output_schema)
     return await room.agents.ask(
         on_behalf_of=on_behalf_of,
         agent="meshagent.schema_planner",
