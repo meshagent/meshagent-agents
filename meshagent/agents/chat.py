@@ -53,6 +53,7 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         exec_element = messages.append_child(
             tag_name="exec",
@@ -136,6 +137,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         for child in messages.get_children():
             if child.get_attribute("id") == item_id:
@@ -185,6 +187,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         for child in messages.get_children():
             if child.get_attribute("id") == item_id:
@@ -320,6 +323,7 @@ class ChatBot(SingleRoomAgent):
         for prop in thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         if messages is None:
             raise RoomException("messages element was not found in thread document")
@@ -439,6 +443,8 @@ class ChatBot(SingleRoomAgent):
                                     f"the user attached a file with the path '{child.get_attribute('path')}'"
                                 )
 
+                break
+
         if doc_messages is None:
             raise Exception("thread was not properly initialized")
 
@@ -460,6 +466,7 @@ class ChatBot(SingleRoomAgent):
         for prop in thread.root.get_children():
             if prop.tag_name == "messages":
                 doc_messages = prop
+                break
 
         if doc_messages is None:
             raise RoomException("messages element is missing from thread document")
@@ -548,7 +555,7 @@ class ChatBot(SingleRoomAgent):
             await update_thread_task
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
-        logger.info("chatbot is starting a thread", extra={"path": path})
+        logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
         opened = False
 
@@ -651,7 +658,7 @@ class ChatBot(SingleRoomAgent):
                             logger.info("thread is not open", extra={"path": path})
                             break
 
-                        logger.info(
+                        logger.debug(
                             "chatbot received a chat",
                             extra={
                                 "context": chat_context.id,
@@ -845,7 +852,7 @@ class ChatBot(SingleRoomAgent):
                                 f"The chat thread ended with an error {e}", exc_info=e
                             )
 
-                    logger.info(f"spawning chat thread for {path}")
+                    logger.debug(f"spawning chat thread for {path}")
                     task = asyncio.create_task(
                         self._spawn_thread(messages=messages, path=path)
                     )
