@@ -659,12 +659,7 @@ class ChatBot(SingleRoomAgent):
                                 "participant_name": self.room.local_participant.get_attribute(
                                     "name"
                                 ),
-                                "message": {
-                                    "content": {
-                                        "role": "user",
-                                        "text": received.message["text"],
-                                    }
-                                },
+                                "text": received.message["text"],
                             },
                         )
 
