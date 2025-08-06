@@ -448,7 +448,7 @@ class ChatBot(SingleRoomAgent):
         if doc_messages is None:
             raise Exception("thread was not properly initialized")
 
-    async def prepare_llm_context(self, *, context: ChatThreadContext):
+    async def prepare_llm_context(self, *, thread_context: ChatThreadContext):
         """
         called prior to sending the request to the LLM in case the agent needs to modify the context prior to sending
         """
@@ -736,7 +736,7 @@ class ChatBot(SingleRoomAgent):
                                         )
 
                                     await self.prepare_llm_context(
-                                        context=thread_context
+                                        thread_context=thread_context
                                     )
 
                                     llm_messages = asyncio.Queue[ResponseStreamEvent]()
