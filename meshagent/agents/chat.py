@@ -53,6 +53,7 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         exec_element = messages.append_child(
             tag_name="exec",
@@ -136,6 +137,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         for child in messages.get_children():
             if child.get_attribute("id") == item_id:
@@ -185,6 +187,7 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         for child in messages.get_children():
             if child.get_attribute("id") == item_id:
@@ -320,6 +323,7 @@ class ChatBot(SingleRoomAgent):
         for prop in thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
+                break
 
         if messages is None:
             raise RoomException("messages element was not found in thread document")
@@ -438,6 +442,8 @@ class ChatBot(SingleRoomAgent):
                                 chat_context.append_assistant_message(
                                     f"the user attached a file with the path '{child.get_attribute('path')}'"
                                 )
+                
+                break
 
         if doc_messages is None:
             raise Exception("thread was not properly initialized")
@@ -460,6 +466,7 @@ class ChatBot(SingleRoomAgent):
         for prop in thread.root.get_children():
             if prop.tag_name == "messages":
                 doc_messages = prop
+            break
 
         if doc_messages is None:
             raise RoomException("messages element is missing from thread document")
