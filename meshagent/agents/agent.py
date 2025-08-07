@@ -210,7 +210,9 @@ class SingleRoomAgent(Agent):
 
                     logger.info(f"calling required tool into room {requirement.name}")
 
-                    if requirement.name.startswith("https://"):
+                    if requirement.name.startswith(
+                        "https://"
+                    ) or requirement.name.startswith("http://"):
                         url = requirement.name
                     else:
                         url = f"{builtin_agents_url}/toolkits/{requirement.name}"
@@ -225,7 +227,9 @@ class SingleRoomAgent(Agent):
 
                     logger.info(f"Installing required schema {requirement.name}")
 
-                    if requirement.name.startswith("https://"):
+                    if requirement.name.startswith(
+                        "https://"
+                    ) or requirement.name.startswith("http://"):
                         url = requirement.name
                     else:
                         url = f"{builtin_agents_url}/schemas/{requirement.name}"
