@@ -2,8 +2,9 @@ from .agent import SingleRoomAgent
 from meshagent.api import websocket_protocol, RoomClient
 import asyncio
 import signal
+from warnings import deprecated
 
-
+@deprecated("use ServiceHost and the cli to connect agents to the room")
 async def connect_development_agent(*, room_name: str, agent: SingleRoomAgent):
     async with RoomClient(
         protocol=websocket_protocol(
