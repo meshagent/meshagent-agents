@@ -9,7 +9,7 @@ from meshagent.api import ParticipantToken
 from meshagent.api import RoomClient
 from meshagent.agents import AgentChatContext
 from datetime import datetime, timezone
-
+import base64
 import secrets
 
 from typing import Literal, Optional
@@ -283,6 +283,12 @@ class MailWorker(Worker):
         )
 
     async def process_message(self, *, chat_context, room, message, toolkits):
+        message_bytes = base64.decode(message["base64"])
+
+        message = await save_email_message(
+            room=room, content=message_bytes, role="agent"
+        )
+
         thread_context = MailThreadContext(chat=chat_context, room_address=message)
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
 
