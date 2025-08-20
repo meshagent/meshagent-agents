@@ -35,7 +35,7 @@ thread_schema = MeshSchema(
             properties=[
                 ChildProperty(
                     name="items",
-                    child_tag_names=["message", "exec"],
+                    child_tag_names=["message", "exec", "ui"],
                     description="the messages in this thread",
                 )
             ],
@@ -48,10 +48,14 @@ thread_schema = MeshSchema(
                     name="name", description="the name of the member", type="string"
                 ),
                 ValueProperty(
-                    name="type",
-                    description="the type of member",
+                    name="renderer",
+                    description="the renderer to use",
                     type="string",
-                    enum=["user", "agent"],
+                ),
+                ValueProperty(
+                    name="widget",
+                    description="the type of widget",
+                    type="string",
                 ),
             ],
         ),
@@ -83,6 +87,22 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="pwd",
                     description="the working directory the command was executed in",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
+            tag_name="ui",
+            description="custom user interface data",
+            properties=[
+                ValueProperty(
+                    name="data",
+                    description="raw data to be renderered, usually in JSON format",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="type",
+                    description="the type of data",
                     type="string",
                 ),
             ],
