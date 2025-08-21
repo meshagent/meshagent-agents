@@ -291,7 +291,9 @@ class MailWorker(Worker):
 
         thread_context = MailThreadContext(chat=chat_context, room_address=message)
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
-
+        await self.append_message_context(
+            room=room, message=message, chat_context=chat_context
+        )
         logger.info(f"processing message {message}")
         reply = await super().process_message(
             chat_context=thread_context.chat,

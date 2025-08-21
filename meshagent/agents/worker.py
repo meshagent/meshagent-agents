@@ -72,6 +72,9 @@ class Worker(SingleRoomAgent):
     ):
         chat_context.append_user_message(message=json.dumps(message))
 
+    def decode_message(self, message: dict):
+        return message
+
     async def process_message(
         self,
         *,
@@ -80,6 +83,10 @@ class Worker(SingleRoomAgent):
         message: dict,
         toolkits: list[Toolkit],
     ):
+        await self.append_message_context(
+            room=room, message=message, chat_context=chat_context
+        )
+
         return await self._llm_adapter.next(
             context=chat_context,
             room=room,
@@ -101,6 +108,7 @@ class Worker(SingleRoomAgent):
                 message = await room.queues.receive(
                     name=self._queue, create=True, wait=True
                 )
+
                 backoff = 0
                 if message is not None:
                     logger.info(f"received message on worker queue {message}")
@@ -111,10 +119,6 @@ class Worker(SingleRoomAgent):
                             rules=[
                                 *self._rules,
                             ]
-                        )
-
-                        await self.append_message_context(
-                            room=room, message=message, chat_context=chat_context
                         )
 
                         await self.process_message(
