@@ -47,16 +47,6 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="name", description="the name of the member", type="string"
                 ),
-                ValueProperty(
-                    name="renderer",
-                    description="the renderer to use",
-                    type="string",
-                ),
-                ValueProperty(
-                    name="widget",
-                    description="the type of widget",
-                    type="string",
-                ),
             ],
         ),
         ElementType(
@@ -101,8 +91,13 @@ thread_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
-                    name="type",
-                    description="the type of data",
+                    name="renderer",
+                    description="the renderer to use",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="widget",
+                    description="the type of widget",
                     type="string",
                 ),
             ],
