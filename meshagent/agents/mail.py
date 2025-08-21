@@ -26,9 +26,9 @@ type MessageRole = Literal["user", "agent"]
 
 
 class MailThreadContext:
-    def __init__(self, *, chat: AgentChatContext, room_address: str):
+    def __init__(self, *, chat: AgentChatContext, message: dict):
         self.chat = chat
-        self.room_address = room_address
+        self.message = message
 
 
 def create_reply_email_message(
@@ -282,7 +282,7 @@ class MailWorker(Worker):
             room=room, content=message_bytes, role="agent"
         )
 
-        thread_context = MailThreadContext(chat=chat_context, room_address=message)
+        thread_context = MailThreadContext(chat=chat_context, message=message)
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
         await self.append_message_context(
             room=room, message=message, chat_context=chat_context
