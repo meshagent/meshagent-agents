@@ -283,7 +283,7 @@ class MailWorker(Worker):
         )
 
     async def process_message(self, *, chat_context, room, message, toolkits):
-        message_bytes = base64.decode(message["base64"])
+        message_bytes = base64.b64decode(message["base64"])
 
         message = await save_email_message(
             room=room, content=message_bytes, role="agent"
