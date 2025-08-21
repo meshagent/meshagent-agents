@@ -244,7 +244,9 @@ class SingleRoomAgent(Agent):
         if installed:
             await asyncio.sleep(5)
 
-    async def get_required_toolkits(self, context: ToolContext) -> list[Toolkit]:
+    async def get_toolkits(
+        self, context: ToolContext, remote_toolkits: list[RequiredToolkit]
+    ):
         tool_target = context.caller
         if context.on_behalf_of is not None:
             tool_target = context.on_behalf_of
@@ -260,7 +262,7 @@ class SingleRoomAgent(Agent):
         for toolkit_description in visible_tools:
             toolkits_by_name[toolkit_description.name] = toolkit_description
 
-        for required_toolkit in self.requires:
+        for required_toolkit in remote_toolkits:
             if isinstance(required_toolkit, RequiredToolkit):
                 if toolkit_factory(required_toolkit.name) is not None:
                     toolkit = await toolkit_factory(required_toolkit.name)(
@@ -328,6 +330,9 @@ class SingleRoomAgent(Agent):
                 )
 
         return toolkits
+
+    async def get_required_toolkits(self, context: ToolContext) -> list[Toolkit]:
+        return await self.get_toolkits(context, self.requires)
 
 
 class TaskRunner(SingleRoomAgent):
