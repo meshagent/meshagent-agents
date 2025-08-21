@@ -237,6 +237,7 @@ class MailWorker(Worker):
         tool_adapter=None,
         toolkits=None,
         rules=None,
+        email_address: str,
         domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
         smtp: Optional[SmtpConfiguration] = None,
     ):
@@ -256,14 +257,7 @@ class MailWorker(Worker):
             toolkits=toolkits,
             rules=rules,
         )
-
-    async def start(self, *, room):
-        await super().start(room=room)
-
-        token = ParticipantToken.from_jwt(room.protocol.token, validate=False)
-        self._email_address = room_address(
-            project_id=token.project_id, room_name=room.room_name, domain=self._domain
-        )
+        self._email_address = email_address
 
     async def append_message_context(self, *, room, message, chat_context):
         thread = [message]
