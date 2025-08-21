@@ -5,7 +5,6 @@ from email.message import EmailMessage
 from email.policy import default
 from meshagent.tools import ToolContext, Toolkit
 import email.utils
-from meshagent.api import ParticipantToken
 from meshagent.api import RoomClient
 from meshagent.agents import AgentChatContext
 from datetime import datetime, timezone
