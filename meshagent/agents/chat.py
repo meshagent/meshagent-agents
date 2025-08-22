@@ -8,10 +8,16 @@ from meshagent.api import (
     Requirement,
     Element,
     MeshDocument,
+    RequiredToolkit,
 )
 from meshagent.tools import Toolkit, ToolContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
-from meshagent.openai.tools.responses_adapter import ImageGenerationTool, LocalShellTool
+from meshagent.openai.tools.responses_adapter import (
+    ImageGenerationTool,
+    LocalShellTool,
+    OpenAIResponsesAdapter,
+    WebSearchTool,
+)
 import asyncio
 from typing import Optional
 import logging
@@ -554,6 +560,43 @@ class ChatBot(SingleRoomAgent):
             updates.shutdown()
             await update_thread_task
 
+    def is_builtin_toolkit(self, toolkit: RequiredToolkit) -> bool:
+        if isinstance(self._llm_adapter, OpenAIResponsesAdapter):
+            if toolkit.name == "web_search":
+                return True
+
+            elif toolkit.name == "local_shell":
+                return True
+
+            elif toolkit.name == "image_gen":
+                return True
+
+        return False
+
+    def get_built_in_toolkit(
+        self, *, thread_context: ChatThreadContext, toolkit: RequiredToolkit
+    ):
+        if toolkit.name == "web_search":
+            return Toolkit(name="openai_web_search", tools=[WebSearchTool()])
+
+        elif toolkit.name == "local_shell":
+            return Toolkit(
+                name="openai_local_shell",
+                tools=[ChatBotThreadLocalShellTool(thread_context=thread_context)],
+            )
+
+        elif toolkit.name == "image_gen":
+            return Toolkit(
+                name="openai_image_gen",
+                tools=[
+                    ChatBotThreadOpenAIImageGenerationTool(
+                        thread_context=thread_context
+                    )
+                ],
+            )
+
+        raise RoomException(f"not a built in tool {toolkit.name}")
+
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
@@ -570,120 +613,108 @@ class ChatBot(SingleRoomAgent):
             received = None
 
             while True:
-                while True:
-                    logger.debug(f"waiting for message on thread {path}")
-                    received = await messages.recv()
-                    logger.debug(f"received message on thread {path}: {received.type}")
+                logger.debug(f"waiting for message on thread {path}")
+                received = await messages.recv()
+                logger.debug(f"received message on thread {path}: {received.type}")
 
-                    chat_with_participant = None
-                    for participant in self._room.messaging.get_participants():
-                        if participant.id == received.from_participant_id:
-                            chat_with_participant = participant
-                            break
+                chat_with_participant = None
+                for participant in self._room.messaging.get_participants():
+                    if participant.id == received.from_participant_id:
+                        chat_with_participant = participant
+                        break
 
-                    if chat_with_participant is None:
-                        logger.warning(
-                            "participant does not have messaging enabled, skipping message"
+                if chat_with_participant is None:
+                    logger.warning(
+                        "participant does not have messaging enabled, skipping message"
+                    )
+                    continue
+
+                thread_attributes = {
+                    "agent_name": self.name,
+                    "agent_participant_id": self.room.local_participant.id,
+                    "agent_participant_name": self.room.local_participant.get_attribute(
+                        "name"
+                    ),
+                    "remote_participant_id": chat_with_participant.id,
+                    "remote_participant_name": chat_with_participant.get_attribute(
+                        "name"
+                    ),
+                    "path": path,
+                }
+
+                if current_file != chat_with_participant.get_attribute("current_file"):
+                    logger.info(
+                        f"participant is now looking at {chat_with_participant.get_attribute('current_file')}"
+                    )
+                    current_file = chat_with_participant.get_attribute("current_file")
+
+                if current_file is not None:
+                    chat_context.append_assistant_message(
+                        message=f"the user is currently viewing the file at the path: {current_file}"
+                    )
+
+                elif current_file is not None:
+                    chat_context.append_assistant_message(
+                        message="the user is not current viewing any files"
+                    )
+
+                if thread is None:
+                    with tracer.start_as_current_span("chatbot.thread.open") as span:
+                        span.set_attributes(thread_attributes)
+
+                        thread = await self.open_thread(path=path)
+
+                        thread_context = ChatThreadContext(
+                            path=path,
+                            chat=chat_context,
+                            thread=thread,
+                            participants=get_thread_participants(
+                                room=self.room, thread=thread
+                            ),
                         )
-                        continue
 
-                    thread_attributes = {
-                        "agent_name": self.name,
-                        "agent_participant_id": self.room.local_participant.id,
-                        "agent_participant_name": self.room.local_participant.get_attribute(
-                            "name"
-                        ),
-                        "remote_participant_id": chat_with_participant.id,
-                        "remote_participant_name": chat_with_participant.get_attribute(
-                            "name"
-                        ),
-                        "path": path,
-                    }
+                        await self.load_thread_context(thread_context=thread_context)
 
-                    if current_file != chat_with_participant.get_attribute(
-                        "current_file"
-                    ):
-                        logger.info(
-                            f"participant is now looking at {chat_with_participant.get_attribute('current_file')}"
-                        )
-                        current_file = chat_with_participant.get_attribute(
-                            "current_file"
+                if received.type == "opened":
+                    if not opened:
+                        opened = True
+
+                        await self._greet(
+                            path=path,
+                            chat_context=chat_context,
+                            participant=chat_with_participant,
+                            thread=thread,
+                            thread_attributes=thread_attributes,
                         )
 
-                    if current_file is not None:
-                        chat_context.append_assistant_message(
-                            message=f"the user is currently viewing the file at the path: {current_file}"
-                        )
-
-                    elif current_file is not None:
-                        chat_context.append_assistant_message(
-                            message="the user is not current viewing any files"
-                        )
-
+                if received.type == "chat":
                     if thread is None:
-                        with tracer.start_as_current_span(
-                            "chatbot.thread.open"
-                        ) as span:
-                            span.set_attributes(thread_attributes)
+                        logger.info("thread is not open", extra={"path": path})
+                        break
 
-                            thread = await self.open_thread(path=path)
+                    logger.debug(
+                        "chatbot received a chat",
+                        extra={
+                            "context": chat_context.id,
+                            "participant_id": self.room.local_participant.id,
+                            "participant_name": self.room.local_participant.get_attribute(
+                                "name"
+                            ),
+                            "text": received.message["text"],
+                        },
+                    )
 
-                            thread_context = ChatThreadContext(
-                                path=path,
-                                chat=chat_context,
-                                thread=thread,
-                                participants=get_thread_participants(
-                                    room=self.room, thread=thread
-                                ),
-                            )
+                    attachments = received.message.get("attachments", [])
+                    text = received.message["text"]
 
-                            await self.load_thread_context(
-                                thread_context=thread_context
-                            )
-
-                    if received.type == "opened":
-                        if not opened:
-                            opened = True
-
-                            await self._greet(
-                                path=path,
-                                chat_context=chat_context,
-                                participant=chat_with_participant,
-                                thread=thread,
-                                thread_attributes=thread_attributes,
-                            )
-
-                    if received.type == "chat":
-                        if thread is None:
-                            logger.info("thread is not open", extra={"path": path})
-                            break
-
-                        logger.debug(
-                            "chatbot received a chat",
-                            extra={
-                                "context": chat_context.id,
-                                "participant_id": self.room.local_participant.id,
-                                "participant_name": self.room.local_participant.get_attribute(
-                                    "name"
-                                ),
-                                "text": received.message["text"],
-                            },
+                    for attachment in attachments:
+                        chat_context.append_assistant_message(
+                            message=f"the user attached a file at the path '{attachment['path']}'"
                         )
 
-                        attachments = received.message.get("attachments", [])
-                        text = received.message["text"]
+                    chat_context.append_user_message(message=text)
 
-                        for attachment in attachments:
-                            chat_context.append_assistant_message(
-                                message=f"the user attached a file at the path '{attachment['path']}'"
-                            )
-
-                        chat_context.append_user_message(message=text)
-
-                        if messages.empty():
-                            break
-
-                if received is not None:
+                if received is not None and received.type == "chat":
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
                         span.set_attributes(thread_attributes)
                         span.set_attribute("role", "user")
@@ -752,10 +783,50 @@ class ChatBot(SingleRoomAgent):
                                         )
                                     )
 
+                                    message_toolkits = [*thread_toolkits]
+
+                                    if (
+                                        "toolkits" in received.message
+                                        and len(received.message["toolkits"]) > 0
+                                    ):
+                                        builtin_toolkits = []
+                                        remote_toolkits = []
+                                        for tk in received.message["toolkits"]:
+                                            if isinstance(tk, dict):
+                                                rtk = RequiredToolkit(
+                                                    name=tk["toolkit"],
+                                                    tools=tk.get("tools", None),
+                                                )
+
+                                                if self.is_builtin_toolkit(rtk):
+                                                    builtin_toolkits.append(
+                                                        self.get_built_in_toolkit(
+                                                            thread_context=thread_context,
+                                                            toolkit=rtk,
+                                                        )
+                                                    )
+
+                                                else:
+                                                    remote_toolkits.append(rtk)
+
+                                        extra_toolkits = await self.get_toolkits(
+                                            context=ToolContext(
+                                                room=self.room,
+                                                caller=participant,
+                                                caller_context={
+                                                    "chat": thread_context.chat.to_json()
+                                                },
+                                            ),
+                                            remote_toolkits=remote_toolkits,
+                                        )
+
+                                        message_toolkits.extend(extra_toolkits)
+                                        message_toolkits.extend(builtin_toolkits)
+
                                     await self._llm_adapter.next(
                                         context=chat_context,
                                         room=self._room,
-                                        toolkits=thread_toolkits,
+                                        toolkits=message_toolkits,
                                         tool_adapter=self._tool_adapter,
                                         event_handler=handle_event,
                                     )
