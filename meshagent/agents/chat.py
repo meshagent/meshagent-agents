@@ -567,6 +567,9 @@ class ChatBot(SingleRoomAgent):
 
             elif toolkit.name == "local_shell":
                 return True
+            
+            elif toolkit.name == "image_gen":
+                return True
 
         return False
 
@@ -581,6 +584,11 @@ class ChatBot(SingleRoomAgent):
                 name="openai_local_shell",
                 tools=[ChatBotThreadLocalShellTool(thread_context=thread_context)],
             )
+        
+        elif toolkit.name == "image_gen":
+             return Toolkit(
+                name="openai_image_gen",
+                tools= [ ChatBotThreadOpenAIImageGenerationTool(thread_context=thread_context) ])
 
         raise RoomException(f"not a built in tool {toolkit.name}")
 
