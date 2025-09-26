@@ -245,10 +245,10 @@ class StorageIndexer(SingleRoomAgent):
         logger.info(f"existing indexes {indexes}")
 
         for index in indexes:
-            if "embedding" in index["columns"]:
+            if "embedding" in index.columns:
                 self._vector_index_created = True
 
-            if "text" in index["columns"]:
+            if "text" in index.columns:
                 self._fts_created = True
 
         if not self._vector_index_created:
