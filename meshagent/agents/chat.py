@@ -424,9 +424,14 @@ class ChatBot(SingleRoomAgent):
         toaster = None
 
         toolkits.append(
-            ChatBotReasoningTool(
-                room=self._room,
-                thread_context=thread_context,
+            Toolkit(
+                name="reasoning",
+                tools=[
+                    ChatBotReasoningTool(
+                        room=self._room,
+                        thread_context=thread_context,
+                    )
+                ],
             )
         )
 
