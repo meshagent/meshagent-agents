@@ -35,7 +35,7 @@ thread_schema = MeshSchema(
             properties=[
                 ChildProperty(
                     name="items",
-                    child_tag_names=["message", "exec", "ui"],
+                    child_tag_names=["message", "exec", "ui", "reasoning"],
                     description="the messages in this thread",
                 )
             ],
@@ -61,6 +61,22 @@ thread_schema = MeshSchema(
             ],
         ),
         ElementType(
+            tag_name="reasoning",
+            description="a reasoning trace",
+            properties=[
+                ValueProperty(
+                    name="summary",
+                    description="a summary of the reasoning",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the time that the reasoning started",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
             tag_name="exec",
             description="a command execution",
             properties=[
@@ -77,6 +93,11 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="pwd",
                     description="the working directory the command was executed in",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the time that the reasoning started",
                     type="string",
                 ),
             ],
@@ -98,6 +119,21 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="widget",
                     description="the type of widget",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="width",
+                    description="the width of widget",
+                    type="number",
+                ),
+                ValueProperty(
+                    name="height",
+                    description="the height of widget",
+                    type="number",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the time that the reasoning started",
                     type="string",
                 ),
             ],

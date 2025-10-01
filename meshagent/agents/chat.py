@@ -45,26 +45,73 @@ class ChatBotReasoningTool(ReasoningTool):
         self.thread_context = thread_context
         self.room = room
 
-    async def handle_reasoning(
-        self, context, *, id, summary, type, encrypted_content, status, **extra
+        self._reasoning_element = None
+        self._reasoning_item = None
+
+    def _get_messages_element(self):
+        messages = self.thread_context.thread.root.get_children_by_tag_name("messages")
+        if len(messages) > 0:
+            return messages[0]
+        return None
+
+    async def on_reasoning_summary_part_added(
+        self,
+        context: ToolContext,
+        *,
+        item_id: str,
+        output_index: int,
+        part: dict,
+        sequence_number: int,
+        summary_index: int,
+        type: str,
+        **extra,
     ):
-        for part in get_thread_participants(
-            room=self.room, thread=self.thread_context.thread
-        ):
-            self.room.messaging.send_message_nowait(
-                to=part,
-                type="reasoning",
-                message={"type": type, "summary": summary, "status": status},
-            )
-        return await super().handle_reasoning(
-            context,
-            id=id,
-            summary=summary,
-            type=type,
-            encrypted_content=encrypted_content,
-            status=status,
-            **extra,
-        )
+        el = self._get_messages_element()
+        if el is None:
+            logger.warning("missing messages element, cannot log reasoning")
+        else:
+            self._reasoning_element = el.append_child("reasoning", {"summary": ""})
+
+    async def on_reasoning_summary_part_done(
+        self,
+        context: ToolContext,
+        *,
+        item_id: str,
+        output_index: int,
+        part: dict,
+        sequence_number: int,
+        summary_index: int,
+        type: str,
+        **extra,
+    ):
+        self._reasoning_element = None
+
+    async def on_reasoning_summary_text_delta(
+        self,
+        context: ToolContext,
+        *,
+        delta: str,
+        output_index: int,
+        sequence_number: int,
+        summary_index: int,
+        type: str,
+        **extra,
+    ):
+        el = self._reasoning_element
+        el.set_attribute("summary", el.get_attribute("summary") + delta)
+
+    async def on_reasoning_summary_text_done(
+        self,
+        context: ToolContext,
+        *,
+        item_id: str,
+        output_index: int,
+        sequence_number: int,
+        summary_index: int,
+        type: str,
+        **extra,
+    ):
+        pass
 
 
 class ChatBotThreadLocalShellTool(LocalShellTool):
