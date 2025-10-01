@@ -17,6 +17,7 @@ from meshagent.openai.tools.responses_adapter import (
     LocalShellTool,
     OpenAIResponsesAdapter,
     WebSearchTool,
+    ReasoningTool,
 )
 import asyncio
 from typing import Optional
@@ -36,6 +37,34 @@ import shlex
 tracer = trace.get_tracer("meshagent.chatbot")
 
 logger = logging.getLogger("chat")
+
+
+class ChatBotReasoningTool(ReasoningTool):
+    def __init__(self, *, room: RoomClient, thread_context: "ChatThreadContext"):
+        super().__init__()
+        self.thread_context = thread_context
+        self.room = room
+
+    async def handle_reasoning(
+        self, context, *, id, summary, type, encrypted_content, status, **extra
+    ):
+        for part in get_thread_participants(
+            room=self.room, thread=self.thread_context.thread
+        ):
+            self.room.messaging.send_message_nowait(
+                to=part,
+                type="reasoning",
+                message={"type": type, "summary": summary, "status": status},
+            )
+        return await super().handle_reasoning(
+            context,
+            id=id,
+            summary=summary,
+            type=type,
+            encrypted_content=encrypted_content,
+            status=status,
+            **extra,
+        )
 
 
 class ChatBotThreadLocalShellTool(LocalShellTool):
@@ -393,6 +422,13 @@ class ChatBot(SingleRoomAgent):
             )
         )
         toaster = None
+
+        toolkits.append(
+            ChatBotReasoningTool(
+                room=self._room,
+                thread_context=thread_context,
+            )
+        )
 
         for toolkit in toolkits:
             if toolkit.name == "ui":
