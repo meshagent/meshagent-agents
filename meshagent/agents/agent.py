@@ -249,7 +249,6 @@ class SingleRoomAgent(Agent):
     ):
         tool_target = context.caller
         if context.on_behalf_of is not None:
-            logger.info("getting toolkits on behalf of {context.on_behalf_of}")
             tool_target = context.on_behalf_of
 
         toolkits_by_name = dict[str, ToolkitDescription]()
@@ -275,17 +274,13 @@ class SingleRoomAgent(Agent):
                 toolkit = toolkits_by_name.get(required_toolkit.name, None)
                 if toolkit is None:
                     if context.on_behalf_of is not None:
-                        logger.error(
-                            "unepxected error getting toolkits on behalf of {context.on_behalf_of}"
+                        raise RoomException(
+                            f"unable to get toolkit {required_toolkit.name} on behalf of {context.on_behalf_of}"
                         )
                     else:
-                        logger.error(
-                            "unepxected error getting toolkits for caller {context.caller.id}"
+                        raise RoomException(
+                            f"uanble to get toolkit {required_toolkit.name} for caller {context.caller.id}"
                         )
-
-                    raise RoomException(
-                        f"unable to locate required toolkit {required_toolkit.name}"
-                    )
 
                 room_tools = list[RoomTool]()
 
@@ -313,7 +308,7 @@ class SingleRoomAgent(Agent):
                         tool_description = tools_by_name.get(required_tool, None)
                         if tool_description is None:
                             raise RoomException(
-                                f"unable to locate required tool {required_tool}"
+                                f"unable to locate required tool {required_tool} in toolkit {required_toolkit.name}"
                             )
 
                         tool = RoomTool(
