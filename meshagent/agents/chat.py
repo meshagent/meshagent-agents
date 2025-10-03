@@ -464,7 +464,8 @@ class ChatBot(SingleRoomAgent):
         toolkits = await self.get_required_toolkits(
             context=ToolContext(
                 room=self.room,
-                caller=participant,
+                caller=self.room.local_participant,
+                on_behalf_of=participant,
                 caller_context={"chat": thread_context.chat.to_json()},
             )
         )
@@ -850,7 +851,7 @@ class ChatBot(SingleRoomAgent):
                                         thread_toolkits = (
                                             await self.get_thread_toolkits(
                                                 thread_context=thread_context,
-                                                participant=participant,
+                                                participant=chat_with_participant,
                                             )
                                         )
 

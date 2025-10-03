@@ -279,7 +279,7 @@ class SingleRoomAgent(Agent):
                         )
                     else:
                         raise RoomException(
-                            f"uanble to get toolkit {required_toolkit.name} for caller {context.caller.id}"
+                            f"unable to get toolkit {required_toolkit.name} for caller {context.caller.id}"
                         )
 
                 room_tools = list[RoomTool]()
