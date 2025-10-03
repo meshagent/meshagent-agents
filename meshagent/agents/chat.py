@@ -469,7 +469,6 @@ class ChatBot(SingleRoomAgent):
                 caller_context={"chat": thread_context.chat.to_json()},
             )
         )
-        toaster = None
 
         toolkits.append(
             Toolkit(
@@ -482,22 +481,6 @@ class ChatBot(SingleRoomAgent):
                 ],
             )
         )
-
-        for toolkit in toolkits:
-            if toolkit.name == "ui":
-                for tool in toolkit.tools:
-                    if tool.name == "show_toast":
-                        toaster = tool
-
-        if toaster is not None:
-
-            def multi_tool(toolkit: Toolkit):
-                if toaster in toolkit.tools:
-                    return toolkit
-
-                return MultiToolkit(required=[toaster], base_toolkit=toolkit)
-
-            toolkits = list(map(multi_tool, toolkits))
 
         return [*self._toolkits, *toolkits]
 
