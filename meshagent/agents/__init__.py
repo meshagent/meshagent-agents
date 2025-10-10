@@ -8,7 +8,6 @@ from .agent import (
 )
 from .development import connect_development_agent
 from .listener import Listener, ListenerContext
-from .hosting import RemoteTaskRunnerServer
 from .adapter import ToolResponseAdapter, LLMAdapter
 from .thread_schema import thread_schema
 from .version import __version__
@@ -24,7 +23,6 @@ __all__ = [
     connect_development_agent,
     Listener,
     ListenerContext,
-    RemoteTaskRunnerServer,
     ToolResponseAdapter,
     LLMAdapter,
     thread_schema,
