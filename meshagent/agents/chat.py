@@ -328,7 +328,6 @@ class ChatThreadContext:
         self.path = path
 
 
-# todo: thread should stop when participant stops?
 class ChatBot(SingleRoomAgent):
     def __init__(
         self,
@@ -343,7 +342,7 @@ class ChatBot(SingleRoomAgent):
         rules: Optional[list[str]] = None,
         auto_greet_message: Optional[str] = None,
         empty_state_title: Optional[str] = None,
-        labels: Optional[str] = None,
+        labels: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
