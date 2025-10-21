@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
 from .agent import AgentChatContext
 from jsonschema import validate
-from meshagent.tools.toolkit import Response, Toolkit
-from meshagent.api import RoomClient
+from meshagent.tools.toolkit import Response, Toolkit, Tool
+from meshagent.api import RoomClient, RoomException
 from typing import Any, Optional, Callable, TypeVar, Generic
+from pydantic import BaseModel
 
-T = TypeVar("T")
+TEvent = TypeVar("T")
 
 
 class ToolResponseAdapter(ABC):
@@ -28,7 +29,22 @@ class ToolResponseAdapter(ABC):
         pass
 
 
-class LLMAdapter(Generic[T]):
+class LLMToolConfig(BaseModel):
+    name: str
+
+
+class LLMTool:
+    def __init__(self, *, name: str, type: type):
+        self.name = name
+        self.type = type
+
+    def make(self, *, model: str, config: LLMToolConfig, **kwargs) -> Tool: ...
+
+
+class LLMAdapter(Generic[TEvent]):
+    @abstractmethod
+    def default_model(self) -> str: ...
+
     def create_chat_context(self) -> AgentChatContext:
         return AgentChatContext()
 
@@ -37,6 +53,16 @@ class LLMAdapter(Generic[T]):
         self, *, context: AgentChatContext, room: RoomClient
     ):
         return True
+
+    def llm_tools(self, *, model: str) -> list[LLMTool]:
+        return []
+
+    def make_tool(self, *, model: str, config: LLMToolConfig, **kwargs) -> Tool:
+        for tool in self.llm_tools(model=model):
+            if tool.name == config.name:
+                return tool.make(model=model, config=config, **kwargs)
+
+        raise RoomException(f"Unexpected tool: {config.name} for model {model}")
 
     @abstractmethod
     async def next(
@@ -47,7 +73,8 @@ class LLMAdapter(Generic[T]):
         toolkits: list[Toolkit],
         tool_adapter: Optional[ToolResponseAdapter] = None,
         output_schema: Optional[dict] = None,
-        event_handler: Optional[Callable[[T], None]] = None,
+        event_handler: Optional[Callable[[TEvent], None]] = None,
+        model: Optional[str] = None,
     ) -> Any:
         pass
 

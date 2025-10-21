@@ -19,8 +19,6 @@ from meshagent.tools.toolkit import (
     Toolkit,
     Tool,
     ToolContext,
-    toolkit_factory,
-    register_toolkit_factory,
 )
 from meshagent.api.room_server_client import RoomClient
 from jsonschema import validate
@@ -197,10 +195,6 @@ class SingleRoomAgent(Agent):
 
         for requirement in self.requires:
             if isinstance(requirement, RequiredToolkit):
-                if toolkit_factory(requirement.name) is not None:
-                    # no need to install something we can create from a factory
-                    continue
-
                 if requirement.name == "ui":
                     # TODO: maybe requirements can be marked as non installable?
                     continue
@@ -264,13 +258,6 @@ class SingleRoomAgent(Agent):
 
         for required_toolkit in remote_toolkits:
             if isinstance(required_toolkit, RequiredToolkit):
-                if toolkit_factory(required_toolkit.name) is not None:
-                    toolkit = await toolkit_factory(required_toolkit.name)(
-                        context, required_toolkit
-                    )
-                    toolkits.append(toolkit)
-                    continue
-
                 toolkit = toolkits_by_name.get(required_toolkit.name, None)
                 if toolkit is None:
                     if context.on_behalf_of is not None:
@@ -639,6 +626,3 @@ async def make_run_task_tool(context: ToolContext, toolkit: RequiredToolkit):
         )
 
     return Toolkit(name="agents", tools=tools)
-
-
-register_toolkit_factory("agents", make_run_task_tool)

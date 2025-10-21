@@ -11,20 +11,22 @@ from meshagent.api import (
     RequiredToolkit,
 )
 from meshagent.tools import Toolkit, ToolContext
-from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter, LLMTool
 from meshagent.openai.tools.responses_adapter import (
+    ImageGenerationConfig,
     ImageGenerationTool,
+    LocalShellConfig,
     LocalShellTool,
-    OpenAIResponsesAdapter,
-    WebSearchTool,
+    #    WebSearchConfig,
+    #    WebSearchTool,
     ReasoningTool,
 )
+from pydantic import TypeAdapter, Discriminator
 import asyncio
-from typing import Optional
+from typing import Optional, Union, Annotated
 import logging
 import uuid
 import datetime
-from typing import Literal
 import base64
 from openai.types.responses import ResponseStreamEvent
 from asyncio import CancelledError
@@ -114,8 +116,10 @@ class ChatBotReasoningTool(ReasoningTool):
 
 
 class ChatBotThreadLocalShellTool(LocalShellTool):
-    def __init__(self, *, thread_context: "ChatThreadContext"):
-        super().__init__()
+    def __init__(
+        self, *, thread_context: "ChatThreadContext", config: LocalShellConfig
+    ):
+        super().__init__(config=config)
         self.thread_context = thread_context
 
     async def execute_shell_command(
@@ -156,32 +160,30 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
         return result
 
 
+class ChatBotThreadOpenAIImageGenerationLLMTool(LLMTool):
+    def __init__(self):
+        super().__init__(name="image_generation", type=ImageGenerationConfig)
+
+    def make(
+        self,
+        *,
+        model: str,
+        config: ImageGenerationConfig,
+        thread_context: "ChatThreadContext",
+    ):
+        return ChatBotThreadOpenAIImageGenerationTool(
+            config=config, thread_context=thread_context
+        )
+
+
 class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
     def __init__(
         self,
         *,
-        background: Literal["transparent", "opaque", "auto"] = None,
-        input_image_mask_url: Optional[str] = None,
-        model: Optional[str] = None,
-        moderation: Optional[str] = None,
-        output_compression: Optional[int] = None,
-        output_format: Optional[Literal["png", "webp", "jpeg"]] = None,
-        partial_images: Optional[int] = None,
-        quality: Optional[Literal["auto", "low", "medium", "high"]] = None,
-        size: Optional[Literal["1024x1024", "1024x1536", "1536x1024", "auto"]] = None,
+        config: ImageGenerationConfig,
         thread_context: "ChatThreadContext",
     ):
-        super().__init__(
-            background=background,
-            input_image_mask_url=input_image_mask_url,
-            model=model,
-            moderation=moderation,
-            output_compression=output_compression,
-            output_format=output_format,
-            partial_images=partial_images,
-            quality=quality,
-            size=size,
-        )
+        super().__init__(config=config)
 
         self.thread_context = thread_context
 
@@ -630,42 +632,67 @@ class ChatBot(SingleRoomAgent):
             updates.shutdown()
             await update_thread_task
 
-    def is_builtin_toolkit(self, toolkit: RequiredToolkit) -> bool:
-        if isinstance(self._llm_adapter, OpenAIResponsesAdapter):
-            if toolkit.name == "web_search":
-                return True
+    async def get_message_toolkits(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        participant: RemoteParticipant,
+        model: str,
+        toolkits: list[dict],
+    ) -> list[Toolkit]:
+        message_toolkits = []
 
-            elif toolkit.name == "local_shell":
-                return True
-
-            elif toolkit.name == "image_gen":
-                return True
-
-        return False
-
-    def get_built_in_toolkit(
-        self, *, thread_context: ChatThreadContext, toolkit: RequiredToolkit
-    ):
-        if toolkit.name == "web_search":
-            return Toolkit(name="openai_web_search", tools=[WebSearchTool()])
-
-        elif toolkit.name == "local_shell":
-            return Toolkit(
-                name="openai_local_shell",
-                tools=[ChatBotThreadLocalShellTool(thread_context=thread_context)],
-            )
-
-        elif toolkit.name == "image_gen":
-            return Toolkit(
-                name="openai_image_gen",
-                tools=[
-                    ChatBotThreadOpenAIImageGenerationTool(
-                        thread_context=thread_context
+        remote_toolkits = []
+        llm_tools = []
+        for tk in toolkits:
+            if isinstance(tk, dict):
+                if tk.get("required_toolkit") is not None:
+                    rt = tk.get("required_toolkit")
+                    rtk = RequiredToolkit(
+                        name=rt["toolkit"],
+                        tools=rt.get("tools", None),
                     )
-                ],
-            )
 
-        raise RoomException(f"not a built in tool {toolkit.name}")
+                    remote_toolkits.append(rtk)
+
+                elif tk.get("llm") is not None:
+                    config_dict = tk.get("llm")
+
+                    found = False
+                    for t in self._llm_adapter.llm_tools(model=model):
+                        if t.name == config_dict["name"]:
+                            llm_tools.append(
+                                self._llm_adapter.make_tool(
+                                    model=model,
+                                    config=t.type.model_validate(config_dict),
+                                    thread_context=thread_context,
+                                )
+                            )
+                            found = True
+                            break
+
+                    if not found:
+                        raise RoomException(f"unexpected tool format: {tk}")
+
+                else:
+                    raise RoomException(f"unexpected tool format: {tk}")
+
+        if len(llm_tools) > 0:
+            message_toolkits.append(Toolkit(name="__llm__", tools=llm_tools))
+
+        extra_toolkits = await self.get_toolkits(
+            context=ToolContext(
+                room=self.room,
+                caller=participant,
+                caller_context={"chat": thread_context.chat.to_json()},
+            ),
+            remote_toolkits=remote_toolkits,
+        )
+
+        message_toolkits.extend(extra_toolkits)
+        message_toolkits.extend(remote_toolkits)
+
+        return message_toolkits
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
@@ -855,43 +882,26 @@ class ChatBot(SingleRoomAgent):
 
                                     message_toolkits = [*thread_toolkits]
 
+                                    model = received.message.get(
+                                        "model", self._llm_adapter.default_model()
+                                    )
+
                                     if (
                                         "toolkits" in received.message
                                         and len(received.message["toolkits"]) > 0
                                     ):
-                                        builtin_toolkits = []
-                                        remote_toolkits = []
-                                        for tk in received.message["toolkits"]:
-                                            if isinstance(tk, dict):
-                                                rtk = RequiredToolkit(
-                                                    name=tk["toolkit"],
-                                                    tools=tk.get("tools", None),
-                                                )
-
-                                                if self.is_builtin_toolkit(rtk):
-                                                    builtin_toolkits.append(
-                                                        self.get_built_in_toolkit(
-                                                            thread_context=thread_context,
-                                                            toolkit=rtk,
-                                                        )
-                                                    )
-
-                                                else:
-                                                    remote_toolkits.append(rtk)
-
-                                        extra_toolkits = await self.get_toolkits(
-                                            context=ToolContext(
-                                                room=self.room,
-                                                caller=participant,
-                                                caller_context={
-                                                    "chat": thread_context.chat.to_json()
-                                                },
-                                            ),
-                                            remote_toolkits=remote_toolkits,
+                                        extra_toolkits = (
+                                            await self.get_message_toolkits(
+                                                model=model,
+                                                thread_context=thread_context,
+                                                participant=participant,
+                                                toolkits=received.message.get(
+                                                    "toolkits"
+                                                ),
+                                            )
                                         )
 
                                         message_toolkits.extend(extra_toolkits)
-                                        message_toolkits.extend(builtin_toolkits)
 
                                     await self._llm_adapter.next(
                                         context=chat_context,
@@ -899,6 +909,7 @@ class ChatBot(SingleRoomAgent):
                                         toolkits=message_toolkits,
                                         tool_adapter=self._tool_adapter,
                                         event_handler=handle_event,
+                                        model=model,
                                     )
 
                                     llm_messages.shutdown()
