@@ -21,9 +21,8 @@ from meshagent.openai.tools.responses_adapter import (
     #    WebSearchTool,
     ReasoningTool,
 )
-from pydantic import TypeAdapter, Discriminator
 import asyncio
-from typing import Optional, Union, Annotated
+from typing import Optional
 import logging
 import uuid
 import datetime
