@@ -9,8 +9,7 @@ from meshagent.api import (
     Element,
     MeshDocument,
 )
-from meshagent.tools import Toolkit, ToolContext, make_tools
-from meshagent.tools.provider import ToolProvider
+from meshagent.tools import Toolkit, ToolContext, make_tools, ToolkitBuilder
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
     ImageGenerationConfig,
@@ -114,7 +113,7 @@ class ChatBotReasoningTool(ReasoningTool):
         pass
 
 
-class ChatBotThreadLocalShellToolProvider(ToolProvider):
+class ChatBotThreadLocalShellToolkitBuilder(ToolkitBuilder):
     def __init__(self, *, thread_context: "ChatThreadContext"):
         super().__init__(name="local_shell", type=ImageGenerationConfig)
         self.thread_context = thread_context
@@ -125,8 +124,13 @@ class ChatBotThreadLocalShellToolProvider(ToolProvider):
         model: str,
         config: LocalShellConfig,
     ):
-        return ChatBotThreadLocalShellTool(
-            config=config, thread_context=self.thread_context
+        return Toolkit(
+            name="local_shell",
+            tools=[
+                ChatBotThreadLocalShellTool(
+                    config=config, thread_context=self.thread_context
+                )
+            ],
         )
 
 
@@ -175,7 +179,7 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
         return result
 
 
-class ChatBotThreadOpenAIImageGenerationToolProvider(ToolProvider):
+class ChatBotThreadOpenAIImageGenerationToolkitBuilder(ToolkitBuilder):
     def __init__(self, *, thread_context: "ChatThreadContext"):
         super().__init__(name="image_generation", type=ImageGenerationConfig)
         self.thread_context = thread_context
@@ -186,8 +190,13 @@ class ChatBotThreadOpenAIImageGenerationToolProvider(ToolProvider):
         model: str,
         config: ImageGenerationConfig,
     ):
-        return ChatBotThreadOpenAIImageGenerationTool(
-            config=config, thread_context=self.thread_context
+        return Toolkit(
+            name="image_generation",
+            tools=[
+                ChatBotThreadOpenAIImageGenerationTool(
+                    config=config, thread_context=self.thread_context
+                )
+            ],
         )
 
 
@@ -476,7 +485,7 @@ class ChatBot(SingleRoomAgent):
 
     async def get_thread_tool_providers(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
-    ) -> list[ToolProvider]:
+    ) -> list[ToolkitBuilder]:
         return []
 
     async def get_thread_toolkits(
@@ -871,14 +880,11 @@ class ChatBot(SingleRoomAgent):
                                         message_tools is not None
                                         and len(message_tools) > 0
                                     ):
-                                        message_toolkits.append(
-                                            Toolkit(
-                                                name="__turn_toolkit__",
-                                                tools=make_tools(
-                                                    model=model,
-                                                    providers=thread_tool_providers,
-                                                    tools=message_tools,
-                                                ),
+                                        message_toolkits.extend(
+                                            make_tools(
+                                                model=model,
+                                                providers=thread_tool_providers,
+                                                tools=message_tools,
                                             )
                                         )
 

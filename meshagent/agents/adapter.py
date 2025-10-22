@@ -1,8 +1,7 @@
 from abc import ABC, abstractmethod
 from .agent import AgentChatContext
 from jsonschema import validate
-from meshagent.tools.provider import ToolProvider, ToolConfig
-from meshagent.tools import Response, Toolkit, Tool
+from meshagent.tools import Response, Toolkit, ToolkitBuilder, ToolkitConfig
 from meshagent.api import RoomClient, RoomException
 from typing import Any, Optional, Callable, TypeVar, Generic
 
@@ -42,13 +41,15 @@ class LLMAdapter(Generic[TEvent]):
     ):
         return True
 
-    def tool_providers(self, *, model: str) -> list[ToolProvider]:
+    def tool_providers(self, *, model: str) -> list[ToolkitBuilder]:
         return []
 
-    def make_tool(self, *, model: str, config: ToolConfig, **kwargs) -> Tool:
+    def make_toolkit(self, *, model: str, config: ToolkitConfig) -> Toolkit:
         for tool in self.tool_providers(model=model):
             if tool.name == config.name:
-                return tool.make(model=model, config=config, **kwargs)
+                return Toolkit(
+                    name=config.name, tools=[tool.make(model=model, config=config)]
+                )
 
         raise RoomException(f"Unexpected tool: {config.name} for model {model}")
 
