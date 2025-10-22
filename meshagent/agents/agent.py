@@ -15,7 +15,7 @@ from meshagent.api import (
     StorageEntry,
 )
 from meshagent.api.protocol import Protocol
-from meshagent.tools.toolkit import (
+from meshagent.tools import (
     Toolkit,
     Tool,
     ToolContext,

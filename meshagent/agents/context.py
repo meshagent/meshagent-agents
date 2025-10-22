@@ -1,7 +1,7 @@
 from typing import Optional
 from copy import deepcopy
 from meshagent.api import RoomClient
-from meshagent.tools.toolkit import Toolkit
+from meshagent.tools import Toolkit
 from meshagent.api.participant import Participant
 
 import uuid

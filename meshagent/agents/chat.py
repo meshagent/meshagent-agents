@@ -8,10 +8,10 @@ from meshagent.api import (
     Requirement,
     Element,
     MeshDocument,
-    RequiredToolkit,
 )
-from meshagent.tools import Toolkit, ToolContext
-from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter, LLMTool
+from meshagent.tools import Toolkit, ToolContext, make_tools
+from meshagent.tools.provider import ToolProvider
+from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
     ImageGenerationConfig,
     ImageGenerationTool,
@@ -114,6 +114,22 @@ class ChatBotReasoningTool(ReasoningTool):
         pass
 
 
+class ChatBotThreadLocalShellToolProvider(ToolProvider):
+    def __init__(self, *, thread_context: "ChatThreadContext"):
+        super().__init__(name="local_shell", type=ImageGenerationConfig)
+        self.thread_context = thread_context
+
+    def make(
+        self,
+        *,
+        model: str,
+        config: LocalShellConfig,
+    ):
+        return ChatBotThreadLocalShellTool(
+            config=config, thread_context=self.thread_context
+        )
+
+
 class ChatBotThreadLocalShellTool(LocalShellTool):
     def __init__(
         self, *, thread_context: "ChatThreadContext", config: LocalShellConfig
@@ -159,19 +175,19 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
         return result
 
 
-class ChatBotThreadOpenAIImageGenerationLLMTool(LLMTool):
-    def __init__(self):
+class ChatBotThreadOpenAIImageGenerationToolProvider(ToolProvider):
+    def __init__(self, *, thread_context: "ChatThreadContext"):
         super().__init__(name="image_generation", type=ImageGenerationConfig)
+        self.thread_context = thread_context
 
     def make(
         self,
         *,
         model: str,
         config: ImageGenerationConfig,
-        thread_context: "ChatThreadContext",
     ):
         return ChatBotThreadOpenAIImageGenerationTool(
-            config=config, thread_context=thread_context
+            config=config, thread_context=self.thread_context
         )
 
 
@@ -457,6 +473,11 @@ class ChatBot(SingleRoomAgent):
     async def get_thread_participants(self, *, thread: MeshDocument):
         return get_thread_participants(room=self._room, thread=thread)
 
+    async def get_thread_tool_providers(
+        self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
+    ) -> list[ToolProvider]:
+        return []
+
     async def get_thread_toolkits(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
     ) -> list[Toolkit]:
@@ -631,68 +652,6 @@ class ChatBot(SingleRoomAgent):
             updates.shutdown()
             await update_thread_task
 
-    async def get_message_toolkits(
-        self,
-        *,
-        thread_context: ChatThreadContext,
-        participant: RemoteParticipant,
-        model: str,
-        toolkits: list[dict],
-    ) -> list[Toolkit]:
-        message_toolkits = []
-
-        remote_toolkits = []
-        llm_tools = []
-        for tk in toolkits:
-            if isinstance(tk, dict):
-                if tk.get("required_toolkit") is not None:
-                    rt = tk.get("required_toolkit")
-                    rtk = RequiredToolkit(
-                        name=rt["toolkit"],
-                        tools=rt.get("tools", None),
-                    )
-
-                    remote_toolkits.append(rtk)
-
-                elif tk.get("llm") is not None:
-                    config_dict = tk.get("llm")
-
-                    found = False
-                    for t in self._llm_adapter.llm_tools(model=model):
-                        if t.name == config_dict["name"]:
-                            llm_tools.append(
-                                self._llm_adapter.make_tool(
-                                    model=model,
-                                    config=t.type.model_validate(config_dict),
-                                    thread_context=thread_context,
-                                )
-                            )
-                            found = True
-                            break
-
-                    if not found:
-                        raise RoomException(f"unexpected tool format: {tk}")
-
-                else:
-                    raise RoomException(f"unexpected tool format: {tk}")
-
-        if len(llm_tools) > 0:
-            message_toolkits.append(Toolkit(name="__llm__", tools=llm_tools))
-
-        extra_toolkits = await self.get_toolkits(
-            context=ToolContext(
-                room=self.room,
-                caller=participant,
-                caller_context={"chat": thread_context.chat.to_json()},
-            ),
-            remote_toolkits=remote_toolkits,
-        )
-
-        message_toolkits.extend(extra_toolkits)
-        message_toolkits.extend(remote_toolkits)
-
-        return message_toolkits
-
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
@@ -862,6 +821,16 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
+                                    with tracer.start_as_current_span(
+                                        "get_thread_tool_providers"
+                                    ) as span:
+                                        thread_tool_providers = (
+                                            await self.get_thread_tool_providers(
+                                                thread_context=thread_context,
+                                                participant=chat_with_participant,
+                                            )
+                                        )
+
                                     await self.prepare_llm_context(
                                         thread_context=thread_context
                                     )
@@ -885,22 +854,22 @@ class ChatBot(SingleRoomAgent):
                                         "model", self._llm_adapter.default_model()
                                     )
 
+                                    message_tools = received.message.get("tools")
+
                                     if (
-                                        "toolkits" in received.message
-                                        and len(received.message["toolkits"]) > 0
+                                        message_tools is not None
+                                        and len(message_tools) > 0
                                     ):
-                                        extra_toolkits = (
-                                            await self.get_message_toolkits(
-                                                model=model,
-                                                thread_context=thread_context,
-                                                participant=participant,
-                                                toolkits=received.message.get(
-                                                    "toolkits"
+                                        message_toolkits.append(
+                                            Toolkit(
+                                                name="__turn_toolkit__",
+                                                tools=make_tools(
+                                                    model=model,
+                                                    providers=thread_tool_providers,
+                                                    tools=message_tools,
                                                 ),
                                             )
                                         )
-
-                                        message_toolkits.extend(extra_toolkits)
 
                                     await self._llm_adapter.next(
                                         context=chat_context,

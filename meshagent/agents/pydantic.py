@@ -11,7 +11,7 @@ from meshagent.api import RoomClient
 from .agent import TaskRunner, Requirement
 
 from .adapter import ToolResponseAdapter
-from meshagent.tools.toolkit import Tool, ToolContext
+from meshagent.tools import Tool, ToolContext
 from meshagent.tools.pydantic import get_pydantic_ai_tool_definition
 
 from typing import Sequence

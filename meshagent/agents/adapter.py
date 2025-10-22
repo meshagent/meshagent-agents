@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 from .agent import AgentChatContext
 from jsonschema import validate
-from meshagent.tools.toolkit import Response, Toolkit, Tool
+from meshagent.tools.provider import ToolProvider, ToolConfig
+from meshagent.tools import Response, Toolkit, Tool
 from meshagent.api import RoomClient, RoomException
 from typing import Any, Optional, Callable, TypeVar, Generic
-from pydantic import BaseModel
 
 TEvent = TypeVar("T")
 
@@ -29,18 +29,6 @@ class ToolResponseAdapter(ABC):
         pass
 
 
-class LLMToolConfig(BaseModel):
-    name: str
-
-
-class LLMTool:
-    def __init__(self, *, name: str, type: type):
-        self.name = name
-        self.type = type
-
-    def make(self, *, model: str, config: LLMToolConfig, **kwargs) -> Tool: ...
-
-
 class LLMAdapter(Generic[TEvent]):
     @abstractmethod
     def default_model(self) -> str: ...
@@ -54,11 +42,11 @@ class LLMAdapter(Generic[TEvent]):
     ):
         return True
 
-    def llm_tools(self, *, model: str) -> list[LLMTool]:
+    def tool_providers(self, *, model: str) -> list[ToolProvider]:
         return []
 
-    def make_tool(self, *, model: str, config: LLMToolConfig, **kwargs) -> Tool:
-        for tool in self.llm_tools(model=model):
+    def make_tool(self, *, model: str, config: ToolConfig, **kwargs) -> Tool:
+        for tool in self.tool_providers(model=model):
             if tool.name == config.name:
                 return tool.make(model=model, config=config, **kwargs)
 
