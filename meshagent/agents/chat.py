@@ -392,6 +392,7 @@ class ChatBot(SingleRoomAgent):
         self._empty_state_title = empty_state_title
 
         self._thread_tasks = dict[str, asyncio.Task]()
+        self._open_threads = {}
 
     def init_requirements(self, requires: list[Requirement]):
         if requires is None:
@@ -510,9 +511,19 @@ class ChatBot(SingleRoomAgent):
         return context
 
     async def open_thread(self, *, path: str):
-        return await self.room.sync.open(path=path)
+        logger.info(f"opening thread {path}")
+        if path not in self._open_threads:
+            fut = asyncio.ensure_future(self.room.sync.open(path=path))
+            self._open_threads[path] = fut
+
+        return await self._open_threads[path]
 
     async def close_thread(self, *, path: str):
+        logger.info(f"closing thread {path}")
+
+        if path in self._open_threads:
+            del self._open_threads[path]
+
         return await self.room.sync.close(path=path)
 
     async def load_thread_context(self, *, thread_context: ChatThreadContext):
@@ -937,6 +948,48 @@ class ChatBot(SingleRoomAgent):
 
         self._thread_tasks.clear()
 
+    async def _on_get_thread_toolkits_message(self, *, message: RoomMessage):
+        path = message.message["path"]
+
+        thread_context = None
+        if path in self._open_threads:
+            thread = await self._open_threads[path]
+
+            thread_context = ChatThreadContext(
+                path=path,
+                chat=AgentChatContext(),
+                thread=thread,
+                participants=get_thread_participants(room=self.room, thread=thread),
+            )
+
+        if thread_context is None:
+            logger.warning("thread toolkits requested for a thread that is not open")
+            return
+
+        chat_with_participant = None
+        for participant in self._room.messaging.get_participants():
+            if participant.id == message.from_participant_id:
+                chat_with_participant = participant
+                break
+
+        if chat_with_participant is None:
+            logger.warning(
+                "participant does not have messaging enabled, skipping message"
+            )
+            return
+
+        tool_providers = await self.get_thread_tool_providers(
+            thread_context=thread_context, participant=chat_with_participant
+        )
+        self._room.messaging.send_message_nowait(
+            to=chat_with_participant,
+            type="set_thread_tool_providers",
+            message={
+                "path": path,
+                "tool_providers": [{"name": t.name} for t in tool_providers],
+            },
+        )
+
     async def start(self, *, room):
         await super().start(room=room)
 
@@ -947,6 +1000,19 @@ class ChatBot(SingleRoomAgent):
         )
 
         def on_message(message: RoomMessage):
+            if message.type == "get_thread_tool_providers":
+                task = asyncio.create_task(
+                    self._on_get_thread_toolkits_message(message=message)
+                )
+
+                def on_done(task: asyncio.Task):
+                    try:
+                        task.result()
+                    except Exception as ex:
+                        logger.error(f"unable to get tool providers {ex}", exc_info=ex)
+
+                task.add_done_callback(on_done)
+
             if message.type == "chat" or message.type == "opened":
                 path = message.message["path"]
 
