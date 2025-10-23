@@ -670,7 +670,8 @@ class ChatBot(SingleRoomAgent):
             pass
         finally:
             updates.shutdown()
-            await update_thread_task
+
+        await update_thread_task
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
