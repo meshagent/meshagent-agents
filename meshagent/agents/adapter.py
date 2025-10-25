@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from .agent import AgentChatContext
 from jsonschema import validate
 from meshagent.tools import Response, Toolkit, ToolkitBuilder, ToolkitConfig
-from meshagent.api import RoomClient, RoomException
+from meshagent.api import RoomClient, RoomException, RemoteParticipant
 from typing import Any, Optional, Callable, TypeVar, Generic
 
 TEvent = TypeVar("T")
@@ -64,6 +64,7 @@ class LLMAdapter(Generic[TEvent]):
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[TEvent], None]] = None,
         model: Optional[str] = None,
+        on_behalf_of: Optional[RemoteParticipant] = None,
     ) -> Any:
         pass
 

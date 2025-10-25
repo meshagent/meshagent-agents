@@ -896,6 +896,7 @@ class ChatBot(SingleRoomAgent):
                                         tool_adapter=self._tool_adapter,
                                         event_handler=handle_event,
                                         model=model,
+                                        on_behalf_of=chat_with_participant,
                                     )
 
                                     llm_messages.shutdown()
