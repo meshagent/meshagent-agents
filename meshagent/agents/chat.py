@@ -4,6 +4,7 @@ from meshagent.api import (
     RoomMessage,
     RoomClient,
     RemoteParticipant,
+    Participant,
     RequiredSchema,
     Requirement,
     Element,
@@ -321,8 +322,11 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
         )
 
 
-def get_thread_participants(
-    *, room: RoomClient, thread: MeshDocument
+def get_online_participants(
+    *,
+    room: RoomClient,
+    thread: MeshDocument,
+    exclude: Optional[list[Participant]] = None,
 ) -> list[RemoteParticipant]:
     results = list[RemoteParticipant]()
 
@@ -331,7 +335,8 @@ def get_thread_participants(
             for member in prop.get_children():
                 for online in room.messaging.get_participants():
                     if online.get_attribute("name") == member.get_attribute("name"):
-                        results.append(online)
+                        if exclude is None or online not in exclude:
+                            results.append(online)
 
     return results
 
@@ -369,6 +374,7 @@ class ChatBot(SingleRoomAgent):
         auto_greet_message: Optional[str] = None,
         empty_state_title: Optional[str] = None,
         labels: Optional[list[str]] = None,
+        decision_model: Optional[str] = None,
     ):
         super().__init__(
             name=name,
@@ -380,6 +386,10 @@ class ChatBot(SingleRoomAgent):
 
         if toolkits is None:
             toolkits = []
+
+        self._decision_model = (
+            "gpt-4o-mini" if decision_model is None else decision_model
+        )
 
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
@@ -480,8 +490,10 @@ class ChatBot(SingleRoomAgent):
                 thread_attributes=thread_attributes,
             )
 
-    async def get_thread_participants(self, *, thread: MeshDocument):
-        return get_thread_participants(room=self._room, thread=thread)
+    async def get_online_participants(
+        self, *, thread: MeshDocument, exclude: Optional[list[Participant]] = None
+    ):
+        return get_online_participants(room=self._room, thread=thread, exclude=exclude)
 
     async def get_thread_tool_providers(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
@@ -553,7 +565,9 @@ class ChatBot(SingleRoomAgent):
                         ] == self.room.local_participant.get_attribute("name"):
                             chat_context.append_assistant_message(msg)
                         else:
-                            chat_context.append_user_message(msg)
+                            chat_context.append_user_message(
+                                element["author_name"] + " said: " + msg
+                            )
 
                         for child in element.get_children():
                             if child.tag_name == "file":
@@ -673,6 +687,147 @@ class ChatBot(SingleRoomAgent):
 
         await update_thread_task
 
+    def get_thread_members(self, *, thread: MeshDocument) -> list[str]:
+        results = []
+
+        for prop in thread.root.get_children():
+            if prop.tag_name == "members":
+                for member in prop.get_children():
+                    results.append(member.get_attribute("name"))
+
+        return results
+
+    async def should_reply(
+        self,
+        *,
+        context: ChatThreadContext,
+        has_more_than_one_other_user: bool,
+        toolkits: list[Toolkit],
+        from_user: RemoteParticipant,
+        online: list[Participant],
+    ):
+        if not has_more_than_one_other_user:
+            return True
+
+        online_set = {}
+
+        all_members = []
+        online_members = []
+
+        for m in self.get_thread_members(thread=context.thread):
+            all_members.append(m)
+
+        for o in online:
+            if o.get_attribute("name") not in online_set:
+                online_set[o.get_attribute("name")] = True
+                online_members.append(o.get_attribute("name"))
+
+        logger.info(
+            "checking whether agent should reply to conversation: "
+            + ", ".join([x.get_attribute("name") for x in online])
+        )
+
+        cloned_context = context.chat.copy()
+        cloned_context.replace_rules(
+            rules=[
+                f"your name (the assistant) is {self.room.local_participant.get_attribute('name')}",
+                f"members of thread are currently {all_members}",
+                f"users online currently are {online_members}",
+                "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
+            ]
+        )
+        response = await self._llm_adapter.next(
+            context=cloned_context,
+            room=self._room,
+            model=self._decision_model or self._llm_adapter.default_model(),
+            on_behalf_of=from_user,
+            toolkits=[],
+            output_schema={
+                "type": "object",
+                "required": ["reasoning", "expecting_assistant_reply"],
+                "additionalProperties": False,
+                "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "explain why you think the user was or was not expecting you to reply",
+                    },
+                    "expecting_assistant_reply": {"type": "boolean"},
+                },
+            },
+        )
+
+        logger.info(f"should reply check returned {response}")
+
+        return response["expecting_assistant_reply"]
+
+    async def handle_user_message(
+        self,
+        *,
+        context: ChatThreadContext,
+        toolkits: list[Toolkit],
+        model: str,
+        from_user: RemoteParticipant,
+        event_handler,
+    ):
+        online = await self.get_online_participants(
+            thread=context.thread, exclude=[self.room.local_participant]
+        )
+
+        for participant in get_online_participants(
+            room=self._room, thread=context.thread
+        ):
+            self._room.messaging.send_message_nowait(
+                to=participant,
+                type="listening",
+                message={"listening": True, "path": context.path},
+            )
+
+        has_more_than_one_other_user = False
+
+        for member_name in self.get_thread_members(thread=context.thread):
+            if member_name != self._room.local_participant.get_attribute(
+                "name"
+            ) and member_name != from_user.get_attribute("name"):
+                has_more_than_one_other_user = True
+                break
+
+        if not await self.should_reply(
+            has_more_than_one_other_user=has_more_than_one_other_user,
+            online=online,
+            context=context,
+            toolkits=toolkits,
+            from_user=from_user,
+        ):
+            return
+
+        for participant in get_online_participants(
+            room=self._room, thread=context.thread
+        ):
+            self._room.messaging.send_message_nowait(
+                to=participant,
+                type="listening",
+                message={"listening": False, "path": context.path},
+            )
+
+        for participant in get_online_participants(
+            room=self._room, thread=context.thread
+        ):
+            self._room.messaging.send_message_nowait(
+                to=participant,
+                type="thinking",
+                message={"thinking": True, "path": context.path},
+            )
+
+        await self._llm_adapter.next(
+            context=context.chat,
+            room=self._room,
+            toolkits=toolkits,
+            tool_adapter=self._tool_adapter,
+            event_handler=event_handler,
+            model=model,
+            on_behalf_of=from_user,
+        )
+
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
@@ -744,7 +899,7 @@ class ChatBot(SingleRoomAgent):
                             path=path,
                             chat=chat_context,
                             thread=thread,
-                            participants=get_thread_participants(
+                            participants=get_online_participants(
                                 room=self.room, thread=thread
                             ),
                         )
@@ -806,27 +961,17 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes({"text": text})
 
                         try:
-                            for participant in get_thread_participants(
-                                room=self._room, thread=thread
-                            ):
-                                # TODO: async gather
-                                self._room.messaging.send_message_nowait(
-                                    to=participant,
-                                    type="thinking",
-                                    message={"thinking": True, "path": path},
-                                )
-
                             if thread_context is None:
                                 thread_context = ChatThreadContext(
                                     path=path,
                                     chat=chat_context,
                                     thread=thread,
-                                    participants=get_thread_participants(
+                                    participants=get_online_participants(
                                         room=self.room, thread=thread
                                     ),
                                 )
                             else:
-                                thread_context.participants = get_thread_participants(
+                                thread_context.participants = get_online_participants(
                                     room=self.room, thread=thread
                                 )
 
@@ -889,14 +1034,12 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
-                                    await self._llm_adapter.next(
-                                        context=chat_context,
-                                        room=self._room,
+                                    await self.handle_user_message(
+                                        context=thread_context,
                                         toolkits=message_toolkits,
-                                        tool_adapter=self._tool_adapter,
                                         event_handler=handle_event,
                                         model=model,
-                                        on_behalf_of=chat_with_participant,
+                                        from_user=chat_with_participant,
                                     )
 
                                     llm_messages.shutdown()
@@ -916,7 +1059,7 @@ class ChatBot(SingleRoomAgent):
                         finally:
 
                             async def cleanup():
-                                for participant in get_thread_participants(
+                                for participant in get_online_participants(
                                     room=self._room, thread=thread
                                 ):
                                     self._room.messaging.send_message_nowait(
@@ -967,7 +1110,7 @@ class ChatBot(SingleRoomAgent):
                 path=path,
                 chat=AgentChatContext(),
                 thread=thread,
-                participants=get_thread_participants(room=self.room, thread=thread),
+                participants=get_online_participants(room=self.room, thread=thread),
             )
 
         if thread_context is None:

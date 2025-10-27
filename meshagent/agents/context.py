@@ -51,6 +51,21 @@ class AgentChatContext:
         self._previous_messages.extend(self.messages)
         self.messages.clear()
 
+    def replace_rules(self, rules: list[str]):
+        system_message = None
+
+        for m in self.messages:
+            if m["role"] == self.system_role:
+                system_message = m
+                break
+
+        if system_message is None:
+            system_message = {"role": self.system_role, "content": ""}
+            self.messages.insert(0, system_message)
+
+        plan = f"Rules:\n-{'\n-'.join(rules)}\n"
+        system_message["content"] = plan
+
     def append_rules(self, rules: list[str]):
         system_message = None
 
