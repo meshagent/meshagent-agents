@@ -247,7 +247,7 @@ class PlanningWriter(Writer):
             i += 1
 
             try:
-                logger.info("COMPLETION STARTING: Step %s", i)
+                logger.info("Working on step %s", i)
 
                 base_args = arguments.copy()
                 base_args.pop("path")
@@ -598,7 +598,7 @@ class DynamicPlanningResponder(TaskRunner):
             i += 1
 
             try:
-                logger.info("COMPLETION STARTING: Step %s", i)
+                logger.info("Working on step %s", i)
 
                 toolkits = [*self.toolkits, *context.toolkits]
 
