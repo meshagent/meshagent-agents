@@ -731,7 +731,7 @@ class ChatBot(SingleRoomAgent):
             rules=[
                 "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
                 f"your name (the assistant) is {self.room.local_participant.get_attribute('name')}",
-                "if the user mentions a person with another name, they aren't talking to you."
+                "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
                 f"members of thread are currently {all_members}",
                 f"users online currently are {online_members}",
             ]
@@ -791,14 +791,13 @@ class ChatBot(SingleRoomAgent):
                 has_more_than_one_other_user = True
                 break
 
-        if not await self.should_reply(
+        reply = await self.should_reply(
             has_more_than_one_other_user=has_more_than_one_other_user,
             online=online,
             context=context,
             toolkits=toolkits,
             from_user=from_user,
-        ):
-            return
+        )
 
         for participant in get_online_participants(
             room=self._room, thread=context.thread
@@ -808,6 +807,9 @@ class ChatBot(SingleRoomAgent):
                 type="listening",
                 message={"listening": False, "path": context.path},
             )
+
+        if not reply:
+            return
 
         for participant in get_online_participants(
             room=self._room, thread=context.thread
