@@ -730,8 +730,9 @@ class ChatBot(SingleRoomAgent):
         cloned_context.replace_rules(
             rules=[
                 "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
-                f"your name (the assistant) is {self.room.local_participant.get_attribute('name')}",
+                f'your name (the assistant) is "{self.room.local_participant.get_attribute("name")}"',
                 "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
+                "if the user poses a question to everyone, they are talking to you",
                 f"members of thread are currently {all_members}",
                 f"users online currently are {online_members}",
             ]
@@ -744,12 +745,16 @@ class ChatBot(SingleRoomAgent):
             toolkits=[],
             output_schema={
                 "type": "object",
-                "required": ["reasoning", "expecting_assistant_reply"],
+                "required": ["reasoning", "expecting_assistant_reply", "next_user"],
                 "additionalProperties": False,
                 "properties": {
                     "reasoning": {
                         "type": "string",
                         "description": "explain why you think the user was or was not expecting you to reply",
+                    },
+                    "next_user": {
+                        "type": "string",
+                        "description": "who would be expectd to send the next message in the conversation",
                     },
                     "expecting_assistant_reply": {"type": "boolean"},
                 },
