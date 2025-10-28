@@ -723,17 +723,17 @@ class ChatBot(SingleRoomAgent):
                 online_members.append(o.get_attribute("name"))
 
         logger.info(
-            "checking whether agent should reply to conversation: "
-            + ", ".join([x.get_attribute("name") for x in online])
+            "multiple participants detected, checking whether agent should reply to conversation"
         )
 
         cloned_context = context.chat.copy()
         cloned_context.replace_rules(
             rules=[
+                "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
                 f"your name (the assistant) is {self.room.local_participant.get_attribute('name')}",
+                "if the user mentions a person with another name, they aren't talking to you."
                 f"members of thread are currently {all_members}",
                 f"users online currently are {online_members}",
-                "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
             ]
         )
         response = await self._llm_adapter.next(
