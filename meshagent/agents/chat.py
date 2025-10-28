@@ -388,7 +388,7 @@ class ChatBot(SingleRoomAgent):
             toolkits = []
 
         self._decision_model = (
-            "gpt-5-nano" if decision_model is None else decision_model
+            "gpt-4.1-mini" if decision_model is None else decision_model
         )
 
         self._llm_adapter = llm_adapter
