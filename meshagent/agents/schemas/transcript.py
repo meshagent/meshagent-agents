@@ -62,7 +62,7 @@ transcript_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
-                    name="start_time",
+                    name="time",
                     description="Segment start time as an ISO-8601 UTC timestamp.",
                     type="string",
                 ),
