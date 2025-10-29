@@ -495,7 +495,7 @@ class ChatBot(SingleRoomAgent):
     ):
         return get_online_participants(room=self._room, thread=thread, exclude=exclude)
 
-    async def get_thread_tool_providers(
+    async def get_thread_toolkit_builders(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
     ) -> list[ToolkitBuilder]:
         return []
@@ -995,10 +995,10 @@ class ChatBot(SingleRoomAgent):
                                         )
 
                                     with tracer.start_as_current_span(
-                                        "get_thread_tool_providers"
+                                        "get_thread_toolkit_builders"
                                     ) as span:
                                         thread_tool_providers = (
-                                            await self.get_thread_tool_providers(
+                                            await self.get_thread_toolkit_builders(
                                                 thread_context=thread_context,
                                                 participant=chat_with_participant,
                                             )
@@ -1136,7 +1136,7 @@ class ChatBot(SingleRoomAgent):
             )
             return
 
-        tool_providers = await self.get_thread_tool_providers(
+        tool_providers = await self.get_thread_toolkit_builders(
             thread_context=thread_context, participant=chat_with_participant
         )
         self._room.messaging.send_message_nowait(
@@ -1158,7 +1158,7 @@ class ChatBot(SingleRoomAgent):
         )
 
         def on_message(message: RoomMessage):
-            if message.type == "get_thread_tool_providers":
+            if message.type == "get_thread_toolkit_builders":
                 task = asyncio.create_task(
                     self._on_get_thread_toolkits_message(message=message)
                 )
