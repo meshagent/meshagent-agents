@@ -24,26 +24,10 @@ transcript_schema = MeshSchema(
                 "the Transcriber agent."
             ),
             properties=[
-                ValueProperty(
-                    name="session_id",
-                    description="Identifier for the transcription session or LiveKit room.",
-                    type="string",
-                ),
-                ValueProperty(
-                    name="room_id",
-                    description="MeshAgent room identifier backing this transcript.",
-                    type="string",
-                ),
-                ValueProperty(
-                    name="created_at",
-                    description="ISO-8601 timestamp indicating when the session began.",
-                    type="string",
-                ),
                 ChildProperty(
                     name="segments",
                     description="Ordered collection of speech segments captured during the session.",
                     child_tag_names=["segment"],
-                    ordered=True,
                 ),
             ],
         ),
