@@ -31,149 +31,6 @@ class MailThreadContext:
         self.message = message
 
 
-def message_to_json(*, message: EmailMessage, role: MessageRole):
-    body_part = message.get_body(
-        ("plain", "html")
-    )  # returns the “best” part :contentReference[oaicite:0]{index=0}
-    if body_part:
-        body = body_part.get_content()
-    else:  # simple, non-MIME message
-        body = message.get_content()
-
-    id = message.get("Message-ID")
-    if id is None:
-        mfrom = message.get("From")
-        _, addr = email.utils.parseaddr(mfrom)
-        domain = addr.split("@")[-1].lower()
-        id = f"{uuid.uuid4()}@{domain}"
-
-    return {
-        "id": id,
-        "in_reply_to": message.get("In-Reply-To"),
-        "reply_to": message.get("Reply-To", message.get("From")),
-        "references": message.get("References"),
-        "from": message.get("From"),
-        "to": message.get_all("To"),
-        "subject": message.get("Subject"),
-        "body": body,
-        "attachments": [],
-        "role": role,
-    }
-
-
-async def load_message(*, room: RoomClient, message_id: str) -> dict | None:
-    messages = await room.database.search(table="emails", where={"id": message_id})
-
-    if len(messages) == 0:
-        return None
-
-    return json.loads(messages[0]["json"])
-
-
-async def save_email_message(
-    *, room: RoomClient, content: bytes, role: MessageRole
-) -> dict:
-    message = message_from_bytes(content, policy=default)
-
-    now = datetime.now(timezone.utc)
-
-    folder_path = (
-        now.strftime("%Y/%m/%d")
-        + "/"
-        + now.strftime("%H/%M/%S")
-        + "/"
-        + secrets.token_hex(3)
-    )
-
-    queued_message = message_to_json(message=message, role=role)
-    message_id = queued_message["id"]
-
-    queued_message["role"] = role
-
-    queued_message["path"] = f".emails/{message_id}/message.json"
-
-    for part in (
-        message.iter_attachments()
-    ):  # ↔ only the “real” attachments :contentReference[oaicite:0]{index=0}
-        fname = (
-            part.get_filename() or "attachment.bin"
-        )  # RFC 2183 filename, if any :contentReference[oaicite:1]{index=1}
-
-        # get_content() auto-decodes transfer-encodings; returns
-        # *str* for text/*, *bytes* for everything else :contentReference[oaicite:2]{index=2}
-        data = part.get_content()
-
-        # make sure we write binary data
-        bin_data = (
-            data.encode(part.get_content_charset("utf-8"))
-            if isinstance(data, str)
-            else data
-        )
-
-        path = f".emails/{folder_path}/attachments/{fname}"
-        handle = await room.storage.open(path=path)
-        try:
-            logger.info(f"writing content to {path}")
-            await room.storage.write(handle=handle, data=bin_data)
-        finally:
-            await room.storage.close(handle=handle)
-
-        queued_message["attachments"].append(path)
-
-    logger.info(f"received mail, {queued_message}")
-
-    # write email
-    path = f".emails/{folder_path}/message.eml"
-    handle = await room.storage.open(path=path)
-    try:
-        logger.info(f"writing source message.eml to {path}")
-        await room.storage.write(handle=handle, data=content)
-    finally:
-        await room.storage.close(handle=handle)
-
-    path = f".emails/{folder_path}/message.json"
-    handle = await room.storage.open(path=path)
-    try:
-        logger.info(f"writing source message.json to {path}")
-        await room.storage.write(
-            handle=handle, data=json.dumps(queued_message, indent=4).encode("utf-8")
-        )
-    finally:
-        await room.storage.close(handle=handle)
-
-    # create email table if it doesn't exist
-    tables = await room.database.list_tables()
-
-    if "emails" not in tables:
-        await room.database.create_table_with_schema(
-            name="emails",
-            schema={"id": TextDataType(), "json": TextDataType()},
-            mode="create_if_not_exists",
-        )
-
-        await room.database.create_scalar_index(table="emails", column="id")
-
-    await room.database.insert(
-        table="emails", records=[{"id": message_id, "json": json.dumps(queued_message)}]
-    )
-
-    return queued_message
-
-
-async def load_thread(*, room: RoomClient, message: dict, thread: list[dict]):
-    in_reply_to = message.get("in_reply_to", None)
-    if in_reply_to is not None:
-        source = await load_message(room=room, message_id=in_reply_to)
-
-        if source is not None:
-            thread.insert(0, source)
-
-            await load_thread(room=room, message=source, thread=thread)
-
-        else:
-            logger.warning(f"message not found {in_reply_to}")
-
-
 class SmtpConfiguration:
     def __init__(
         self,
@@ -235,6 +92,149 @@ class MailWorker(Worker):
         )
         self._email_address = email_address
 
+
+    async def load_message(self, *, room: RoomClient, message_id: str) -> dict | None:
+        messages = await room.database.search(table="emails", where={"id": message_id})
+
+        if len(messages) == 0:
+            return None
+
+        return json.loads(messages[0]["json"])
+
+
+    def message_to_json(self, *, message: EmailMessage, role: MessageRole):
+        body_part = message.get_body(
+            ("plain", "html")
+        )  # returns the “best” part :contentReference[oaicite:0]{index=0}
+        if body_part:
+            body = body_part.get_content()
+        else:  # simple, non-MIME message
+            body = message.get_content()
+
+        id = message.get("Message-ID")
+        if id is None:
+            mfrom = message.get("From")
+            _, addr = email.utils.parseaddr(mfrom)
+            domain = addr.split("@")[-1].lower()
+            id = f"{uuid.uuid4()}@{domain}"
+
+        return {
+            "id": id,
+            "in_reply_to": message.get("In-Reply-To"),
+            "reply_to": message.get("Reply-To", message.get("From")),
+            "references": message.get("References"),
+            "from": message.get("From"),
+            "to": message.get_all("To"),
+            "subject": message.get("Subject"),
+            "body": body,
+            "attachments": [],
+            "role": role,
+        }
+
+    async def save_email_message(
+    self, *, room: RoomClient, content: bytes, role: MessageRole
+    ) -> dict:
+        message = message_from_bytes(content, policy=default)
+
+        now = datetime.now(timezone.utc)
+
+        folder_path = (
+            now.strftime("%Y/%m/%d")
+            + "/"
+            + now.strftime("%H/%M/%S")
+            + "/"
+            + secrets.token_hex(3)
+        )
+
+        queued_message = self.message_to_json(message=message, role=role)
+        message_id = queued_message["id"]
+
+        queued_message["role"] = role
+
+        queued_message["path"] = f".emails/{message_id}/message.json"
+
+        for part in (
+            message.iter_attachments()
+        ):  # ↔ only the “real” attachments :contentReference[oaicite:0]{index=0}
+            fname = (
+                part.get_filename() or "attachment.bin"
+            )  # RFC 2183 filename, if any :contentReference[oaicite:1]{index=1}
+
+            # get_content() auto-decodes transfer-encodings; returns
+            # *str* for text/*, *bytes* for everything else :contentReference[oaicite:2]{index=2}
+            data = part.get_content()
+
+            # make sure we write binary data
+            bin_data = (
+                data.encode(part.get_content_charset("utf-8"))
+                if isinstance(data, str)
+                else data
+            )
+
+            path = f".emails/{folder_path}/attachments/{fname}"
+            handle = await room.storage.open(path=path)
+            try:
+                logger.info(f"writing content to {path}")
+                await room.storage.write(handle=handle, data=bin_data)
+            finally:
+                await room.storage.close(handle=handle)
+
+            queued_message["attachments"].append(path)
+
+        logger.info(f"received mail, {queued_message}")
+
+        # write email
+        path = f".emails/{folder_path}/message.eml"
+        handle = await room.storage.open(path=path)
+        try:
+            logger.info(f"writing source message.eml to {path}")
+            await room.storage.write(handle=handle, data=content)
+        finally:
+            await room.storage.close(handle=handle)
+
+        path = f".emails/{folder_path}/message.json"
+        handle = await room.storage.open(path=path)
+        try:
+            logger.info(f"writing source message.json to {path}")
+            await room.storage.write(
+                handle=handle, data=json.dumps(queued_message, indent=4).encode("utf-8")
+            )
+        finally:
+            await room.storage.close(handle=handle)
+
+        # create email table if it doesn't exist
+        tables = await room.database.list_tables()
+
+        if "emails" not in tables:
+            await room.database.create_table_with_schema(
+                name="emails",
+                schema={"id": TextDataType(), "json": TextDataType()},
+                mode="create_if_not_exists",
+            )
+
+            await room.database.create_scalar_index(table="emails", column="id")
+
+        await room.database.insert(
+            table="emails", records=[{"id": message_id, "json": json.dumps(queued_message)}]
+        )
+
+        return queued_message
+
+
+    async def load_thread(self, *, room: RoomClient, message: dict, thread: list[dict]):
+        in_reply_to = message.get("in_reply_to", None)
+        if in_reply_to is not None:
+            source = await self.load_message(room=room, message_id=in_reply_to)
+
+            if source is not None:
+                thread.insert(0, source)
+
+                await self.load_thread(room=room, message=source, thread=thread)
+
+            else:
+                logger.warning(f"message not found {in_reply_to}")
+
+
     async def append_message_context(
         self,
         *,
@@ -265,13 +265,13 @@ class MailWorker(Worker):
     ):
         message_bytes = base64.b64decode(message["base64"])
 
-        message = await save_email_message(
+        message = await self.save_email_message(
             room=room, content=message_bytes, role="agent"
         )
 
         thread = [message]
 
-        await load_thread(room=room, message=message, thread=thread)
+        await self.load_thread(room=room, message=message, thread=thread)
 
         await self.append_message_context(
             room=room, message=message, chat_context=chat_context, thread=thread
@@ -318,7 +318,7 @@ class MailWorker(Worker):
             message=message, from_address=self._email_address, body=reply
         )
 
-        reply_msg_dict = await save_email_message(
+        reply_msg_dict = await self.save_email_message(
             room=room, content=msg.as_bytes(), role="agent"
         )
 
