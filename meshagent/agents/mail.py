@@ -92,7 +92,6 @@ class MailWorker(Worker):
         )
         self._email_address = email_address
 
-
     async def load_message(self, *, room: RoomClient, message_id: str) -> dict | None:
         messages = await room.database.search(table="emails", where={"id": message_id})
 
@@ -100,7 +99,6 @@ class MailWorker(Worker):
             return None
 
         return json.loads(messages[0]["json"])
-
 
     def message_to_json(self, *, message: EmailMessage, role: MessageRole):
         body_part = message.get_body(
@@ -132,7 +130,7 @@ class MailWorker(Worker):
         }
 
     async def save_email_message(
-    self, *, room: RoomClient, content: bytes, role: MessageRole
+        self, *, room: RoomClient, content: bytes, role: MessageRole
     ) -> dict:
         message = message_from_bytes(content, policy=default)
 
@@ -215,11 +213,11 @@ class MailWorker(Worker):
             await room.database.create_scalar_index(table="emails", column="id")
 
         await room.database.insert(
-            table="emails", records=[{"id": message_id, "json": json.dumps(queued_message)}]
+            table="emails",
+            records=[{"id": message_id, "json": json.dumps(queued_message)}],
         )
 
         return queued_message
-
 
     async def load_thread(self, *, room: RoomClient, message: dict, thread: list[dict]):
         in_reply_to = message.get("in_reply_to", None)
@@ -233,7 +231,6 @@ class MailWorker(Worker):
 
             else:
                 logger.warning(f"message not found {in_reply_to}")
-
 
     async def append_message_context(
         self,
