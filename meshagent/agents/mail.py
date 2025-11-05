@@ -5,7 +5,6 @@ from email.message import EmailMessage
 from email.policy import default
 from meshagent.tools import ToolContext, Toolkit
 import email.utils
-from meshagent.api import RoomClient
 from meshagent.agents import AgentChatContext
 from datetime import datetime, timezone
 import base64
@@ -92,7 +91,8 @@ class MailWorker(Worker):
         )
         self._email_address = email_address
 
-    async def load_message(self, *, room: RoomClient, message_id: str) -> dict | None:
+    async def load_message(self, *, message_id: str) -> dict | None:
+        room = self.room
         messages = await room.database.search(table="emails", where={"id": message_id})
 
         if len(messages) == 0:
@@ -127,11 +127,11 @@ class MailWorker(Worker):
             "body": body,
             "attachments": [],
             "role": role,
+            "correlation_id": message.get("Meshagent-Correlation-ID"),
         }
 
-    async def save_email_message(
-        self, *, room: RoomClient, content: bytes, role: MessageRole
-    ) -> dict:
+    async def save_email_message(self, *, content: bytes, role: MessageRole) -> dict:
+        room = self.room
         message = message_from_bytes(content, policy=default)
 
         now = datetime.now(timezone.utc)
@@ -219,15 +219,15 @@ class MailWorker(Worker):
 
         return queued_message
 
-    async def load_thread(self, *, room: RoomClient, message: dict, thread: list[dict]):
+    async def load_thread(self, *, message: dict, thread: list[dict]):
         in_reply_to = message.get("in_reply_to", None)
         if in_reply_to is not None:
-            source = await self.load_message(room=room, message_id=in_reply_to)
+            source = await self.load_message(message_id=in_reply_to)
 
             if source is not None:
                 thread.insert(0, source)
 
-                await self.load_thread(room=room, message=source, thread=thread)
+                await self.load_thread(message=source, thread=thread)
 
             else:
                 logger.warning(f"message not found {in_reply_to}")
@@ -235,7 +235,6 @@ class MailWorker(Worker):
     async def append_message_context(
         self,
         *,
-        room: RoomClient,
         message: dict,
         chat_context: AgentChatContext,
         thread: list[dict],
@@ -249,29 +248,26 @@ class MailWorker(Worker):
 
         # TODO: load previous messages
         return await super().append_message_context(
-            room=room, message=message, chat_context=chat_context
+            room=self.room, message=message, chat_context=chat_context
         )
 
     async def process_message(
         self,
         *,
         chat_context: AgentChatContext,
-        room: RoomClient,
         message: dict,
         toolkits: list[Toolkit],
     ):
         message_bytes = base64.b64decode(message["base64"])
 
-        message = await self.save_email_message(
-            room=room, content=message_bytes, role="agent"
-        )
+        message = await self.save_email_message(content=message_bytes, role="agent")
 
         thread = [message]
 
-        await self.load_thread(room=room, message=message, thread=thread)
+        await self.load_thread(message=message, thread=thread)
 
         await self.append_message_context(
-            room=room, message=message, chat_context=chat_context, thread=thread
+            message=message, chat_context=chat_context, thread=thread
         )
 
         thread_context = MailThreadContext(
@@ -282,11 +278,10 @@ class MailWorker(Worker):
         logger.info(f"processing message {message}")
         reply = await super().process_message(
             chat_context=thread_context.chat,
-            room=room,
             message=message,
             toolkits=toolkits,
         )
-        return await self.send_reply_message(room=room, message=message, reply=reply)
+        return await self.send_reply_message(message=message, reply=reply)
 
     def create_reply_email_message(
         self, *, message: dict, from_address: str, body: str
@@ -306,17 +301,21 @@ class MailWorker(Worker):
         msg["From"] = from_address
         msg["To"] = message.get("reply_to")
         msg["In-Reply-To"] = message.get("id")
+        correlation_id = message.get("correlation_id")
+        if correlation_id is not None:
+            msg["Meshagent-Correlation-ID"] = correlation_id
+
         msg.set_content(body)
 
         return msg
 
-    async def send_reply_message(self, *, room: RoomClient, message: dict, reply: str):
+    async def send_reply_message(self, *, message: dict, reply: str):
         msg = self.create_reply_email_message(
             message=message, from_address=self._email_address, body=reply
         )
 
         reply_msg_dict = await self.save_email_message(
-            room=room, content=msg.as_bytes(), role="agent"
+            content=msg.as_bytes(), role="agent"
         )
 
         logger.info(f"replying with message {reply_msg_dict}")
