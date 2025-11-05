@@ -25,9 +25,10 @@ type MessageRole = Literal["user", "agent"]
 
 
 class MailThreadContext:
-    def __init__(self, *, chat: AgentChatContext, message: dict):
+    def __init__(self, *, chat: AgentChatContext, message: dict, thread: list[dict]):
         self.chat = chat
         self.message = message
+        self.thread = thread
 
 
 class SmtpConfiguration:
@@ -149,7 +150,7 @@ class MailWorker(Worker):
 
         queued_message["role"] = role
 
-        queued_message["path"] = f".emails/{message_id}/message.json"
+        queued_message["path"] = f".emails/{folder_path}/message.json"
 
         for part in (
             message.iter_attachments()
@@ -248,7 +249,7 @@ class MailWorker(Worker):
 
         # TODO: load previous messages
         return await super().append_message_context(
-            room=self.room, message=message, chat_context=chat_context
+            message=message, chat_context=chat_context
         )
 
     async def process_message(
@@ -286,7 +287,7 @@ class MailWorker(Worker):
     def create_reply_email_message(
         self, *, message: dict, from_address: str, body: str
     ) -> EmailMessage:
-        subject: str = message.get("subject")
+        subject: str = message.get("subject") or ""
 
         if not subject.startswith("RE:"):
             subject = "RE: " + subject
@@ -358,68 +359,3 @@ class MailWorker(Worker):
         )
 
         return [*self._toolkits, *toolkits]
-
-
-def base36encode(number: int):
-    if not isinstance(number, int):
-        raise TypeError("number must be an integer")
-    if number < 0:
-        raise ValueError("number must be non-negative")
-
-    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-    if number == 0:
-        return "0"
-    base36 = ""
-    while number:
-        number, i = divmod(number, 36)
-        base36 = alphabet[i] + base36
-    return base36
-
-
-def compress_uuid(guid_string: str):
-    guid_int = int(guid_string.replace("-", ""), 16)
-    return base36encode(guid_int)
-
-
-def base36decode(number_str: str) -> int:
-    """Decode a base36-encoded string into an integer."""
-    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-    base = 36
-    number = 0
-    for char in number_str:
-        try:
-            value = alphabet.index(char)
-        except ValueError:
-            raise ValueError(f"Invalid character '{char}' for base36 encoding")
-        number = number * base + value
-    return number
-
-
-def decompress_uuid(compressed_uuid: str) -> str:
-    """
-    Reverse the compressed UUID to its standard 36-character UUID format.
-
-    Args:
-        compressed_uuid: A base36 string that represents a UUID compressed from its standard form.
-
-    Returns:
-        A string in the UUID format (8-4-4-4-12 hexadecimal characters).
-    """
-    # Decode the base36 string back to the original integer.
-    guid_int = base36decode(compressed_uuid)
-
-    # Convert the integer into a 32-digit hexadecimal string with leading zeros.
-    hex_str = f"{guid_int:032x}"
-
-    # Reinsert dashes to match the standard UUID format: 8-4-4-4-12.
-    standard_uuid = f"{hex_str[0:8]}-{hex_str[8:12]}-{hex_str[12:16]}-{hex_str[16:20]}-{hex_str[20:32]}"
-    return standard_uuid
-
-
-def room_address(
-    *,
-    project_id: str,
-    room_name: str,
-    domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
-):
-    return f"{compress_uuid(project_id)}+{room_name}@{domain}"
