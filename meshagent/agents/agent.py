@@ -194,46 +194,49 @@ class SingleRoomAgent(Agent):
         builtin_agents_url = "http://localhost:8080"
 
         for requirement in self.requires:
-            if isinstance(requirement, RequiredToolkit):
-                if requirement.name == "ui":
-                    # TODO: maybe requirements can be marked as non installable?
-                    continue
+            if requirement.callable:
+                if isinstance(requirement, RequiredToolkit):
+                    if requirement.name == "ui":
+                        # TODO: maybe requirements can be marked as non installable?
+                        continue
 
-                if requirement.name not in toolkits_by_name:
-                    installed = True
+                    if requirement.name not in toolkits_by_name:
+                        installed = True
 
-                    logger.info(f"calling required tool into room {requirement.name}")
+                        logger.info(
+                            f"calling required tool into room {requirement.name}"
+                        )
 
-                    if requirement.name.startswith(
-                        "https://"
-                    ) or requirement.name.startswith("http://"):
-                        url = requirement.name
-                    else:
-                        url = f"{builtin_agents_url}/toolkits/{requirement.name}"
+                        if requirement.name.startswith(
+                            "https://"
+                        ) or requirement.name.startswith("http://"):
+                            url = requirement.name
+                        else:
+                            url = f"{builtin_agents_url}/toolkits/{requirement.name}"
 
-                    await self._room.agents.make_call(
-                        url=url, name=requirement.name, arguments={}
-                    )
+                        await self._room.agents.make_call(
+                            url=url, name=requirement.name, arguments={}
+                        )
 
-            elif isinstance(requirement, RequiredSchema):
-                if requirement.name not in schemas_by_name:
-                    installed = True
+                elif isinstance(requirement, RequiredSchema):
+                    if requirement.name not in schemas_by_name:
+                        installed = True
 
-                    logger.info(f"Installing required schema {requirement.name}")
+                        logger.info(f"Installing required schema {requirement.name}")
 
-                    if requirement.name.startswith(
-                        "https://"
-                    ) or requirement.name.startswith("http://"):
-                        url = requirement.name
-                    else:
-                        url = f"{builtin_agents_url}/schemas/{requirement.name}"
+                        if requirement.name.startswith(
+                            "https://"
+                        ) or requirement.name.startswith("http://"):
+                            url = requirement.name
+                        else:
+                            url = f"{builtin_agents_url}/schemas/{requirement.name}"
 
-                    await self._room.agents.make_call(
-                        url=url, name=requirement.name, arguments={}
-                    )
+                        await self._room.agents.make_call(
+                            url=url, name=requirement.name, arguments={}
+                        )
 
-            else:
-                raise RoomException("unsupported requirement")
+                else:
+                    raise RoomException("unsupported requirement")
 
         if installed:
             await asyncio.sleep(5)
