@@ -289,7 +289,7 @@ class MailWorker(Worker):
         return await self.send_reply_message(room=room, message=message, reply=reply)
 
     def create_reply_email_message(
-        *, message: dict, from_address: str, body: str
+        self, *, message: dict, from_address: str, body: str
     ) -> EmailMessage:
         subject: str = message.get("subject")
 
