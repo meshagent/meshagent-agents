@@ -31,29 +31,6 @@ class MailThreadContext:
         self.message = message
 
 
-def create_reply_email_message(
-    *, message: dict, from_address: str, body: str
-) -> EmailMessage:
-    subject: str = message.get("subject")
-
-    if not subject.startswith("RE:"):
-        subject = "RE: " + subject
-
-    _, addr = email.utils.parseaddr(from_address)
-    domain = addr.split("@")[-1].lower()
-    id = f"<{uuid.uuid4()}@{domain}>"
-
-    msg = EmailMessage()
-    msg["Message-ID"] = id
-    msg["Subject"] = subject
-    msg["From"] = from_address
-    msg["To"] = message.get("reply_to")
-    msg["In-Reply-To"] = message.get("id")
-    msg.set_content(body)
-
-    return msg
-
-
 def message_to_json(*, message: EmailMessage, role: MessageRole):
     body_part = message.get_body(
         ("plain", "html")
@@ -258,11 +235,14 @@ class MailWorker(Worker):
         )
         self._email_address = email_address
 
-    async def append_message_context(self, *, room, message, chat_context):
-        thread = [message]
-
-        await load_thread(room=room, message=message, thread=thread)
-
+    async def append_message_context(
+        self,
+        *,
+        room: RoomClient,
+        message: dict,
+        chat_context: AgentChatContext,
+        thread: list[dict],
+    ):
         for msg in thread:
             if msg["role"] == "agent":
                 chat_context.append_assistant_message(json.dumps(msg))
@@ -275,18 +255,33 @@ class MailWorker(Worker):
             room=room, message=message, chat_context=chat_context
         )
 
-    async def process_message(self, *, chat_context, room, message, toolkits):
+    async def process_message(
+        self,
+        *,
+        chat_context: AgentChatContext,
+        room: RoomClient,
+        message: dict,
+        toolkits: list[Toolkit],
+    ):
         message_bytes = base64.b64decode(message["base64"])
 
         message = await save_email_message(
             room=room, content=message_bytes, role="agent"
         )
 
-        thread_context = MailThreadContext(chat=chat_context, message=message)
-        toolkits = await self.get_thread_toolkits(thread_context=thread_context)
+        thread = [message]
+
+        await load_thread(room=room, message=message, thread=thread)
+
         await self.append_message_context(
-            room=room, message=message, chat_context=chat_context
+            room=room, message=message, chat_context=chat_context, thread=thread
         )
+
+        thread_context = MailThreadContext(
+            chat=chat_context, message=message, thread=thread
+        )
+        toolkits = await self.get_thread_toolkits(thread_context=thread_context)
+
         logger.info(f"processing message {message}")
         reply = await super().process_message(
             chat_context=thread_context.chat,
@@ -296,8 +291,30 @@ class MailWorker(Worker):
         )
         return await self.send_reply_message(room=room, message=message, reply=reply)
 
+    def create_reply_email_message(
+        *, message: dict, from_address: str, body: str
+    ) -> EmailMessage:
+        subject: str = message.get("subject")
+
+        if not subject.startswith("RE:"):
+            subject = "RE: " + subject
+
+        _, addr = email.utils.parseaddr(from_address)
+        domain = addr.split("@")[-1].lower()
+        id = f"<{uuid.uuid4()}@{domain}>"
+
+        msg = EmailMessage()
+        msg["Message-ID"] = id
+        msg["Subject"] = subject
+        msg["From"] = from_address
+        msg["To"] = message.get("reply_to")
+        msg["In-Reply-To"] = message.get("id")
+        msg.set_content(body)
+
+        return msg
+
     async def send_reply_message(self, *, room: RoomClient, message: dict, reply: str):
-        msg = create_reply_email_message(
+        msg = self.create_reply_email_message(
             message=message, from_address=self._email_address, body=reply
         )
 
