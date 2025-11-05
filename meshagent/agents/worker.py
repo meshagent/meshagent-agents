@@ -68,7 +68,7 @@ class Worker(SingleRoomAgent):
         await super().stop()
 
     async def append_message_context(
-        self, *, room: RoomClient, message: dict, chat_context: AgentChatContext
+        self, *, message: dict, chat_context: AgentChatContext
     ):
         chat_context.append_user_message(message=json.dumps(message))
 
@@ -79,17 +79,14 @@ class Worker(SingleRoomAgent):
         self,
         *,
         chat_context: AgentChatContext,
-        room: RoomClient,
         message: dict,
         toolkits: list[Toolkit],
     ):
-        await self.append_message_context(
-            room=room, message=message, chat_context=chat_context
-        )
+        await self.append_message_context(message=message, chat_context=chat_context)
 
         return await self._llm_adapter.next(
             context=chat_context,
-            room=room,
+            room=self.room,
             toolkits=toolkits,
             tool_adapter=self._tool_adapter,
         )
@@ -123,7 +120,6 @@ class Worker(SingleRoomAgent):
 
                         await self.process_message(
                             chat_context=chat_context,
-                            room=room,
                             message=message,
                             toolkits=toolkits,
                         )
