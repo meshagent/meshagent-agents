@@ -116,7 +116,7 @@ class ChatBotReasoningTool(ReasoningTool):
 
 class ChatBotThreadLocalShellToolkitBuilder(ToolkitBuilder):
     def __init__(self, *, thread_context: "ChatThreadContext"):
-        super().__init__(name="local_shell", type=ImageGenerationConfig)
+        super().__init__(name="local_shell", type=LocalShellConfig)
         self.thread_context = thread_context
 
     def make(
