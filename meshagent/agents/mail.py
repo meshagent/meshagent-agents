@@ -277,11 +277,6 @@ class MailWorker(Worker):
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
 
         logger.info(f"processing message {message}")
-        reply = await super().process_message(
-            chat_context=thread_context.chat,
-            message=message,
-            toolkits=toolkits,
-        )
 
         await self.append_message_context(
             message=message, chat_context=chat_context, thread=thread
