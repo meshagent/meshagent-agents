@@ -132,5 +132,5 @@ class Worker(SingleRoomAgent):
                     f"Worker error while receiving: {e}, will retry", exc_info=e
                 )
 
-                asyncio.sleep(0.1 * pow(2, backoff))
+                await asyncio.sleep(0.1 * pow(2, backoff))
                 backoff = backoff + 1
