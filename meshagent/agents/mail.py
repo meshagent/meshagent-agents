@@ -261,7 +261,7 @@ class MailWorker(Worker):
     ):
         message_bytes = base64.b64decode(message["base64"])
 
-        message = await self.save_email_message(content=message_bytes, role="agent")
+        message = await self.save_email_message(content=message_bytes, role="user")
 
         thread = [message]
 
