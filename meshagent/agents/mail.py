@@ -282,6 +282,18 @@ class MailWorker(Worker):
             message=message,
             toolkits=toolkits,
         )
+
+        await self.append_message_context(
+            message=message, chat_context=chat_context, thread=thread
+        )
+
+        reply = await self._llm_adapter.next(
+            context=chat_context,
+            room=self.room,
+            toolkits=toolkits,
+            tool_adapter=self._tool_adapter,
+        )
+
         return await self.send_reply_message(message=message, reply=reply)
 
     def create_reply_email_message(
