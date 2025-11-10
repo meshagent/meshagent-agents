@@ -88,7 +88,7 @@ class MailWorker(Worker):
             llm_adapter=llm_adapter,
             tool_adapter=tool_adapter,
             toolkits=toolkits,
-            rules=rules,
+            rules=rules or [ "You MUST reply with plain text, do not reply in JSON format or HTML format" ],
         )
         self._email_address = email_address
 
@@ -278,16 +278,14 @@ class MailWorker(Worker):
 
         logger.info(f"processing message {message}")
 
-        await self.append_message_context(
-            message=message, chat_context=chat_context, thread=thread
-        )
-
         reply = await self._llm_adapter.next(
             context=chat_context,
             room=self.room,
             toolkits=toolkits,
             tool_adapter=self._tool_adapter,
         )
+
+        logger.info(f"replying: {reply}")
 
         return await self.send_reply_message(message=message, reply=reply)
 
@@ -296,7 +294,7 @@ class MailWorker(Worker):
     ) -> EmailMessage:
         subject: str = message.get("subject") or ""
 
-        if not subject.startswith("RE:"):
+        if not subject.lower().startswith("re:"):
             subject = "RE: " + subject
 
         _, addr = email.utils.parseaddr(from_address)
