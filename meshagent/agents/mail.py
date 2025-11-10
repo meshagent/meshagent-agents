@@ -88,7 +88,10 @@ class MailWorker(Worker):
             llm_adapter=llm_adapter,
             tool_adapter=tool_adapter,
             toolkits=toolkits,
-            rules=rules or [ "You MUST reply with plain text, do not reply in JSON format or HTML format" ],
+            rules=rules
+            or [
+                "You MUST reply with plain text, do not reply in JSON format or HTML format"
+            ],
         )
         self._email_address = email_address
 
