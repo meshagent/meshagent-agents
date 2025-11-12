@@ -371,6 +371,7 @@ class ChatBot(SingleRoomAgent):
         tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
+        client_rules: Optional[dict[str, list[str]]] = None,
         auto_greet_message: Optional[str] = None,
         empty_state_title: Optional[str] = None,
         labels: Optional[list[str]] = None,
@@ -398,6 +399,7 @@ class ChatBot(SingleRoomAgent):
 
         self._room: RoomClient | None = None
         self._toolkits = toolkits
+        self._client_rules = client_rules
 
         if rules is None:
             rules = []
@@ -951,6 +953,15 @@ class ChatBot(SingleRoomAgent):
                         )
 
                     chat_context.append_user_message(message=text)
+
+                    rules = [*self._rules]
+                    client = chat_with_participant.get_attribute("client")
+                    if self._client_rules is not None and client is not None:
+                        cr = self._client_rules.get(client)
+                        if cr is not None:
+                            rules.extend(cr)
+
+                    chat_context.replace_rules(rules)
 
                 if received is not None and received.type == "chat":
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
