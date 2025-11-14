@@ -837,6 +837,31 @@ class ChatBot(SingleRoomAgent):
             on_behalf_of=from_user,
         )
 
+    async def get_rules(
+        self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
+    ):
+        rules = [*self._rules]
+        client = participant.get_attribute("client")
+
+        if self._client_rules is not None and client is not None:
+            cr = self._client_rules.get(client)
+            if cr is not None:
+                rules.extend(cr)
+
+        return rules
+
+    async def on_chat_received(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        from_participant: RemoteParticipant,
+        message: dict,
+    ):
+        rules = await self.get_rules(
+            thread_context=thread_context, participant=from_participant
+        )
+        thread_context.chat.replace_rules(rules)
+
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
@@ -954,15 +979,6 @@ class ChatBot(SingleRoomAgent):
 
                     chat_context.append_user_message(message=text)
 
-                    rules = [*self._rules]
-                    client = chat_with_participant.get_attribute("client")
-                    if self._client_rules is not None and client is not None:
-                        cr = self._client_rules.get(client)
-                        if cr is not None:
-                            rules.extend(cr)
-
-                    chat_context.replace_rules(rules)
-
                 if received is not None and received.type == "chat":
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
                         span.set_attributes(thread_attributes)
@@ -992,6 +1008,12 @@ class ChatBot(SingleRoomAgent):
                                 thread_context.participants = get_online_participants(
                                     room=self.room, thread=thread
                                 )
+
+                            await self.on_chat_received(
+                                thread_context=thread_context,
+                                from_participant=chat_with_participant,
+                                message=received.message,
+                            )
 
                             with tracer.start_as_current_span("chatbot.llm") as span:
                                 try:

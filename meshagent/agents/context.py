@@ -55,7 +55,7 @@ class AgentChatContext:
         system_message = None
 
         for m in self.messages:
-            if m["role"] == self.system_role:
+            if m.get("role") == self.system_role:
                 system_message = m
                 break
 
