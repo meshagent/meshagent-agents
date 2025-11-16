@@ -16,7 +16,14 @@ class RulesConfig(BaseModel):
 
         client = None
         for line in text.splitlines():
+
+            if line.startswith("#"):
+                continue
+
             line = line.strip()
+            if len(line) == 0:
+                continue
+            
             if line.startswith("[") and line.endswith("]"):
                 client = line.strip("[]")
                 client_rules[client] = []

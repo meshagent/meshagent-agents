@@ -20,6 +20,20 @@ third rule"""
     assert config.client_rules == {}
 
 
+def test_comments():
+    text = """\
+# first rule
+second rule
+third rule"""
+
+    config = RulesConfig.parse(text=text)
+
+    assert config.rules == ["second rule", "third rule"]
+    assert config.client_rules == {}
+
+
+
+
 def test_parse_single_client_rules_only():
     text = """\
 [web]
@@ -90,14 +104,12 @@ def test_parse_keeps_blank_lines_as_rules():
     # This matches the current implementation, which does *not* skip empty lines.
     text = """\
 global 1
-
 global 2
 [web]
-
 rule after blank
 """
 
     config = RulesConfig.parse(text=text)
 
-    assert config.rules == ["global 1", "", "global 2"]
-    assert config.client_rules == {"web": ["", "rule after blank"]}
+    assert config.rules == ["global 1", "global 2"]
+    assert config.client_rules == {"web": ["rule after blank"]}
