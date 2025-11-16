@@ -32,8 +32,6 @@ third rule"""
     assert config.client_rules == {}
 
 
-
-
 def test_parse_single_client_rules_only():
     text = """\
 [web]
