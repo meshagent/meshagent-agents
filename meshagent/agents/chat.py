@@ -951,8 +951,16 @@ class ChatBot(SingleRoomAgent):
                             thread=thread,
                             thread_attributes=thread_attributes,
                         )
+                elif received.type == "clear":
+                    chat_context = await self.init_chat_context()
+                    thread_context.chat = chat_context
+                    messages_element: Element = thread.root.get_children_by_tag_name(
+                        "messages"
+                    )[0]
+                    for child in list(messages_element.get_children()):
+                        child.delete()
 
-                if received.type == "chat":
+                elif received.type == "chat":
                     if thread is None:
                         logger.info("thread is not open", extra={"path": path})
                         break
@@ -1204,7 +1212,11 @@ class ChatBot(SingleRoomAgent):
 
                 task.add_done_callback(on_done)
 
-            if message.type == "chat" or message.type == "opened":
+            if (
+                message.type == "chat"
+                or message.type == "opened"
+                or message.type == "clear"
+            ):
                 path = message.message["path"]
 
                 messages = self._get_message_channel(path)
