@@ -35,6 +35,7 @@ from meshagent.api import RoomException
 
 from opentelemetry import trace
 import shlex
+import json
 
 tracer = trace.get_tracer("meshagent.chatbot")
 
@@ -1068,7 +1069,7 @@ class ChatBot(SingleRoomAgent):
                         )
 
                         attachments = received.message.get("attachments", [])
-                        span.set_attribute("attachments", attachments)
+                        span.set_attribute("attachments", json.dumps(attachments))
 
                         text = received.message["text"]
                         span.set_attributes({"text": text})
@@ -1153,16 +1154,20 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
-                                    await self.handle_user_message(
-                                        context=thread_context,
-                                        toolkits=message_toolkits,
-                                        event_handler=handle_event,
-                                        model=model,
-                                        from_user=chat_with_participant,
-                                    )
+                                    try:
+                                        await self.handle_user_message(
+                                            context=thread_context,
+                                            toolkits=message_toolkits,
+                                            event_handler=handle_event,
+                                            model=model,
+                                            from_user=chat_with_participant,
+                                        )
+                                        
+                                    finally:
+                                        llm_messages.shutdown()
 
-                                    llm_messages.shutdown()
                                     await llm_task
+                                
 
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
