@@ -204,9 +204,7 @@ class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
 
 
 class ChatBotThreadShellTool(ShellTool):
-    def __init__(
-        self, *, thread_context: "ChatThreadContext", config: ShellConfig
-    ):
+    def __init__(self, *, thread_context: "ChatThreadContext", config: ShellConfig):
         super().__init__(config=config)
         self.thread_context = thread_context
 
