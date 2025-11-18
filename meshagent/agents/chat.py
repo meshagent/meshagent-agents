@@ -17,6 +17,8 @@ from meshagent.openai.tools.responses_adapter import (
     ImageGenerationTool,
     LocalShellConfig,
     LocalShellTool,
+    ShellConfig,
+    ShellTool,
     #    WebSearchConfig,
     #    WebSearchTool,
     ReasoningTool,
@@ -178,6 +180,77 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
         exec_element.set_attribute("result", result)
 
         return result
+
+
+class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
+    def __init__(self, *, thread_context: "ChatThreadContext"):
+        super().__init__(name="shell", type=LocalShellConfig)
+        self.thread_context = thread_context
+
+    def make(
+        self,
+        *,
+        model: str,
+        config: LocalShellConfig,
+    ):
+        return Toolkit(
+            name="shell",
+            tools=[
+                ChatBotThreadShellTool(
+                    config=config, thread_context=self.thread_context
+                )
+            ],
+        )
+
+
+class ChatBotThreadShellTool(ShellTool):
+    def __init__(
+        self, *, thread_context: "ChatThreadContext", config: LocalShellConfig
+    ):
+        super().__init__(config=config)
+        self.thread_context = thread_context
+
+    async def execute_shell_command(
+        self,
+        context: ToolContext,
+        *,
+        commands: list[str],
+        max_output_length: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
+    ):
+        messages = None
+
+        for prop in self.thread_context.thread.root.get_children():
+            if prop.tag_name == "messages":
+                messages = prop
+                break
+
+        exec_elements = []
+        for command in commands:
+            exec_element = messages.append_child(
+                tag_name="exec",
+                attributes={"command": command},
+            )
+            exec_elements.append(exec_element)
+
+        results = await super().execute_shell_command(
+            context,
+            commands=commands,
+            timeout_ms=timeout_ms,
+            max_output_length=max_output_length,
+        )
+
+        for i in range(0, len(results)):
+            result = results[i]
+            exec_element = exec_elements[i]
+            if "exit_code" in result:
+                exec_element.set_attribute("exit_code", result["exit_code"])
+
+            exec_element.set_attribute("outcome", result["type"])
+            exec_element.set_attribute("stdout", result["stdout"])
+            exec_element.set_attribute("stderr", result["stderr"])
+
+        return results
 
 
 class ChatBotThreadOpenAIImageGenerationToolkitBuilder(ToolkitBuilder):

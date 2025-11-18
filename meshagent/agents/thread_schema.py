@@ -91,6 +91,26 @@ thread_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
+                    name="outcome",
+                    description="the outcome of the command",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="stderr",
+                    description="the standard error text of the command",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="stdout",
+                    description="the standard output text of the command",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="exit_code",
+                    description="the exit code of the command",
+                    type="number",
+                ),
+                ValueProperty(
                     name="pwd",
                     description="the working directory the command was executed in",
                     type="string",
