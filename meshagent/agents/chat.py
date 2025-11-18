@@ -184,14 +184,14 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
 
 class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
     def __init__(self, *, thread_context: "ChatThreadContext"):
-        super().__init__(name="shell", type=LocalShellConfig)
+        super().__init__(name="shell", type=ShellConfig)
         self.thread_context = thread_context
 
     def make(
         self,
         *,
         model: str,
-        config: LocalShellConfig,
+        config: ShellConfig,
     ):
         return Toolkit(
             name="shell",
@@ -205,7 +205,7 @@ class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
 
 class ChatBotThreadShellTool(ShellTool):
     def __init__(
-        self, *, thread_context: "ChatThreadContext", config: LocalShellConfig
+        self, *, thread_context: "ChatThreadContext", config: ShellConfig
     ):
         super().__init__(config=config)
         self.thread_context = thread_context
