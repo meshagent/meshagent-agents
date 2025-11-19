@@ -140,9 +140,13 @@ class ChatBotThreadLocalShellToolkitBuilder(ToolkitBuilder):
 
 class ChatBotThreadLocalShellTool(LocalShellTool):
     def __init__(
-        self, *, thread_context: "ChatThreadContext", config: LocalShellConfig
+        self,
+        *,
+        thread_context: "ChatThreadContext",
+        config: LocalShellConfig,
+        working_directory: Optional[str] = None,
     ):
-        super().__init__(config=config)
+        super().__init__(config=config, working_directory=working_directory)
         self.thread_context = thread_context
 
     async def execute_shell_command(
@@ -184,8 +188,14 @@ class ChatBotThreadLocalShellTool(LocalShellTool):
 
 
 class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
-    def __init__(self, *, thread_context: "ChatThreadContext"):
+    def __init__(
+        self,
+        *,
+        thread_context: "ChatThreadContext",
+        working_directory: Optional[str] = None,
+    ):
         super().__init__(name="shell", type=ShellConfig)
+        self.working_directory = working_directory
         self.thread_context = thread_context
 
     def make(
@@ -198,15 +208,23 @@ class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
             name="shell",
             tools=[
                 ChatBotThreadShellTool(
-                    config=config, thread_context=self.thread_context
+                    working_directory=self.working_directory,
+                    config=config,
+                    thread_context=self.thread_context,
                 )
             ],
         )
 
 
 class ChatBotThreadShellTool(ShellTool):
-    def __init__(self, *, thread_context: "ChatThreadContext", config: ShellConfig):
-        super().__init__(config=config)
+    def __init__(
+        self,
+        *,
+        thread_context: "ChatThreadContext",
+        config: ShellConfig,
+        working_directory: Optional[str] = None,
+    ):
+        super().__init__(config=config, working_directory=working_directory)
         self.thread_context = thread_context
 
     async def execute_shell_command(
@@ -242,10 +260,10 @@ class ChatBotThreadShellTool(ShellTool):
         for i in range(0, len(results)):
             result = results[i]
             exec_element = exec_elements[i]
-            if "exit_code" in result:
-                exec_element.set_attribute("exit_code", result["exit_code"])
+            if "exit_code" in result["outcome"]:
+                exec_element.set_attribute("exit_code", result["outcome"]["exit_code"])
 
-            exec_element.set_attribute("outcome", result["type"])
+            exec_element.set_attribute("outcome", result["outcome"]["type"])
             exec_element.set_attribute("stdout", result["stdout"])
             exec_element.set_attribute("stderr", result["stderr"])
 
