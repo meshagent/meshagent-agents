@@ -1162,12 +1162,11 @@ class ChatBot(SingleRoomAgent):
                                             model=model,
                                             from_user=chat_with_participant,
                                         )
-                                        
+
                                     finally:
                                         llm_messages.shutdown()
 
                                     await llm_task
-                                
 
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
