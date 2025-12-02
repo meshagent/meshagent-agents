@@ -554,7 +554,9 @@ divider = ElementType(
     description="divider",
     properties=[
         ValueProperty(
-            name="color", description="the color of the divider #rrggbbaa", type="string"
+            name="color",
+            description="the color of the divider #rrggbbaa",
+            type="string",
         ),
         ValueProperty(name="marginTop", description="the top margin", type="number"),
         ValueProperty(
@@ -573,9 +575,13 @@ spinner = ElementType(
     description="spinner",
     properties=[
         ValueProperty(
-            name="color", description="the color of the spinner #rrggbbaa", type="string"
+            name="color",
+            description="the color of the spinner #rrggbbaa",
+            type="string",
         ),
-        ValueProperty(name="width", description="the height of the spinner", type="number"),
+        ValueProperty(
+            name="width", description="the height of the spinner", type="number"
+        ),
         ValueProperty(
             name="height", description="the width of the spinner", type="number"
         ),
@@ -603,7 +609,6 @@ widget = ElementType(
         )
     ],
 )
-
 
 
 widget_schema = MeshSchema(
