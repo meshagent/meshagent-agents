@@ -10,7 +10,7 @@ from meshagent.api import (
     Element,
     MeshDocument,
 )
-from meshagent.tools import Toolkit, ToolContext, make_tools, ToolkitBuilder
+from meshagent.tools import Toolkit, ToolContext, make_toolkits, ToolkitBuilder
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
     ImageGenerationConfig,
@@ -1172,7 +1172,7 @@ class ChatBot(SingleRoomAgent):
                                         and len(message_tools) > 0
                                     ):
                                         message_toolkits.extend(
-                                            make_tools(
+                                            make_toolkits(
                                                 model=model,
                                                 providers=thread_tool_providers,
                                                 tools=message_tools,

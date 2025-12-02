@@ -2,8 +2,8 @@ from typing import Optional
 
 from jsonschema import validate, ValidationError
 from meshagent.api.schema_util import prompt_schema, merge
-from meshagent.api import Requirement
-from meshagent.tools import Toolkit
+from meshagent.api import Requirement, RemoteParticipant
+from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
@@ -70,14 +70,31 @@ class LLMTaskRunner(TaskRunner):
             chat.append_rules(self._extra_rules)
         return chat
 
+    async def get_toolkit_builders(
+        self, *, context: AgentCallContext, participant: RemoteParticipant
+    ) -> list[ToolkitBuilder]:
+        return []
+
     async def ask(self, *, context: AgentCallContext, arguments: dict):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
 
+        message_tools = arguments.get("tools")
+        model = arguments.get("model", self._llm_adapter.default_model())
+
         context.chat.append_user_message(prompt)
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
+
+        if message_tools is not None and len(message_tools) > 0:
+            combined_toolkits.extend(
+                make_toolkits(
+                    model=model,
+                    providers=self.get_toolkit_builders(context=context),
+                    tools=message_tools,
+                )
+            )
 
         resp = await self._llm_adapter.next(
             context=context.chat,
