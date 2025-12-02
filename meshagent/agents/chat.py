@@ -332,6 +332,8 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
 
         messages = None
 
+        logger.info(f"A partial was saved at the path {image_name}")
+
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
@@ -382,6 +384,15 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
 
         messages = None
 
+        logger.info(
+            f"An image was saved at the path {image_name} and displayed to the user"
+        )
+
+        self.thread_context.chat.append_assistant_message(
+            f"An image was saved at the path {image_name} and displayed to the user",
+            deferred=True,
+        )
+
         for prop in self.thread_context.thread.root.get_children():
             if prop.tag_name == "messages":
                 messages = prop
@@ -406,10 +417,6 @@ class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
             },
         )
         message_element.append_child(tag_name="file", attributes={"path": image_name})
-
-        self.thread_context.chat.append_assistant_message(
-            f"An image was saved at the path {image_name} and displayed to the user"
-        )
 
 
 def get_online_participants(

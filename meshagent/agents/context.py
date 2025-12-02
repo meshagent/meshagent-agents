@@ -29,6 +29,7 @@ class AgentChatContext:
 
         self._previous_response_id = previous_response_id
         self._previous_messages = previous_messages
+        self._deferred_messages = []
 
     @property
     def messages(self):
@@ -37,6 +38,10 @@ class AgentChatContext:
     @property
     def system_role(self):
         return self._system_role
+
+    @property
+    def deferred_messages(self):
+        return self._deferred_messages
 
     @property
     def previous_messages(self):
@@ -50,6 +55,8 @@ class AgentChatContext:
         self._previous_response_id = id
         self._previous_messages.extend(self.messages)
         self.messages.clear()
+        self.messages.extend(self._deferred_messages)
+        self._deferred_messages.clear()
 
     def replace_rules(self, rules: list[str]):
         system_message = None
@@ -81,8 +88,11 @@ class AgentChatContext:
         plan = f"Rules:\n-{'\n-'.join(rules)}\n"
         system_message["content"] = system_message["content"] + plan
 
-    def append_assistant_message(self, message: str) -> None:
-        self.messages.append({"role": "assistant", "content": message})
+    def append_assistant_message(self, message: str, deferred: bool = False) -> None:
+        if deferred:
+            self.deferred_messages.append({"role": "assistant", "content": message})
+        else:
+            self.messages.append({"role": "assistant", "content": message})
 
     def append_user_message(self, message: str) -> None:
         self.messages.append({"role": "user", "content": message})
