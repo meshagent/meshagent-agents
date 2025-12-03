@@ -115,7 +115,7 @@ class LLMTaskRunner(TaskRunner):
             combined_toolkits.extend(
                 make_toolkits(
                     model=model,
-                    providers=self.get_toolkit_builders(context=context),
+                    providers=await self.get_toolkit_builders(context=context),
                     tools=message_tools,
                 )
             )
