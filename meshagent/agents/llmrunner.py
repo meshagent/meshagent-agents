@@ -2,7 +2,7 @@ from typing import Optional
 
 from jsonschema import validate, ValidationError
 from meshagent.api.schema_util import prompt_schema, merge
-from meshagent.api import Requirement, RemoteParticipant
+from meshagent.api import Requirement
 from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
@@ -27,24 +27,39 @@ class LLMTaskRunner(TaskRunner):
         requires: Optional[list[Requirement]] = None,
         supports_tools: bool = True,
         input_prompt: bool = True,
+        input_tools: bool = False,
         input_schema: Optional[dict] = None,
         output_schema: Optional[dict] = None,
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         if input_schema is None:
             if input_prompt:
-                input_schema = merge(
-                    schema=prompt_schema(
-                        description="use a prompt to generate content"
-                    ),
-                    additional_properties={
-                        "tools": {
-                            "type": "array",
-                        },
-                        "model": {"type": "string"},
-                    },
+                input_schema = prompt_schema(
+                    description="use a prompt to generate content"
                 )
+
+                if input_tools:
+                    input_schema = merge(
+                        schema=input_schema,
+                        additional_properties={
+                            "tools": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name"],
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "name": {
+                                            "type": "string",
+                                        }
+                                    },
+                                },
+                            },
+                            "model": {"type": ["string", "null"]},
+                        },
+                    )
             else:
                 input_schema = {
                     "type": "object",
@@ -65,6 +80,7 @@ class LLMTaskRunner(TaskRunner):
             supports_tools=supports_tools,
             labels=labels,
             toolkits=static_toolkits,
+            annotations=annotations,
         )
 
         self._extra_rules = rules or []
@@ -79,7 +95,7 @@ class LLMTaskRunner(TaskRunner):
         return chat
 
     async def get_toolkit_builders(
-        self, *, context: AgentCallContext, participant: RemoteParticipant
+        self, *, context: AgentCallContext
     ) -> list[ToolkitBuilder]:
         return []
 
@@ -141,6 +157,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
         tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         input_schema = merge(
             schema=prompt_schema(description="use a prompt to generate content"),
@@ -158,6 +175,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             input_prompt=True,
             input_schema=input_schema,
             output_schema=None,
+            annotations=annotations,
         )
 
     async def ask(self, *, context: AgentCallContext, arguments: dict):
