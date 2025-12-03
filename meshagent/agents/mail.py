@@ -1,9 +1,10 @@
 from meshagent.agents.worker import Worker
+from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit
 from meshagent.api.room_server_client import TextDataType
 from email import message_from_bytes
 from email.message import EmailMessage
+from meshagent.api import RoomClient
 from email.policy import default
-from meshagent.tools import ToolContext, Toolkit
 import email.utils
 from meshagent.agents import AgentChatContext
 from datetime import datetime, timezone
@@ -57,6 +58,35 @@ class SmtpConfiguration:
         self.hostname = hostname
 
 
+class NewEmailThread(Tool):
+    def __init__(self, *, agent: "MailWorker"):
+        self.agent = agent
+        super().__init__(
+            name="new_email_thread",
+            input_schema={
+                "type": "object",
+                "required": ["to", "body", "subject"],
+                "additionalProperties": False,
+                "properties": {
+                    "to": {
+                        "type": "string",
+                    },
+                    "subject": {
+                        "type": "string",
+                    },
+                    "body": {
+                        "type": "string",
+                    },
+                },
+            },
+        )
+
+    async def execute(self, context: ToolContext, *, to: str, subject: str, body: str):
+        await self.agent.start_thread(to_address=to, subject=subject, body=body)
+
+        return {}
+
+
 class MailWorker(Worker):
     def __init__(
         self,
@@ -73,6 +103,7 @@ class MailWorker(Worker):
         email_address: str,
         domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
         smtp: Optional[SmtpConfiguration] = None,
+        toolkit_name: Optional[str] = None,
     ):
         if smtp is None:
             smtp = SmtpConfiguration()
@@ -94,6 +125,16 @@ class MailWorker(Worker):
             ],
         )
         self._email_address = email_address
+
+        if toolkit_name is not None:
+            self._toolkit = RemoteToolkit(
+                name=toolkit_name,
+                tools=[
+                    NewEmailThread(agent=self),
+                ],
+            )
+        else:
+            self._toolkit = None
 
     async def load_message(self, *, message_id: str) -> dict | None:
         room = self.room
@@ -291,6 +332,84 @@ class MailWorker(Worker):
         logger.info(f"replying: {reply}")
 
         return await self.send_reply_message(message=message, reply=reply)
+
+    def create_email_message(
+        self,
+        *,
+        to_address: str,
+        from_address: str,
+        subject: str,
+        body: str,
+        correlation_id: Optional[str] = None,
+    ) -> EmailMessage:
+        _, addr = email.utils.parseaddr(from_address)
+        domain = addr.split("@")[-1].lower()
+        id = f"<{uuid.uuid4()}@{domain}>"
+
+        msg = EmailMessage()
+        msg["Message-ID"] = id
+        msg["Subject"] = subject
+        msg["From"] = from_address
+        msg["To"] = to_address
+        if correlation_id is not None:
+            msg["Meshagent-Correlation-ID"] = correlation_id
+
+        msg.set_content(body)
+
+        return msg
+
+    async def start(self, *, room: RoomClient):
+        await super().start(room=room)
+        await self._toolkit.start(room=room)
+
+    async def stop(self):
+        await self._toolkit.stop()
+        await super().stop()
+
+    async def start_thread(
+        self,
+        *,
+        to_address: str,
+        subject: str,
+        body: str,
+        from_address: Optional[str] = None,
+    ):
+        msg = self.create_email_message(
+            to_address=to_address,
+            from_address=from_address or self._email_address,
+            subject=subject,
+            body=body,
+        )
+
+        reply_msg_dict = await self.save_email_message(
+            content=msg.as_bytes(), role="agent"
+        )
+
+        logger.info(f"starting thread with message {reply_msg_dict}")
+
+        username = self._smtp.username
+        if username is None:
+            username = self.room.local_participant.get_attribute("name")
+
+        password = self._smtp.password
+        if password is None:
+            password = self.room.protocol.token
+
+        hostname = self._smtp.hostname
+        if hostname is None:
+            hostname = self._domain
+
+        port = self._smtp.port
+
+        logger.info(f"using smtp {username}@{hostname}:{port}")
+
+        await aiosmtplib.send(
+            msg,
+            hostname=hostname,
+            port=port,
+            username=username,
+            password=password,
+        )
 
     def create_reply_email_message(
         self, *, message: dict, from_address: str, body: str
