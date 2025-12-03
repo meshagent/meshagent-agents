@@ -20,6 +20,8 @@ import logging
 import os
 import aiosmtplib
 
+import mistune
+
 logger = logging.getLogger("mail")
 
 type MessageRole = Literal["user", "agent"]
@@ -335,6 +337,10 @@ class MailWorker(Worker):
 
         return await self.send_reply_message(message=message, reply=reply)
 
+    def render_markdown(self, body: str):
+        markdown = mistune.create_markdown()
+        return markdown(body)
+
     def create_email_message(
         self,
         *,
@@ -357,6 +363,8 @@ class MailWorker(Worker):
             msg["Meshagent-Correlation-ID"] = correlation_id
 
         msg.set_content(body)
+
+        msg.add_alternative(self.render_markdown(body), subtype="html")
 
         return msg
 
@@ -436,6 +444,7 @@ class MailWorker(Worker):
             msg["Meshagent-Correlation-ID"] = correlation_id
 
         msg.set_content(body)
+        msg.add_alternative(self.render_markdown(body), subtype="html")
 
         return msg
 
