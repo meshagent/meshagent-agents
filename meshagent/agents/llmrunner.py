@@ -34,8 +34,16 @@ class LLMTaskRunner(TaskRunner):
     ):
         if input_schema is None:
             if input_prompt:
-                input_schema = prompt_schema(
-                    description="use a prompt to generate content"
+                input_schema = merge(
+                    schema=prompt_schema(
+                        description="use a prompt to generate content"
+                    ),
+                    additional_properties={
+                        "tools": {
+                            "type": "array",
+                        },
+                        "model": {"type": "string"},
+                    },
                 )
             else:
                 input_schema = {
