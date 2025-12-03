@@ -63,6 +63,8 @@ class NewEmailThread(Tool):
         self.agent = agent
         super().__init__(
             name="new_email_thread",
+            title="New Email Thread",
+            description="Starts a new email thread that is managed by the mailbot",
             input_schema={
                 "type": "object",
                 "required": ["to", "body", "subject"],
@@ -83,7 +85,6 @@ class NewEmailThread(Tool):
 
     async def execute(self, context: ToolContext, *, to: str, subject: str, body: str):
         await self.agent.start_thread(to_address=to, subject=subject, body=body)
-
         return {}
 
 
@@ -127,6 +128,7 @@ class MailWorker(Worker):
         self._email_address = email_address
 
         if toolkit_name is not None:
+            logger.info(f"mailbox will start toolkit {toolkit_name}")
             self._toolkit = RemoteToolkit(
                 name=toolkit_name,
                 tools=[
