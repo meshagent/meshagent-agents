@@ -22,6 +22,8 @@ widget_names = {
     "markdown",
     "datepicker",
     "scrollview",
+    "format",
+    "datagrid",
 }
 
 
@@ -611,6 +613,77 @@ widget = ElementType(
 )
 
 
+gridcolumn = ElementType(
+    tag_name="gridcolumn",
+    description="data grid column",
+    properties=[
+        ValueProperty(
+            name="label",
+            description="a friendly label for the column",
+            type="string",
+        ),
+        ValueProperty(
+            name="name",
+            description="the name of the column",
+            type="string",
+        ),
+        ValueProperty(
+            name="width",
+            description="the width of the column",
+            type="number",
+        ),
+        ValueProperty(
+            name="height",
+            description="the width of the column",
+            type="number",
+        ),
+        ValueProperty(
+            name="cursor",
+            description="the width of the column",
+            type="string",
+            enum=["none", "click"],
+        ),
+        *text_style_properties(),
+    ],
+)
+
+
+datagrid = ElementType(
+    tag_name="datagrid",
+    description="data grid",
+    properties=[
+        *widget_properties(),
+        *box_properties(),
+        ValueProperty(
+            name="table",
+            description="the table to query for data",
+            type="string",
+        ),
+        ValueProperty(
+            name="filter",
+            description="a filter statement",
+            type="string",
+        ),
+        ChildProperty(
+            name="columns",
+            description="columns in the grid",
+            ordered=True,
+            child_tag_names=[
+                "gridcolumn",
+            ],
+        ),
+    ],
+)
+
+format = ElementType(
+    tag_name="format",
+    description="format text using an expression",
+    properties=[
+        *text_style_properties(),
+        *widget_properties(),
+    ],
+)
+
 widget_schema = MeshSchema(
     root_tag_name="widget",
     elements=[
@@ -639,6 +712,9 @@ widget_schema = MeshSchema(
         option,
         widgets,
         scrollview,
+        datagrid,
+        gridcolumn,
+        format,
     ],
 )
 
