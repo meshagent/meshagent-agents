@@ -24,6 +24,7 @@ widget_names = {
     "scrollview",
     "format",
     "datagrid",
+    "chat",
 }
 
 
@@ -613,6 +614,31 @@ widget = ElementType(
 )
 
 
+chat = ElementType(
+    tag_name="chat",
+    description="widget",
+    properties=[
+        ValueProperty(
+            name="path",
+            description="the path to the chat thread",
+            type="string",
+        ),
+        ValueProperty(
+            name="agent",
+            description="the name of an agent to chat with on the thread",
+            type="string",
+        ),
+         ValueProperty(
+            name="initalStyle",
+            description="how should the chat look before the user interacts with the agent",
+            type="string",
+            enum=["centered","feed"],
+        ),
+        *box_properties(),
+    ],
+)
+
+
 gridcolumn = ElementType(
     tag_name="gridcolumn",
     description="data grid column",
@@ -715,6 +741,7 @@ widget_schema = MeshSchema(
         datagrid,
         gridcolumn,
         format,
+        chat,
     ],
 )
 
