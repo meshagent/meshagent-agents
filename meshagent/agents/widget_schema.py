@@ -628,11 +628,11 @@ chat = ElementType(
             description="the name of an agent to chat with on the thread",
             type="string",
         ),
-         ValueProperty(
+        ValueProperty(
             name="initalStyle",
             description="how should the chat look before the user interacts with the agent",
             type="string",
-            enum=["centered","feed"],
+            enum=["centered", "feed"],
         ),
         *box_properties(),
     ],
