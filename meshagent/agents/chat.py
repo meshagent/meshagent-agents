@@ -790,11 +790,17 @@ class ChatBot(SingleRoomAgent):
                             room=self._room, thread=thread_context.thread
                         ):
                             if participant.id != self._room.local_participant.id:
-                                logger.info(f"replying to {participant.get_attribute('name')}")
+                                logger.info(
+                                    f"replying to {participant.get_attribute('name')}"
+                                )
                                 self._room.messaging.send_message_nowait(
                                     to=participant,
                                     type="chat",
-                                    message={"type": "chat", "path": thread_context.path, "text": evt["text"]},
+                                    message={
+                                        "type": "chat",
+                                        "path": thread_context.path,
+                                        "text": evt["text"],
+                                    },
                                 )
 
         except asyncio.QueueShutDown:
@@ -951,7 +957,6 @@ class ChatBot(SingleRoomAgent):
             model=model,
             on_behalf_of=from_user,
         )
-
 
     async def get_rules(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
