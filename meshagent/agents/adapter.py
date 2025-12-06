@@ -120,7 +120,7 @@ class MessageStreamLLMAdapter(LLMAdapter):
         try:
             async for chunk in stream.read_chunks():
                 event = chunk.header.get("event")
-                if event is not None:
+                if event is not None and event_handler is not None:
                     event_handler(event)
 
                 output = chunk.header.get("output")

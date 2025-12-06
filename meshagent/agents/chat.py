@@ -478,6 +478,7 @@ class ChatBot(SingleRoomAgent):
         empty_state_title: Optional[str] = None,
         labels: Optional[list[str]] = None,
         decision_model: Optional[str] = None,
+        always_reply: Optional[bool] = None,
     ):
         super().__init__(
             name=name,
@@ -493,6 +494,11 @@ class ChatBot(SingleRoomAgent):
         self._decision_model = (
             "gpt-4.1-mini" if decision_model is None else decision_model
         )
+
+        if always_reply is None:
+            always_reply = False
+
+        self._always_reply = always_reply
 
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
@@ -806,7 +812,7 @@ class ChatBot(SingleRoomAgent):
         from_user: RemoteParticipant,
         online: list[Participant],
     ):
-        if not has_more_than_one_other_user:
+        if not has_more_than_one_other_user or self._always_reply:
             return True
 
         online_set = {}
@@ -1100,7 +1106,11 @@ class ChatBot(SingleRoomAgent):
                             message=f"the user attached a file at the path '{attachment['path']}'"
                         )
 
-                    chat_context.append_user_message(message=text)
+                    chat_context.append_user_message(
+                        message=chat_with_participant.getAttribute("name")
+                        + " said: "
+                        + text
+                    )
 
                 if received is not None and received.type == "chat":
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
