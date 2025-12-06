@@ -3,7 +3,7 @@ from .agent import AgentChatContext
 from jsonschema import validate
 from meshagent.tools import Response, Toolkit, ToolkitBuilder, ToolkitConfig
 from meshagent.api import RoomClient, RoomException, RemoteParticipant
-from typing import Any, Optional, Callable, TypeVar, Generic
+from typing import Any, Optional, Callable, TypeVar, Generic, Literal
 
 TEvent = TypeVar("T")
 
@@ -35,7 +35,6 @@ class LLMAdapter(Generic[TEvent]):
     def create_chat_context(self) -> AgentChatContext:
         return AgentChatContext()
 
-    @abstractmethod
     async def check_for_termination(
         self, *, context: AgentChatContext, room: RoomClient
     ):
@@ -67,6 +66,82 @@ class LLMAdapter(Generic[TEvent]):
         on_behalf_of: Optional[RemoteParticipant] = None,
     ) -> Any:
         pass
+
+    def validate(response: dict, output_schema: dict):
+        validate(response, output_schema)
+
+
+class MessageStreamLLMAdapter(LLMAdapter):
+    def __init__(
+        self, *, participant_name: str, context_mode: Literal["diff", "full"] = "diff"
+    ):
+        self.participant_name = participant_name
+        self.context_mode = context_mode
+
+    def default_model(self) -> str:
+        return "toolkit"
+
+    def create_chat_context(self) -> AgentChatContext:
+        return AgentChatContext()
+
+    async def check_for_termination(
+        self, *, context: AgentChatContext, room: RoomClient
+    ):
+        return True
+
+    async def next(
+        self,
+        *,
+        context: AgentChatContext,
+        room: RoomClient,
+        toolkits: list[Toolkit],
+        tool_adapter: Optional[ToolResponseAdapter] = None,
+        output_schema: Optional[dict] = None,
+        event_handler: Optional[Callable[[TEvent], None]] = None,
+        model: Optional[str] = None,
+        on_behalf_of: Optional[RemoteParticipant] = None,
+    ) -> Any:
+        participant = room.messaging.get_participant_by_name(self.participant_name)
+        if participant is None:
+            raise RoomException("participant is not currently connected")
+
+        stream = await room.messaging.create_stream(
+            to=participant,
+            header={
+                "context": context.to_json(),
+                "model": model,
+                "output_schema": output_schema,
+                "on_behalf_of_id": on_behalf_of.id if on_behalf_of else None,
+            },
+        )
+
+        error = None
+        output = None
+        try:
+            async for chunk in stream.read_chunks():
+                event = chunk.header.get("event")
+                if event is not None:
+                    event_handler(event)
+
+                output = chunk.header.get("output")
+                if output is not None:
+                    output.append(output)
+
+                if chunk.header.get("done"):
+                    break
+
+        except Exception as ex:
+            error = ex
+
+        await stream.close()
+
+        if self.context_mode == "diff":
+            context.messages.clear()
+
+        if error:
+            raise error
+
+        return output
 
     def validate(response: dict, output_schema: dict):
         validate(response, output_schema)

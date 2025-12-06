@@ -24,15 +24,14 @@ from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
 )
 import asyncio
-from typing import Optional
+from typing import Optional, Callable
 import logging
 import uuid
 import datetime
 import base64
-from openai.types.responses import ResponseStreamEvent
 from asyncio import CancelledError
 from meshagent.api import RoomException
-
+from pydantic import BaseModel
 from opentelemetry import trace
 import shlex
 import json
@@ -446,6 +445,7 @@ class ChatThreadContext:
         thread: MeshDocument,
         path: str,
         participants: Optional[list[RemoteParticipant]] = None,
+        event_handler: Optional[Callable[[dict], None]] = None,
     ):
         self.thread = thread
         if participants is None:
@@ -454,6 +454,11 @@ class ChatThreadContext:
         self.participants = participants
         self.chat = chat
         self.path = path
+        self._event_handler = event_handler
+
+    def emit(self, event: dict):
+        if self._event_handler is not None:
+            self._event_handler(event)
 
 
 class ChatBot(SingleRoomAgent):
@@ -608,6 +613,7 @@ class ChatBot(SingleRoomAgent):
                 caller=self.room.local_participant,
                 on_behalf_of=participant,
                 caller_context={"chat": thread_context.chat.to_json()},
+                event_handler=thread_context.emit,
             )
         )
 
@@ -737,14 +743,8 @@ class ChatBot(SingleRoomAgent):
         try:
             while True:
                 evt = await llm_messages.get()
-                for participant in self._room.messaging.get_participants():
-                    logger.debug(
-                        f"sending event {evt.type} to {participant.get_attribute('name')}"
-                    )
 
-                    # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
-
-                if evt.type == "response.content_part.added":
+                if evt["type"] == "response.content_part.added":
                     partial = ""
 
                     content_element = doc_messages.append_child(
@@ -763,12 +763,12 @@ class ChatBot(SingleRoomAgent):
                     context_message = {"role": "assistant", "content": ""}
                     thread_context.chat.messages.append(context_message)
 
-                elif evt.type == "response.output_text.delta":
-                    partial += evt.delta
+                elif evt["type"] == "response.output_text.delta":
+                    partial += evt["delta"]
                     updates.put_nowait((content_element, partial))
                     context_message["content"] = partial
 
-                elif evt.type == "response.output_text.done":
+                elif evt["type"] == "response.output_text.done":
                     content_element = None
 
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
@@ -778,7 +778,8 @@ class ChatBot(SingleRoomAgent):
                         )
                         span.set_attribute("role", "assistant")
                         span.set_attributes(thread_attributes)
-                        span.set_attributes({"text": evt.text})
+                        span.set_attributes({"text": evt["text"]})
+
         except asyncio.QueueShutDown:
             pass
         finally:
@@ -971,6 +972,14 @@ class ChatBot(SingleRoomAgent):
 
         thread = None
 
+        llm_messages = asyncio.Queue[dict]()
+        llm_task = None
+
+        def handle_event(evt):
+            if isinstance(evt, BaseModel):
+                evt = evt.model_dump(mode="json")
+            llm_messages.put_nowait(evt)
+
         try:
             received = None
 
@@ -1033,6 +1042,15 @@ class ChatBot(SingleRoomAgent):
                             participants=get_online_participants(
                                 room=self.room, thread=thread
                             ),
+                            event_handler=handle_event,
+                        )
+
+                        llm_task = asyncio.create_task(
+                            self._process_llm_events(
+                                thread_context=thread_context,
+                                llm_messages=llm_messages,
+                                thread_attributes=thread_attributes,
+                            )
                         )
 
                         await self.load_thread_context(thread_context=thread_context)
@@ -1146,19 +1164,6 @@ class ChatBot(SingleRoomAgent):
                                         thread_context=thread_context
                                     )
 
-                                    llm_messages = asyncio.Queue[ResponseStreamEvent]()
-
-                                    def handle_event(evt):
-                                        llm_messages.put_nowait(evt)
-
-                                    llm_task = asyncio.create_task(
-                                        self._process_llm_events(
-                                            thread_context=thread_context,
-                                            llm_messages=llm_messages,
-                                            thread_attributes=thread_attributes,
-                                        )
-                                    )
-
                                     message_toolkits = [*thread_toolkits]
 
                                     model = received.message.get(
@@ -1179,19 +1184,13 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
-                                    try:
-                                        await self.handle_user_message(
-                                            context=thread_context,
-                                            toolkits=message_toolkits,
-                                            event_handler=handle_event,
-                                            model=model,
-                                            from_user=chat_with_participant,
-                                        )
-
-                                    finally:
-                                        llm_messages.shutdown()
-
-                                    await llm_task
+                                    await self.handle_user_message(
+                                        context=thread_context,
+                                        toolkits=message_toolkits,
+                                        event_handler=handle_event,
+                                        model=model,
+                                        from_user=chat_with_participant,
+                                    )
 
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
@@ -1221,6 +1220,10 @@ class ChatBot(SingleRoomAgent):
         finally:
 
             async def cleanup():
+                llm_messages.shutdown()
+                if llm_task is not None:
+                    await llm_task
+
                 if self.room is not None:
                     logger.info(f"thread was ended {path}")
                     logger.info("chatbot thread ended", extra={"path": path})
