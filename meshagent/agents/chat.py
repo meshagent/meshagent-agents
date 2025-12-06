@@ -786,6 +786,17 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes(thread_attributes)
                         span.set_attributes({"text": evt["text"]})
 
+                        for participant in get_online_participants(
+                            room=self._room, thread=thread_context.thread
+                        ):
+                            if participant.id != self._room.local_participant.id:
+                                logger.info(f"replying to {participant.get_attribute('name')}")
+                                self._room.messaging.send_message_nowait(
+                                    to=participant,
+                                    type="chat",
+                                    message={"type": "chat", "path": thread_context.path, "text": evt["text"]},
+                                )
+
         except asyncio.QueueShutDown:
             pass
         finally:
@@ -940,6 +951,7 @@ class ChatBot(SingleRoomAgent):
             model=model,
             on_behalf_of=from_user,
         )
+
 
     async def get_rules(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
@@ -1107,7 +1119,7 @@ class ChatBot(SingleRoomAgent):
                         )
 
                     chat_context.append_user_message(
-                        message=chat_with_participant.getAttribute("name")
+                        message=chat_with_participant.get_attribute("name")
                         + " said: "
                         + text
                     )
