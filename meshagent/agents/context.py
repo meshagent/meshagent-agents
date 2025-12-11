@@ -70,7 +70,11 @@ class AgentChatContext:
             system_message = {"role": self.system_role, "content": ""}
             self.messages.insert(0, system_message)
 
-        plan = f"Rules:\n-{'\n-'.join(rules)}\n"
+        if len(rules) > 0:
+            plan = f"Rules:\n-{'\n-'.join(rules)}\n"
+        else:
+            plan = ""
+
         system_message["content"] = plan
 
     def append_rules(self, rules: list[str]):
@@ -85,8 +89,26 @@ class AgentChatContext:
             system_message = {"role": self.system_role, "content": ""}
             self.messages.insert(0, system_message)
 
-        plan = f"Rules:\n-{'\n-'.join(rules)}\n"
+        if len(rules) > 0:
+            plan = f"Rules:\n-{'\n-'.join(rules)}\n"
+        else:
+            plan = ""
+
         system_message["content"] = system_message["content"] + plan
+
+    def get_system_instructions(self) -> None | str:
+        system_message = None
+
+        for m in self.messages:
+            if m["role"] == self.system_role:
+                content = m.get("content")
+                if content is not None:
+                    if system_message is None:
+                        system_message = content
+                    else:
+                        system_message += "\n" + content
+
+        return system_message
 
     def append_assistant_message(self, message: str, deferred: bool = False) -> None:
         if deferred:
