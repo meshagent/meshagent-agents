@@ -300,6 +300,9 @@ class MailWorker(Worker):
             message=message, chat_context=chat_context
         )
 
+    async def get_rules(self):
+        return [*self._rules]
+
     async def process_message(
         self,
         *,
@@ -307,6 +310,14 @@ class MailWorker(Worker):
         message: dict,
         toolkits: list[Toolkit],
     ):
+        logger.info(f"processing message {message}")
+
+        rules = await self.get_rules()
+
+        logger.info(f"using rules {rules}")
+
+        chat_context.replace_rules(rules)
+
         message_bytes = base64.b64decode(message["base64"])
 
         message = await self.save_email_message(content=message_bytes, role="user")
@@ -323,8 +334,6 @@ class MailWorker(Worker):
             chat=chat_context, message=message, thread=thread
         )
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
-
-        logger.info(f"processing message {message}")
 
         reply = await self._llm_adapter.next(
             context=chat_context,
