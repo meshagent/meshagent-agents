@@ -367,7 +367,9 @@ class ChatBot(SingleRoomAgent):
                             chat_context.append_assistant_message(msg)
                         else:
                             chat_context.append_user_message(
-                                element["author_name"] + " said: " + msg
+                                self.format_message(
+                                    user_name=element["author_name"], message=msg
+                                )
                             )
 
                         for child in element.get_children():
@@ -803,6 +805,8 @@ class ChatBot(SingleRoomAgent):
                 message={"thinking": True, "path": context.path},
             )
 
+        self.prepare_chat_context(chat_context=context.chat)
+
         await self._llm_adapter.next(
             context=context.chat,
             room=self._room,
@@ -837,6 +841,12 @@ class ChatBot(SingleRoomAgent):
             thread_context=thread_context, participant=from_participant
         )
         thread_context.chat.replace_rules(rules)
+
+    def format_message(self, *, user_name: str, message: str):
+        return f"{user_name} said: {message}"
+
+    def prepare_chat_context(self, *, chat_context: ChatThreadContext):
+        chat_context.append_user_message("what is your response?")
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
@@ -979,9 +989,10 @@ class ChatBot(SingleRoomAgent):
                         )
 
                     chat_context.append_user_message(
-                        message=chat_with_participant.get_attribute("name")
-                        + " said: "
-                        + text
+                        message=self.format_message(
+                            user_name=chat_with_participant.get_attribute("name"),
+                            message=text,
+                        )
                     )
 
                 if received is not None and received.type == "chat":
