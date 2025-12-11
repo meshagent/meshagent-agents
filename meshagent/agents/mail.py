@@ -107,6 +107,7 @@ class MailWorker(Worker):
         domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
         smtp: Optional[SmtpConfiguration] = None,
         toolkit_name: Optional[str] = None,
+        whitelist: Optional[list[str]] = None,
     ):
         if smtp is None:
             smtp = SmtpConfiguration()
@@ -128,6 +129,7 @@ class MailWorker(Worker):
             ],
         )
         self._email_address = email_address
+        self._whitelist = whitelist
 
         if toolkit_name is not None:
             logger.info(f"mailbox will start toolkit {toolkit_name}")
@@ -310,7 +312,7 @@ class MailWorker(Worker):
         message: dict,
         toolkits: list[Toolkit],
     ):
-        logger.info(f"processing message {message}")
+        logger.info("received a mail message")
 
         rules = await self.get_rules()
 
@@ -319,6 +321,17 @@ class MailWorker(Worker):
         chat_context.replace_rules(rules)
 
         message_bytes = base64.b64decode(message["base64"])
+
+        if self._whitelist is not None:
+            message = message_from_bytes(message_bytes, policy=default)
+            from_address = message["From"]
+            _, addr = email.utils.parseaddr(from_address)
+
+            if addr.casefold() not in self._whitelist:
+                logger.info(
+                    f"{from_address} not found in whitelist, discarding message"
+                )
+                return
 
         message = await self.save_email_message(content=message_bytes, role="user")
 
