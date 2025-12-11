@@ -3,7 +3,7 @@ from typing import Optional
 from jsonschema import validate, ValidationError
 from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
-from meshagent.tools import Toolkit
+from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
@@ -27,16 +27,39 @@ class LLMTaskRunner(TaskRunner):
         requires: Optional[list[Requirement]] = None,
         supports_tools: bool = True,
         input_prompt: bool = True,
+        input_tools: bool = False,
         input_schema: Optional[dict] = None,
         output_schema: Optional[dict] = None,
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         if input_schema is None:
             if input_prompt:
                 input_schema = prompt_schema(
                     description="use a prompt to generate content"
                 )
+
+                if input_tools:
+                    input_schema = merge(
+                        schema=input_schema,
+                        additional_properties={
+                            "tools": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name"],
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "name": {
+                                            "type": "string",
+                                        }
+                                    },
+                                },
+                            },
+                            "model": {"type": ["string", "null"]},
+                        },
+                    )
             else:
                 input_schema = {
                     "type": "object",
@@ -57,6 +80,7 @@ class LLMTaskRunner(TaskRunner):
             supports_tools=supports_tools,
             labels=labels,
             toolkits=static_toolkits,
+            annotations=annotations,
         )
 
         self._extra_rules = rules or []
@@ -70,14 +94,31 @@ class LLMTaskRunner(TaskRunner):
             chat.append_rules(self._extra_rules)
         return chat
 
+    async def get_toolkit_builders(
+        self, *, context: AgentCallContext
+    ) -> list[ToolkitBuilder]:
+        return []
+
     async def ask(self, *, context: AgentCallContext, arguments: dict):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
 
+        message_tools = arguments.get("tools")
+        model = arguments.get("model", self._llm_adapter.default_model())
+
         context.chat.append_user_message(prompt)
 
         combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
+
+        if message_tools is not None and len(message_tools) > 0:
+            combined_toolkits.extend(
+                make_toolkits(
+                    model=model,
+                    providers=await self.get_toolkit_builders(context=context),
+                    tools=message_tools,
+                )
+            )
 
         resp = await self._llm_adapter.next(
             context=context.chat,
@@ -116,6 +157,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
         tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         input_schema = merge(
             schema=prompt_schema(description="use a prompt to generate content"),
@@ -133,6 +175,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             input_prompt=True,
             input_schema=input_schema,
             output_schema=None,
+            annotations=annotations,
         )
 
     async def ask(self, *, context: AgentCallContext, arguments: dict):

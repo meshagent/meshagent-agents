@@ -15,13 +15,12 @@ class AgentChatContext:
         system_role: Optional[str] = None,
         previous_messages: Optional[list[dict]] = None,
         previous_response_id: Optional[str] = None,
+        instructions: Optional[str] = None,
     ):
         self.id = str(uuid.uuid4())
         if messages is None:
             messages = list[dict]()
         self._messages = messages.copy()
-        if system_role is None:
-            system_role = "system"
         self._system_role = system_role
 
         if previous_messages is None:
@@ -29,6 +28,9 @@ class AgentChatContext:
 
         self._previous_response_id = previous_response_id
         self._previous_messages = previous_messages
+        self._deferred_messages = []
+
+        self.instructions = instructions
 
     @property
     def messages(self):
@@ -37,6 +39,10 @@ class AgentChatContext:
     @property
     def system_role(self):
         return self._system_role
+
+    @property
+    def deferred_messages(self):
+        return self._deferred_messages
 
     @property
     def previous_messages(self):
@@ -50,39 +56,78 @@ class AgentChatContext:
         self._previous_response_id = id
         self._previous_messages.extend(self.messages)
         self.messages.clear()
+        self.messages.extend(self._deferred_messages)
+        self._deferred_messages.clear()
 
     def replace_rules(self, rules: list[str]):
         system_message = None
 
-        for m in self.messages:
-            if m.get("role") == self.system_role:
-                system_message = m
-                break
+        if self.system_role is not None:
+            for m in self.messages:
+                if m.get("role") == self.system_role:
+                    system_message = m
+                    break
 
-        if system_message is None:
-            system_message = {"role": self.system_role, "content": ""}
-            self.messages.insert(0, system_message)
+            if system_message is None:
+                system_message = {"role": self.system_role, "content": ""}
+                self.messages.insert(0, system_message)
 
-        plan = f"Rules:\n-{'\n-'.join(rules)}\n"
-        system_message["content"] = plan
+        if len(rules) > 0:
+            plan = "\n".join(rules)
+        else:
+            plan = ""
+
+        if self.system_role is not None:
+            system_message["content"] = plan
+        else:
+            self.instructions = plan
 
     def append_rules(self, rules: list[str]):
         system_message = None
 
-        for m in self.messages:
-            if m["role"] == self.system_role:
-                system_message = m
-                break
+        if self.system_role is not None:
+            for m in self.messages:
+                if m["role"] == self.system_role:
+                    system_message = m
+                    break
 
-        if system_message is None:
-            system_message = {"role": self.system_role, "content": ""}
-            self.messages.insert(0, system_message)
+            if system_message is None:
+                system_message = {"role": self.system_role, "content": ""}
+                self.messages.insert(0, system_message)
 
-        plan = f"Rules:\n-{'\n-'.join(rules)}\n"
-        system_message["content"] = system_message["content"] + plan
+        if len(rules) > 0:
+            plan = "\n".join(rules)
+        else:
+            plan = ""
 
-    def append_assistant_message(self, message: str) -> None:
-        self.messages.append({"role": "assistant", "content": message})
+        if self.system_role is not None:
+            system_message["content"] = system_message["content"] + plan
+        else:
+            self.instructions = (self.instructions or "") + "\n" + plan
+
+    def get_system_instructions(self) -> None | str:
+        if self.system_role is not None:
+            system_message = None
+
+            for m in self.messages:
+                if m["role"] == self.system_role:
+                    content = m.get("content")
+                    if content is not None:
+                        if system_message is None:
+                            system_message = content
+                        else:
+                            system_message += "\n" + content
+
+            return system_message
+
+        else:
+            return self.instructions
+
+    def append_assistant_message(self, message: str, deferred: bool = False) -> None:
+        if deferred:
+            self.deferred_messages.append({"role": "assistant", "content": message})
+        else:
+            self.messages.append({"role": "assistant", "content": message})
 
     def append_user_message(self, message: str) -> None:
         self.messages.append({"role": "user", "content": message})

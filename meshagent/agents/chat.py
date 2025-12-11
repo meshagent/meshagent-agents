@@ -10,29 +10,20 @@ from meshagent.api import (
     Element,
     MeshDocument,
 )
-from meshagent.tools import Toolkit, ToolContext, make_tools, ToolkitBuilder
+from meshagent.tools import Toolkit, ToolContext, make_toolkits, ToolkitBuilder
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
-    ImageGenerationConfig,
-    ImageGenerationTool,
-    LocalShellConfig,
-    LocalShellTool,
-    ShellConfig,
-    ShellTool,
-    #    WebSearchConfig,
-    #    WebSearchTool,
     ReasoningTool,
 )
 import asyncio
-from typing import Optional
+from typing import Optional, Callable
 import logging
 import uuid
 import datetime
 import base64
-from openai.types.responses import ResponseStreamEvent
 from asyncio import CancelledError
 from meshagent.api import RoomException
-
+from pydantic import BaseModel
 from opentelemetry import trace
 import shlex
 import json
@@ -117,301 +108,6 @@ class ChatBotReasoningTool(ReasoningTool):
         pass
 
 
-class ChatBotThreadLocalShellToolkitBuilder(ToolkitBuilder):
-    def __init__(self, *, thread_context: "ChatThreadContext"):
-        super().__init__(name="local_shell", type=LocalShellConfig)
-        self.thread_context = thread_context
-
-    def make(
-        self,
-        *,
-        model: str,
-        config: LocalShellConfig,
-    ):
-        return Toolkit(
-            name="local_shell",
-            tools=[
-                ChatBotThreadLocalShellTool(
-                    config=config, thread_context=self.thread_context
-                )
-            ],
-        )
-
-
-class ChatBotThreadLocalShellTool(LocalShellTool):
-    def __init__(
-        self,
-        *,
-        thread_context: "ChatThreadContext",
-        config: LocalShellConfig,
-        working_directory: Optional[str] = None,
-    ):
-        super().__init__(config=config, working_directory=working_directory)
-        self.thread_context = thread_context
-
-    async def execute_shell_command(
-        self,
-        context,
-        *,
-        command,
-        env,
-        type,
-        timeout_ms=None,
-        user=None,
-        working_directory=None,
-    ):
-        messages = None
-
-        for prop in self.thread_context.thread.root.get_children():
-            if prop.tag_name == "messages":
-                messages = prop
-                break
-
-        exec_element = messages.append_child(
-            tag_name="exec",
-            attributes={"command": shlex.join(command), "pwd": working_directory},
-        )
-
-        result = await super().execute_shell_command(
-            context,
-            command=command,
-            env=env,
-            type=type,
-            timeout_ms=timeout_ms,
-            user=user,
-            working_directory=working_directory,
-        )
-
-        exec_element.set_attribute("result", result)
-
-        return result
-
-
-class ChatBotThreadShellToolkitBuilder(ToolkitBuilder):
-    def __init__(
-        self,
-        *,
-        thread_context: "ChatThreadContext",
-        working_directory: Optional[str] = None,
-    ):
-        super().__init__(name="shell", type=ShellConfig)
-        self.working_directory = working_directory
-        self.thread_context = thread_context
-
-    def make(
-        self,
-        *,
-        model: str,
-        config: ShellConfig,
-    ):
-        return Toolkit(
-            name="shell",
-            tools=[
-                ChatBotThreadShellTool(
-                    working_directory=self.working_directory,
-                    config=config,
-                    thread_context=self.thread_context,
-                )
-            ],
-        )
-
-
-class ChatBotThreadShellTool(ShellTool):
-    def __init__(
-        self,
-        *,
-        thread_context: "ChatThreadContext",
-        config: ShellConfig,
-        working_directory: Optional[str] = None,
-    ):
-        super().__init__(config=config, working_directory=working_directory)
-        self.thread_context = thread_context
-
-    async def execute_shell_command(
-        self,
-        context: ToolContext,
-        *,
-        commands: list[str],
-        max_output_length: Optional[int] = None,
-        timeout_ms: Optional[int] = None,
-    ):
-        messages = None
-
-        for prop in self.thread_context.thread.root.get_children():
-            if prop.tag_name == "messages":
-                messages = prop
-                break
-
-        exec_elements = []
-        for command in commands:
-            exec_element = messages.append_child(
-                tag_name="exec",
-                attributes={"command": command},
-            )
-            exec_elements.append(exec_element)
-
-        results = await super().execute_shell_command(
-            context,
-            commands=commands,
-            timeout_ms=timeout_ms,
-            max_output_length=max_output_length,
-        )
-
-        for i in range(0, len(results)):
-            result = results[i]
-            exec_element = exec_elements[i]
-            if "exit_code" in result["outcome"]:
-                exec_element.set_attribute("exit_code", result["outcome"]["exit_code"])
-
-            exec_element.set_attribute("outcome", result["outcome"]["type"])
-            exec_element.set_attribute("stdout", result["stdout"])
-            exec_element.set_attribute("stderr", result["stderr"])
-
-        return results
-
-
-class ChatBotThreadOpenAIImageGenerationToolkitBuilder(ToolkitBuilder):
-    def __init__(self, *, thread_context: "ChatThreadContext"):
-        super().__init__(name="image_generation", type=ImageGenerationConfig)
-        self.thread_context = thread_context
-
-    def make(
-        self,
-        *,
-        model: str,
-        config: ImageGenerationConfig,
-    ):
-        return Toolkit(
-            name="image_generation",
-            tools=[
-                ChatBotThreadOpenAIImageGenerationTool(
-                    config=config, thread_context=self.thread_context
-                )
-            ],
-        )
-
-
-class ChatBotThreadOpenAIImageGenerationTool(ImageGenerationTool):
-    def __init__(
-        self,
-        *,
-        config: ImageGenerationConfig,
-        thread_context: "ChatThreadContext",
-    ):
-        super().__init__(config=config)
-
-        self.thread_context = thread_context
-
-    async def on_image_generation_partial(
-        self,
-        context,
-        *,
-        item_id,
-        output_index,
-        sequence_number,
-        type,
-        partial_image_b64,
-        partial_image_index,
-        size,
-        quality,
-        background,
-        output_format,
-        **extra,
-    ):
-        output_format = self.output_format
-        if output_format is None:
-            output_format = "png"
-
-        image_name = f"{str(uuid.uuid4())}.{output_format}"
-
-        handle = await context.room.storage.open(path=image_name)
-        await context.room.storage.write(
-            handle=handle, data=base64.b64decode(partial_image_b64)
-        )
-        await context.room.storage.close(handle=handle)
-
-        messages = None
-
-        for prop in self.thread_context.thread.root.get_children():
-            if prop.tag_name == "messages":
-                messages = prop
-                break
-
-        for child in messages.get_children():
-            if child.get_attribute("id") == item_id:
-                for file in child.get_children():
-                    file.set_attribute("path", image_name)
-
-                return
-
-        message_element = messages.append_child(
-            tag_name="message",
-            attributes={
-                "id": item_id,
-                "text": "",
-                "created_at": datetime.datetime.now(datetime.timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "author_name": context.room.local_participant.get_attribute("name"),
-            },
-        )
-        message_element.append_child(tag_name="file", attributes={"path": image_name})
-
-    async def on_image_generated(
-        self,
-        context: ToolContext,
-        *,
-        item_id: str,
-        data: bytes,
-        status: str,
-        size: str,
-        quality: str,
-        background: str,
-        output_format: str,
-        **extra,
-    ):
-        output_format = self.output_format
-        if output_format is None:
-            output_format = "png"
-
-        image_name = f"{str(uuid.uuid4())}.{output_format}"
-
-        handle = await context.room.storage.open(path=image_name)
-        await context.room.storage.write(handle=handle, data=data)
-        await context.room.storage.close(handle=handle)
-
-        messages = None
-
-        for prop in self.thread_context.thread.root.get_children():
-            if prop.tag_name == "messages":
-                messages = prop
-                break
-
-        for child in messages.get_children():
-            if child.get_attribute("id") == item_id:
-                for file in child.get_children():
-                    file.set_attribute("path", image_name)
-
-                return
-
-        message_element = messages.append_child(
-            tag_name="message",
-            attributes={
-                "id": item_id,
-                "text": "",
-                "created_at": datetime.datetime.now(datetime.timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "author_name": context.room.local_participant.get_attribute("name"),
-            },
-        )
-        message_element.append_child(tag_name="file", attributes={"path": image_name})
-
-        self.thread_context.chat.append_assistant_message(
-            f"An image was saved at the path {image_name} and displayed to the user"
-        )
-
-
 def get_online_participants(
     *,
     room: RoomClient,
@@ -439,6 +135,7 @@ class ChatThreadContext:
         thread: MeshDocument,
         path: str,
         participants: Optional[list[RemoteParticipant]] = None,
+        event_handler: Optional[Callable[[dict], None]] = None,
     ):
         self.thread = thread
         if participants is None:
@@ -447,6 +144,11 @@ class ChatThreadContext:
         self.participants = participants
         self.chat = chat
         self.path = path
+        self._event_handler = event_handler
+
+    def emit(self, event: dict):
+        if self._event_handler is not None:
+            self._event_handler(event)
 
 
 class ChatBot(SingleRoomAgent):
@@ -466,6 +168,7 @@ class ChatBot(SingleRoomAgent):
         empty_state_title: Optional[str] = None,
         labels: Optional[list[str]] = None,
         decision_model: Optional[str] = None,
+        always_reply: Optional[bool] = None,
     ):
         super().__init__(
             name=name,
@@ -481,6 +184,11 @@ class ChatBot(SingleRoomAgent):
         self._decision_model = (
             "gpt-4.1-mini" if decision_model is None else decision_model
         )
+
+        if always_reply is None:
+            always_reply = False
+
+        self._always_reply = always_reply
 
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
@@ -601,6 +309,7 @@ class ChatBot(SingleRoomAgent):
                 caller=self.room.local_participant,
                 on_behalf_of=participant,
                 caller_context={"chat": thread_context.chat.to_json()},
+                event_handler=thread_context.emit,
             )
         )
 
@@ -658,7 +367,9 @@ class ChatBot(SingleRoomAgent):
                             chat_context.append_assistant_message(msg)
                         else:
                             chat_context.append_user_message(
-                                element["author_name"] + " said: " + msg
+                                self.format_message(
+                                    user_name=element["author_name"], message=msg
+                                )
                             )
 
                         for child in element.get_children():
@@ -730,14 +441,8 @@ class ChatBot(SingleRoomAgent):
         try:
             while True:
                 evt = await llm_messages.get()
-                for participant in self._room.messaging.get_participants():
-                    logger.debug(
-                        f"sending event {evt.type} to {participant.get_attribute('name')}"
-                    )
 
-                    # self.room.messaging.send_message_nowait(to=participant, type="llm.event", message=json.loads(evt.to_json()))
-
-                if evt.type == "response.content_part.added":
+                if evt["type"] == "response.content_part.added":
                     partial = ""
 
                     content_element = doc_messages.append_child(
@@ -756,12 +461,12 @@ class ChatBot(SingleRoomAgent):
                     context_message = {"role": "assistant", "content": ""}
                     thread_context.chat.messages.append(context_message)
 
-                elif evt.type == "response.output_text.delta":
-                    partial += evt.delta
+                elif evt["type"] == "response.output_text.delta":
+                    partial += evt["delta"]
                     updates.put_nowait((content_element, partial))
                     context_message["content"] = partial
 
-                elif evt.type == "response.output_text.done":
+                elif evt["type"] == "response.output_text.done":
                     content_element = None
 
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
@@ -771,13 +476,196 @@ class ChatBot(SingleRoomAgent):
                         )
                         span.set_attribute("role", "assistant")
                         span.set_attributes(thread_attributes)
-                        span.set_attributes({"text": evt.text})
+                        span.set_attributes({"text": evt["text"]})
+
+                        for participant in get_online_participants(
+                            room=self._room, thread=thread_context.thread
+                        ):
+                            if participant.id != self._room.local_participant.id:
+                                logger.info(
+                                    f"replying to {participant.get_attribute('name')}"
+                                )
+                                self._room.messaging.send_message_nowait(
+                                    to=participant,
+                                    type="chat",
+                                    message={
+                                        "type": "chat",
+                                        "path": thread_context.path,
+                                        "text": evt["text"],
+                                    },
+                                )
+                elif evt["type"] == "response.image_generation_call.partial_image":
+                    await self.handle_image_generation_partial(
+                        thread_context=thread_context,
+                        llm_messages=llm_messages,
+                        event=evt,
+                    )
+
+                elif evt["type"] == "meshagent.handler.added":
+                    item = evt["item"]
+                    print(f"{item}", flush=True)
+                    if item["type"] == "shell_call":
+                        await self.handle_shell_call_output(
+                            thread_context=thread_context,
+                            llm_messages=llm_messages,
+                            item=item,
+                        )
+
+                    elif item["type"] == "local_shell_call":
+                        await self.handle_local_shell_call_output(
+                            thread_context=thread_context,
+                            llm_messages=llm_messages,
+                            item=item,
+                        )
+
         except asyncio.QueueShutDown:
             pass
         finally:
             updates.shutdown()
 
         await update_thread_task
+
+    async def handle_image_generation_partial(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        llm_messages: asyncio.Queue,
+        event: dict,
+    ):
+        item_id = event["item_id"]
+        partial_image_b64 = event["partial_image_b64"]
+        output_format = event["output_format"]
+
+        messages = thread_context.thread.root.get_children_by_tag_name("messages")[0]
+
+        if output_format is None:
+            output_format = "png"
+
+        image_name = f"{str(uuid.uuid4())}.{output_format}"
+
+        handle = await self.room.storage.open(path=image_name)
+        await self.room.storage.write(
+            handle=handle, data=base64.b64decode(partial_image_b64)
+        )
+        await self.room.storage.close(handle=handle)
+
+        messages = None
+
+        logger.info(f"A partial was saved at the path {image_name}")
+
+        for prop in thread_context.thread.root.get_children():
+            if prop.tag_name == "messages":
+                messages = prop
+                break
+
+        for child in messages.get_children():
+            if child.get_attribute("id") == item_id:
+                for file in child.get_children():
+                    file.set_attribute("path", image_name)
+
+                return
+
+        message_element = messages.append_child(
+            tag_name="message",
+            attributes={
+                "id": item_id,
+                "text": "",
+                "created_at": datetime.datetime.now(datetime.timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "author_name": self.room.local_participant.get_attribute("name"),
+            },
+        )
+        message_element.append_child(tag_name="file", attributes={"path": image_name})
+
+    async def handle_local_shell_call_output(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        llm_messages: asyncio.Queue,
+        item: dict,
+    ):
+        messages = thread_context.thread.root.get_children_by_tag_name("messages")[0]
+
+        action = item["action"]
+        command = action["command"]
+        working_directory = action["working_directory"]
+
+        for prop in thread_context.thread.root.get_children():
+            if prop.tag_name == "messages":
+                messages = prop
+                break
+
+        exec_element = messages.append_child(
+            tag_name="exec",
+            attributes={"command": shlex.join(command), "pwd": working_directory},
+        )
+
+        evt = await llm_messages.get()
+
+        if evt["type"] != "meshagent.handler.done":
+            raise RoomException("expected meshagent.handler.done")
+
+        error = item.get("error")
+        item = item.get("item")
+
+        if error is not None:
+            pass
+
+        if item is not None:
+            if item["type"] != "local_shell_call_output":
+                raise RoomException("expected local_shell_call_output")
+
+            exec_element.set_attribute("result", item["output"])
+
+    async def handle_shell_call_output(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        llm_messages: asyncio.Queue,
+        item: dict,
+    ):
+        messages = thread_context.thread.root.get_children_by_tag_name("messages")[0]
+
+        action = item["action"]
+        commands = action["commands"]
+
+        exec_elements = []
+        for command in commands:
+            exec_element = messages.append_child(
+                tag_name="exec",
+                attributes={"command": command},
+            )
+            exec_elements.append(exec_element)
+
+        evt = await llm_messages.get()
+
+        if evt["type"] != "meshagent.handler.done":
+            raise RoomException("expected meshagent.handler.done")
+
+        error = item.get("error")
+        item = item.get("item")
+
+        if error is not None:
+            pass
+
+        if item is not None:
+            if item["type"] != "shell_call_output":
+                raise RoomException("expected shell_call_output")
+
+            results = item["output"]
+
+            for i in range(0, len(results)):
+                result = results[i]
+                exec_element = exec_elements[i]
+                if "exit_code" in result["outcome"]:
+                    exec_element.set_attribute(
+                        "exit_code", result["outcome"]["exit_code"]
+                    )
+
+                exec_element.set_attribute("outcome", result["outcome"]["type"])
+                exec_element.set_attribute("stdout", result["stdout"])
+                exec_element.set_attribute("stderr", result["stderr"])
 
     def get_thread_members(self, *, thread: MeshDocument) -> list[str]:
         results = []
@@ -798,7 +686,7 @@ class ChatBot(SingleRoomAgent):
         from_user: RemoteParticipant,
         online: list[Participant],
     ):
-        if not has_more_than_one_other_user:
+        if not has_more_than_one_other_user or self._always_reply:
             return True
 
         online_set = {}
@@ -917,6 +805,8 @@ class ChatBot(SingleRoomAgent):
                 message={"thinking": True, "path": context.path},
             )
 
+        self.prepare_chat_context(chat_context=context.chat)
+
         await self._llm_adapter.next(
             context=context.chat,
             room=self._room,
@@ -952,6 +842,12 @@ class ChatBot(SingleRoomAgent):
         )
         thread_context.chat.replace_rules(rules)
 
+    def format_message(self, *, user_name: str, message: str):
+        return f"{user_name} said: {message}"
+
+    def prepare_chat_context(self, *, chat_context: ChatThreadContext):
+        chat_context.append_user_message("what is your response?")
+
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
         chat_context = await self.init_chat_context()
@@ -963,6 +859,14 @@ class ChatBot(SingleRoomAgent):
         thread_attributes = None
 
         thread = None
+
+        llm_messages = asyncio.Queue[dict]()
+        llm_task = None
+
+        def handle_event(evt):
+            if isinstance(evt, BaseModel):
+                evt = evt.model_dump(mode="json")
+            llm_messages.put_nowait(evt)
 
         try:
             received = None
@@ -1026,6 +930,15 @@ class ChatBot(SingleRoomAgent):
                             participants=get_online_participants(
                                 room=self.room, thread=thread
                             ),
+                            event_handler=handle_event,
+                        )
+
+                        llm_task = asyncio.create_task(
+                            self._process_llm_events(
+                                thread_context=thread_context,
+                                llm_messages=llm_messages,
+                                thread_attributes=thread_attributes,
+                            )
                         )
 
                         await self.load_thread_context(thread_context=thread_context)
@@ -1075,7 +988,12 @@ class ChatBot(SingleRoomAgent):
                             message=f"the user attached a file at the path '{attachment['path']}'"
                         )
 
-                    chat_context.append_user_message(message=text)
+                    chat_context.append_user_message(
+                        message=self.format_message(
+                            user_name=chat_with_participant.get_attribute("name"),
+                            message=text,
+                        )
+                    )
 
                 if received is not None and received.type == "chat":
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
@@ -1139,19 +1057,6 @@ class ChatBot(SingleRoomAgent):
                                         thread_context=thread_context
                                     )
 
-                                    llm_messages = asyncio.Queue[ResponseStreamEvent]()
-
-                                    def handle_event(evt):
-                                        llm_messages.put_nowait(evt)
-
-                                    llm_task = asyncio.create_task(
-                                        self._process_llm_events(
-                                            thread_context=thread_context,
-                                            llm_messages=llm_messages,
-                                            thread_attributes=thread_attributes,
-                                        )
-                                    )
-
                                     message_toolkits = [*thread_toolkits]
 
                                     model = received.message.get(
@@ -1165,26 +1070,20 @@ class ChatBot(SingleRoomAgent):
                                         and len(message_tools) > 0
                                     ):
                                         message_toolkits.extend(
-                                            make_tools(
+                                            make_toolkits(
                                                 model=model,
                                                 providers=thread_tool_providers,
                                                 tools=message_tools,
                                             )
                                         )
 
-                                    try:
-                                        await self.handle_user_message(
-                                            context=thread_context,
-                                            toolkits=message_toolkits,
-                                            event_handler=handle_event,
-                                            model=model,
-                                            from_user=chat_with_participant,
-                                        )
-
-                                    finally:
-                                        llm_messages.shutdown()
-
-                                    await llm_task
+                                    await self.handle_user_message(
+                                        context=thread_context,
+                                        toolkits=message_toolkits,
+                                        event_handler=handle_event,
+                                        model=model,
+                                        from_user=chat_with_participant,
+                                    )
 
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
@@ -1214,6 +1113,10 @@ class ChatBot(SingleRoomAgent):
         finally:
 
             async def cleanup():
+                llm_messages.shutdown()
+                if llm_task is not None:
+                    await llm_task
+
                 if self.room is not None:
                     logger.info(f"thread was ended {path}")
                     logger.info("chatbot thread ended", extra={"path": path})

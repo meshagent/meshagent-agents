@@ -343,6 +343,7 @@ class TaskRunner(SingleRoomAgent):
         output_schema: Optional[dict] = None,
         labels: Optional[list[str]] = None,
         toolkits: Optional[list[Toolkit]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -370,6 +371,7 @@ class TaskRunner(SingleRoomAgent):
         self._supports_tools = supports_tools
         self._input_schema = input_schema
         self._output_schema = output_schema
+        self._annotations = annotations
 
     async def validate_arguments(self, arguments: dict):
         validate(arguments, self.input_schema)
@@ -384,6 +386,10 @@ class TaskRunner(SingleRoomAgent):
     @property
     def supports_tools(self):
         return self._supports_tools
+
+    @property
+    def annotations(self):
+        return self._annotations
 
     @property
     def input_schema(self):
@@ -403,6 +409,7 @@ class TaskRunner(SingleRoomAgent):
             "requires": list(map(lambda x: x.to_json(), self.requires)),
             "supports_tools": self.supports_tools,
             "labels": self.labels,
+            "annotations": self.annotations,
         }
 
     async def _register(self):
@@ -418,6 +425,7 @@ class TaskRunner(SingleRoomAgent):
                     "requires": list(map(lambda x: x.to_json(), self.requires)),
                     "supports_tools": self.supports_tools,
                     "labels": self.labels,
+                    "annotations": self.annotations,
                 },
             )
         )["id"]
