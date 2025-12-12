@@ -108,7 +108,7 @@ class Worker(SingleRoomAgent):
 
                 backoff = 0
                 if message is not None:
-                    logger.info(f"received message on worker queue {message}")
+                    logger.info("received message on worker queue")
                     try:
                         chat_context = await self.init_chat_context()
 
