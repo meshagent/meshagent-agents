@@ -7,7 +7,9 @@ from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents import TaskRunner
 from meshagent.agents.agent import AgentCallContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
-from meshagent.api.messaging import TextResponse
+import tarfile
+import io
+import mimetypes
 
 
 class LLMTaskRunner(TaskRunner):
@@ -33,6 +35,7 @@ class LLMTaskRunner(TaskRunner):
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
         annotations: Optional[list[str]] = None,
+        client_rules: Optional[dict[str, list[str]]] = None,
     ):
         if input_schema is None:
             if input_prompt:
@@ -87,11 +90,10 @@ class LLMTaskRunner(TaskRunner):
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
         self.toolkits = static_toolkits
+        self._client_rules = client_rules
 
     async def init_chat_context(self):
         chat = self._llm_adapter.create_chat_context()
-        if self._extra_rules:
-            chat.append_rules(self._extra_rules)
         return chat
 
     async def get_toolkit_builders(
@@ -99,7 +101,29 @@ class LLMTaskRunner(TaskRunner):
     ) -> list[ToolkitBuilder]:
         return []
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict):
+    async def get_context_toolkits(self, *, context: AgentCallContext) -> list[Toolkit]:
+        return []
+
+    async def get_rules(self, *, context: AgentCallContext):
+        rules = [*self._extra_rules]
+
+        participant = context.caller
+        client = participant.get_attribute("client")
+
+        if self._client_rules is not None and client is not None:
+            cr = self._client_rules.get(client)
+            if cr is not None:
+                rules.extend(cr)
+
+        return rules
+
+    async def ask(
+        self,
+        *,
+        context: AgentCallContext,
+        arguments: dict,
+        attachment: Optional[bytes] = None,
+    ):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
@@ -107,9 +131,32 @@ class LLMTaskRunner(TaskRunner):
         message_tools = arguments.get("tools")
         model = arguments.get("model", self._llm_adapter.default_model())
 
+        context.chat.append_rules(await self.get_rules(context=context))
+
         context.chat.append_user_message(prompt)
 
-        combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
+        if attachment is not None:
+            buf = io.BytesIO(attachment)
+            with tarfile.open(fileobj=buf, mode="r:*") as tar:
+                for member in tar.getmembers():
+                    if member.isfile():
+                        mime_type, encoding = mimetypes.guess_type(member.name)
+                        f = tar.extractfile(member)
+                        content = f.read()
+                        if mime_type.startswith("image/"):
+                            context.chat.append_image_message(
+                                data=content, mime_type=mime_type
+                            )
+                        else:
+                            context.chat.append_file_message(
+                                filename=member.name, data=content, mime_type=mime_type
+                            )
+
+        combined_toolkits: list[Toolkit] = [
+            *self.toolkits,
+            *context.toolkits,
+            *await self.get_context_toolkits(context=context),
+        ]
 
         if message_tools is not None and len(message_tools) > 0:
             combined_toolkits.extend(
@@ -135,9 +182,6 @@ class LLMTaskRunner(TaskRunner):
                 validate(instance=resp, schema=self.output_schema)
             except ValidationError as exc:
                 raise RuntimeError("LLM output failed schema validation") from exc
-        # If no output schema was provided return a TextResponse
-        else:
-            resp = TextResponse(text=resp)
 
         return resp
 

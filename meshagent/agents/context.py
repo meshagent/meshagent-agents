@@ -3,6 +3,7 @@ from copy import deepcopy
 from meshagent.api import RoomClient
 from meshagent.tools import Toolkit
 from meshagent.api.participant import Participant
+import base64
 
 import uuid
 
@@ -81,6 +82,33 @@ class AgentChatContext:
             system_message["content"] = plan
         else:
             self.instructions = plan
+
+    def append_image_message(self, *, mime_type: str, data: bytes):
+        self.messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{mime_type};base64,{base64.b64encode(data).decode()}",
+                    },
+                ],
+            }
+        )
+
+    def append_file_message(self, *, filename: str, mime_type: str, data: bytes):
+        self.messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "filename": filename,
+                        "file_data": f"data:{mime_type or 'text/plain'};base64,{base64.b64encode(data).decode()}",
+                    }
+                ],
+            }
+        )
 
     def append_rules(self, rules: list[str]):
         system_message = None

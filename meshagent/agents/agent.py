@@ -380,7 +380,13 @@ class TaskRunner(SingleRoomAgent):
         if self.output_schema is not None:
             validate(response, self.output_schema)
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict) -> dict:
+    async def ask(
+        self,
+        *,
+        context: AgentCallContext,
+        arguments: dict,
+        attachment: Optional[bytes] = None,
+    ) -> dict:
         raise Exception("Not implemented")
 
     @property
@@ -459,7 +465,7 @@ class TaskRunner(SingleRoomAgent):
     ):
         async def worker():
             # Decode and parse the message
-            message, _ = unpack_message(data)
+            message, attachment = unpack_message(data)
             logger.info("agent got message %s", message)
             args = message["arguments"]
             task_id = message["task_id"]
@@ -546,7 +552,12 @@ class TaskRunner(SingleRoomAgent):
                         )
                     )
 
-                response = await self.ask(context=context, arguments=args)
+                if attachment is not None and len(attachment) > 0:
+                    response = await self.ask(
+                        context=context, arguments=args, attachment=attachment
+                    )
+                else:
+                    response = await self.ask(context=context, arguments=args)
 
                 await protocol.send(
                     type="agent.ask_response",
