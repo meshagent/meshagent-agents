@@ -295,9 +295,7 @@ class ChatBot(SingleRoomAgent):
     ):
         return get_online_participants(room=self._room, thread=thread, exclude=exclude)
 
-    async def get_thread_toolkit_builders(
-        self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
-    ) -> list[ToolkitBuilder]:
+    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
         return []
 
     async def get_thread_toolkits(
@@ -1049,10 +1047,7 @@ class ChatBot(SingleRoomAgent):
                                         "get_thread_toolkit_builders"
                                     ) as span:
                                         thread_tool_providers = (
-                                            await self.get_thread_toolkit_builders(
-                                                thread_context=thread_context,
-                                                participant=chat_with_participant,
-                                            )
+                                            self.get_toolkit_builders()
                                         )
 
                                     await self.prepare_llm_context(
@@ -1176,9 +1171,7 @@ class ChatBot(SingleRoomAgent):
             )
             return
 
-        tool_providers = await self.get_thread_toolkit_builders(
-            thread_context=thread_context, participant=chat_with_participant
-        )
+        tool_providers = self.get_toolkit_builders()
         self._room.messaging.send_message_nowait(
             to=chat_with_participant,
             type="set_thread_tool_providers",

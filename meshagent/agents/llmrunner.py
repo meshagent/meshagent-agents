@@ -43,26 +43,43 @@ class LLMTaskRunner(TaskRunner):
                     description="use a prompt to generate content"
                 )
 
-                if input_tools:
+                toolkit_builders = self.get_toolkit_builders()
+                if len(toolkit_builders) > 0:
+                    toolkit_config_schemas = []
+
+                    defs = None
+
+                    for builder in toolkit_builders:
+                        schema = builder.type.model_json_schema()
+                        if schema.get("$defs") is not None:
+                            if defs is None:
+                                defs = {}
+
+                            for k, v in schema["$defs"].items():
+                                defs[k] = v
+
+                        toolkit_config_schemas.append(schema)
+
                     input_schema = merge(
                         schema=input_schema,
                         additional_properties={
                             "tools": {
                                 "type": "array",
                                 "items": {
-                                    "type": "object",
-                                    "required": ["name"],
-                                    "additionalProperties": False,
-                                    "properties": {
-                                        "name": {
-                                            "type": "string",
-                                        }
-                                    },
+                                    "anyOf": toolkit_config_schemas,
                                 },
                             },
                             "model": {"type": ["string", "null"]},
                         },
                     )
+
+                    if defs is not None:
+                        if input_schema.get("$defs") is None:
+                            input_schema["$defs"] = {}
+
+                        for k, v in defs.items():
+                            input_schema["$defs"][k] = v
+
             else:
                 input_schema = {
                     "type": "object",
@@ -96,9 +113,7 @@ class LLMTaskRunner(TaskRunner):
         chat = self._llm_adapter.create_chat_context()
         return chat
 
-    async def get_toolkit_builders(
-        self, *, context: AgentCallContext
-    ) -> list[ToolkitBuilder]:
+    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
         return []
 
     async def get_context_toolkits(self, *, context: AgentCallContext) -> list[Toolkit]:
@@ -163,7 +178,7 @@ class LLMTaskRunner(TaskRunner):
                 await make_toolkits(
                     room=self.room,
                     model=model,
-                    providers=await self.get_toolkit_builders(context=context),
+                    providers=self.get_toolkit_builders(),
                     tools=message_tools,
                 )
             )
