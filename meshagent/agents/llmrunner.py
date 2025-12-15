@@ -29,7 +29,6 @@ class LLMTaskRunner(TaskRunner):
         requires: Optional[list[Requirement]] = None,
         supports_tools: bool = True,
         input_prompt: bool = True,
-        input_tools: bool = False,
         input_schema: Optional[dict] = None,
         output_schema: Optional[dict] = None,
         rules: Optional[list[str]] = None,
