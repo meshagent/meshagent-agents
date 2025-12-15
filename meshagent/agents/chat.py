@@ -846,7 +846,9 @@ class ChatBot(SingleRoomAgent):
         return f"{user_name} said: {message}"
 
     def prepare_chat_context(self, *, chat_context: ChatThreadContext):
-        chat_context.append_user_message("what is your response?")
+        chat_context.append_user_message(
+            "based on the previous transcript, take your turn and respond"
+        )
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
@@ -1070,7 +1072,8 @@ class ChatBot(SingleRoomAgent):
                                         and len(message_tools) > 0
                                     ):
                                         message_toolkits.extend(
-                                            make_toolkits(
+                                            await make_toolkits(
+                                                room=self.room,
                                                 model=model,
                                                 providers=thread_tool_providers,
                                                 tools=message_tools,

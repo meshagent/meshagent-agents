@@ -43,11 +43,14 @@ class LLMAdapter(Generic[TEvent]):
     def tool_providers(self, *, model: str) -> list[ToolkitBuilder]:
         return []
 
-    def make_toolkit(self, *, model: str, config: ToolkitConfig) -> Toolkit:
+    async def make_toolkit(
+        self, *, room: RoomClient, model: str, config: ToolkitConfig
+    ) -> Toolkit:
         for tool in self.tool_providers(model=model):
             if tool.name == config.name:
                 return Toolkit(
-                    name=config.name, tools=[tool.make(model=model, config=config)]
+                    name=config.name,
+                    tools=[await tool.make(room=room, model=model, config=config)],
                 )
 
         raise RoomException(f"Unexpected tool: {config.name} for model {model}")

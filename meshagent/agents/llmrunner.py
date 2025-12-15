@@ -113,7 +113,8 @@ class LLMTaskRunner(TaskRunner):
 
         if message_tools is not None and len(message_tools) > 0:
             combined_toolkits.extend(
-                make_toolkits(
+                await make_toolkits(
+                    room=self.room,
                     model=model,
                     providers=await self.get_toolkit_builders(context=context),
                     tools=message_tools,
