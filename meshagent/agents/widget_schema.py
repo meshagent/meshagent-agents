@@ -25,6 +25,7 @@ widget_names = {
     "format",
     "datagrid",
     "chat",
+    "tabs",
 }
 
 
@@ -227,6 +228,11 @@ def widget_properties():
             name="script",
             description="a script that contains the logic for this button",
             type="string",
+        ),
+        ValueProperty(
+            name="visible",
+            description="the whether the widget is initially visible",
+            type="boolean",
         ),
     ]
 
@@ -701,6 +707,45 @@ datagrid = ElementType(
     ],
 )
 
+tab = ElementType(
+    tag_name="tab",
+    description="tab",
+    properties=[
+        *box_properties(),
+        *widget_properties(),
+        *child_widgets(),
+        ValueProperty(
+            name="activeBackgroundColor",
+            description="the color of the background when the tab is active #rrggbbaa",
+            type="string",
+        ),
+    ],
+)
+
+tabs = ElementType(
+    tag_name="tabs",
+    description="tabs",
+    properties=[
+        *box_properties(),
+        *widget_properties(),
+        ValueProperty(
+            name="spacing", description="spacing between the items", type="number"
+        ),
+        ValueProperty(
+            name="initialTab", description="the initially selected tab", type="string"
+        ),
+        ChildProperty(
+            name="tabs",
+            description="columns in the grid",
+            ordered=True,
+            child_tag_names=[
+                "tab",
+            ],
+        ),
+    ],
+)
+
+
 format = ElementType(
     tag_name="format",
     description="format text using an expression",
@@ -742,6 +787,8 @@ widget_schema = MeshSchema(
         gridcolumn,
         format,
         chat,
+        tabs,
+        tab,
     ],
 )
 
