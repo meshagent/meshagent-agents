@@ -366,7 +366,9 @@ class ChatBot(SingleRoomAgent):
                         else:
                             chat_context.append_user_message(
                                 self.format_message(
-                                    user_name=element["author_name"], message=msg
+                                    user_name=element["author_name"],
+                                    message=msg,
+                                    iso_timestamp=element["created_at"],
                                 )
                             )
 
@@ -826,6 +828,8 @@ class ChatBot(SingleRoomAgent):
             if cr is not None:
                 rules.extend(cr)
 
+        # Without this rule 5.2 / 5.1 like to start their messages with things like "I could say"
+        rules.append("based on the previous transcript, take your turn and respond")
         return rules
 
     async def on_chat_received(
@@ -840,13 +844,11 @@ class ChatBot(SingleRoomAgent):
         )
         thread_context.chat.replace_rules(rules)
 
-    def format_message(self, *, user_name: str, message: str):
-        return f"{user_name} said: {message}"
+    def format_message(self, *, user_name: str, message: str, iso_timestamp: str):
+        return f"{user_name} said at {iso_timestamp}: {message}"
 
     def prepare_chat_context(self, *, chat_context: ChatThreadContext):
-        chat_context.append_user_message(
-            "based on the previous transcript, take your turn and respond"
-        )
+        pass
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
@@ -988,10 +990,17 @@ class ChatBot(SingleRoomAgent):
                             message=f"the user attached a file at the path '{attachment['path']}'"
                         )
 
+                    iso_timestamp = (
+                        datetime.datetime.now(datetime.timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+
                     chat_context.append_user_message(
                         message=self.format_message(
                             user_name=chat_with_participant.get_attribute("name"),
                             message=text,
+                            iso_timestamp=iso_timestamp,
                         )
                     )
 

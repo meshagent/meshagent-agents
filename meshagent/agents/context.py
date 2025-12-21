@@ -83,32 +83,34 @@ class AgentChatContext:
         else:
             self.instructions = plan
 
-    def append_image_message(self, *, mime_type: str, data: bytes):
-        self.messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{mime_type};base64,{base64.b64encode(data).decode()}",
-                    },
-                ],
-            }
-        )
+    def append_image_message(self, *, mime_type: str, data: bytes) -> dict:
+        m = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{mime_type};base64,{base64.b64encode(data).decode()}",
+                },
+            ],
+        }
+        self.messages.append(m)
+        return m
 
-    def append_file_message(self, *, filename: str, mime_type: str, data: bytes):
-        self.messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_file",
-                        "filename": filename,
-                        "file_data": f"data:{mime_type or 'text/plain'};base64,{base64.b64encode(data).decode()}",
-                    }
-                ],
-            }
-        )
+    def append_file_message(
+        self, *, filename: str, mime_type: str, data: bytes
+    ) -> dict:
+        m = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_file",
+                    "filename": filename,
+                    "file_data": f"data:{mime_type or 'text/plain'};base64,{base64.b64encode(data).decode()}",
+                }
+            ],
+        }
+        self.messages.append(m)
+        return m
 
     def append_rules(self, rules: list[str]):
         system_message = None
@@ -151,24 +153,30 @@ class AgentChatContext:
         else:
             return self.instructions
 
-    def append_assistant_message(self, message: str, deferred: bool = False) -> None:
+    def append_assistant_message(self, message: str, deferred: bool = False) -> dict:
         if deferred:
-            self.deferred_messages.append({"role": "assistant", "content": message})
+            m = {"role": "assistant", "content": message}
+            self.deferred_messages.append(m)
+            return m
         else:
-            self.messages.append({"role": "assistant", "content": message})
+            m = {"role": "assistant", "content": message}
+            self.messages.append(m)
+            return m
 
-    def append_user_message(self, message: str) -> None:
-        self.messages.append({"role": "user", "content": message})
+    def append_user_message(self, message: str) -> dict:
+        m = {"role": "user", "content": message}
+        self.messages.append(m)
+        return m
 
-    def append_user_image(self, url: str) -> None:
-        self.messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": url, "detail": "auto"}}
-                ],
-            }
-        )
+    def append_user_image(self, url: str) -> dict:
+        m = {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": url, "detail": "auto"}}
+            ],
+        }
+        self.messages.append(m)
+        return m
 
     def copy(self) -> "AgentChatContext":
         return AgentChatContext(
