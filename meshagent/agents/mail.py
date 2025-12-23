@@ -348,12 +348,16 @@ class MailWorker(Worker):
         )
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
 
-        reply = await self._llm_adapter.next(
-            context=chat_context,
-            room=self.room,
-            toolkits=toolkits,
-            tool_adapter=self._tool_adapter,
-        )
+        try:
+            reply = await self._llm_adapter.next(
+                context=chat_context,
+                room=self.room,
+                toolkits=toolkits,
+                tool_adapter=self._tool_adapter,
+            )
+        except Exception as ex:
+            logger.error(f"error while processing message {ex}", exc_info=ex)
+            reply = "An error occurred while processing your message, please try again."
 
         logger.info(f"replying: {reply}")
 
