@@ -5,10 +5,10 @@ from meshagent.api import (
     RoomClient,
     RemoteParticipant,
     Participant,
-    RequiredSchema,
     Requirement,
     Element,
     MeshDocument,
+    RequiredSchema,
 )
 from meshagent.tools import Toolkit, ToolContext, make_toolkits, ToolkitBuilder
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
@@ -27,6 +27,8 @@ from pydantic import BaseModel
 from opentelemetry import trace
 import shlex
 import json
+
+from meshagent.agents.thread_schema import thread_schema
 
 tracer = trace.get_tracer("meshagent.chatbot")
 
@@ -213,19 +215,6 @@ class ChatBot(SingleRoomAgent):
         self._thread_tasks = dict[str, asyncio.Task]()
         self._open_threads = {}
 
-    def init_requirements(self, requires: list[Requirement]):
-        if requires is None:
-            requires = [RequiredSchema(name="thread")]
-
-        else:
-            thread_schema = list(
-                n
-                for n in requires
-                if (isinstance(n, RequiredSchema) and n.name == "thread")
-            )
-            if len(thread_schema) == 0:
-                requires.append(RequiredSchema(name="thread"))
-
     async def _send_and_save_chat(
         self,
         thread: MeshDocument,
@@ -290,6 +279,12 @@ class ChatBot(SingleRoomAgent):
                 thread_attributes=thread_attributes,
             )
 
+    def get_requirements(self):
+        return [
+            *super().get_requirements(),
+            RequiredSchema(name="thread", schema=thread_schema),
+        ]
+
     async def get_online_participants(
         self, *, thread: MeshDocument, exclude: Optional[list[Participant]] = None
     ):
@@ -333,7 +328,9 @@ class ChatBot(SingleRoomAgent):
     async def open_thread(self, *, path: str):
         logger.info(f"opening thread {path}")
         if path not in self._open_threads:
-            fut = asyncio.ensure_future(self.room.sync.open(path=path))
+            fut = asyncio.ensure_future(
+                self.room.sync.open(path=path, schema=thread_schema)
+            )
             self._open_threads[path] = fut
 
         return await self._open_threads[path]

@@ -4,6 +4,7 @@ from meshagent.api.room_server_client import TextDataType
 from email import message_from_bytes
 from email.message import EmailMessage
 from meshagent.api import RoomClient
+from meshagent.api import RequiredTable
 from email.policy import default
 import email.utils
 from meshagent.agents import AgentChatContext
@@ -339,6 +340,16 @@ class MailWorker(Worker):
         else:
             self._toolkit = None
 
+    def get_requirements(self):
+        return [
+            *super().get_requirements(),
+            RequiredTable(
+                name="emails",
+                schema={"id": TextDataType(), "json": TextDataType()},
+                scalar_indexes=["id"],
+            ),
+        ]
+
     async def load_message(self, *, message_id: str) -> dict | None:
         room = self.room
         messages = await room.database.search(table="emails", where={"id": message_id})
@@ -476,18 +487,6 @@ class MailWorker(Worker):
             )
         finally:
             await room.storage.close(handle=handle)
-
-        # create email table if it doesn't exist
-        tables = await room.database.list_tables()
-
-        if "emails" not in tables:
-            await room.database.create_table_with_schema(
-                name="emails",
-                schema={"id": TextDataType(), "json": TextDataType()},
-                mode="create_if_not_exists",
-            )
-
-            await room.database.create_scalar_index(table="emails", column="id")
 
         await room.database.insert(
             table="emails",

@@ -1,11 +1,12 @@
 from typing import Optional
-
+import json
 from meshagent.api.messaging import unpack_message, pack_message
 from meshagent.api.room_server_client import (
     RoomException,
     RequiredToolkit,
     Requirement,
     RequiredSchema,
+    RequiredTable,
 )
 from meshagent.api import (
     ToolDescription,
@@ -94,13 +95,15 @@ class Agent:
         if requires is None:
             requires = []
 
-        self.init_requirements(requires)
         self._requires = requires
 
         if labels is None:
             labels = []
 
         self._labels = labels
+
+    def get_requirements(self) -> list[Requirement]:
+        return self._requires
 
     @property
     def name(self):
@@ -121,8 +124,6 @@ class Agent:
     @property
     def labels(self):
         return self._labels
-
-    def init_requirements(self, requires): ...
 
     async def init_chat_context(self) -> AgentChatContext:
         return AgentChatContext()
@@ -193,7 +194,7 @@ class SingleRoomAgent(Agent):
 
         builtin_agents_url = "http://localhost:8080"
 
-        for requirement in self.requires:
+        for requirement in self.get_requirements():
             if requirement.callable:
                 if isinstance(requirement, RequiredToolkit):
                     if requirement.name == "ui":
@@ -222,18 +223,108 @@ class SingleRoomAgent(Agent):
                     if requirement.name not in schemas_by_name:
                         installed = True
 
-                        logger.info(f"Installing required schema {requirement.name}")
+                        if requirement.schema is not None:
+                            logger.info(
+                                f"Installing required schema {requirement.name} from json"
+                            )
+                            handle = await self._room.storage.open(
+                                path=f".schemas/{requirement.name}.json", overwrite=True
+                            )
+                            await self._room.storage.write(
+                                handle=handle,
+                                data=json.dumps(requirement.schema.to_json()).encode(),
+                            )
+                            await self._room.storage.close(handle=handle)
 
-                        if requirement.name.startswith(
-                            "https://"
-                        ) or requirement.name.startswith("http://"):
-                            url = requirement.name
                         else:
-                            url = f"{builtin_agents_url}/schemas/{requirement.name}"
+                            logger.info(
+                                f"Installing required schema {requirement.name} from registry"
+                            )
 
-                        await self._room.agents.make_call(
-                            url=url, name=requirement.name, arguments={}
-                        )
+                            if requirement.name.startswith(
+                                "https://"
+                            ) or requirement.name.startswith("http://"):
+                                url = requirement.name
+                            else:
+                                url = f"{builtin_agents_url}/schemas/{requirement.name}"
+
+                            await self._room.agents.make_call(
+                                url=url, name=requirement.name, arguments={}
+                            )
+                elif isinstance(requirement, RequiredTable):
+                    logger.info(
+                        f"ensuring required table exists {requirement.name} in {requirement.namespace}"
+                    )
+
+                    await self._room.database.create_table_with_schema(
+                        name=requirement.name,
+                        mode="create_if_not_exists",
+                        schema=requirement.schema,
+                        namespace=requirement.namespace,
+                    )
+
+                    indexes = await self._room.database.list_indexes(
+                        table=requirement.name, namespace=requirement.namespace
+                    )
+
+                    def index_exists(column: str):
+                        for i in indexes:
+                            if column in i.columns:
+                                return True
+
+                        return False
+
+                    for vi in requirement.vector_indexes or []:
+                        if not index_exists(vi):
+                            try:
+                                await self._room.database.create_vector_index(
+                                    table=requirement.name,
+                                    column=vi,
+                                    namespace=requirement.namespace,
+                                    replace=True,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"unable to create vector index {e}", exec_info=e
+                                )
+
+                    for ti in requirement.full_text_search_indexes or []:
+                        if not index_exists(ti):
+                            try:
+                                await self._room.database.create_full_text_search_index(
+                                    table=requirement.name,
+                                    column=ti,
+                                    namespace=requirement.namespace,
+                                    replace=True,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"unable to create full text search index {e}",
+                                    exec_info=e,
+                                )
+
+                    for si in requirement.scalar_indexes or []:
+                        if not index_exists(si):
+                            try:
+                                await self._room.database.create_scalar_index(
+                                    table=requirement.name,
+                                    column=si,
+                                    namespace=requirement.namespace,
+                                    replace=True,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"unable to create scalar index {e}", exec_info=e
+                                )
+
+                    logger.info(
+                        f"optimizing table {requirement.name} in {requirement.namespace}"
+                    )
+
+                    # TODO: use index_stats to determine when indexes need to be updated
+                    await self._room.database.optimize(
+                        table=requirement.name, namespace=requirement.namespace
+                    )
 
                 else:
                     raise RoomException("unsupported requirement")
