@@ -138,6 +138,70 @@ class Agent:
         }
 
 
+async def install_required_table(*, room: RoomClient, table: RequiredTable):
+    await room.database.create_table_with_schema(
+        name=table.name,
+        mode="create_if_not_exists",
+        schema=table.schema,
+        namespace=table.namespace,
+    )
+
+    indexes = await room.database.list_indexes(
+        table=table.name, namespace=table.namespace
+    )
+
+    def index_exists(column: str):
+        for i in indexes:
+            if column in i.columns:
+                return True
+
+        return False
+
+    for vi in table.vector_indexes or []:
+        if not index_exists(vi):
+            try:
+                await room.database.create_vector_index(
+                    table=table.name,
+                    column=vi,
+                    namespace=table.namespace,
+                    replace=True,
+                )
+            except Exception as e:
+                logger.warning(f"unable to create vector index {e}", exec_info=e)
+
+    for ti in table.full_text_search_indexes or []:
+        if not index_exists(ti):
+            try:
+                await room.database.create_full_text_search_index(
+                    table=table.name,
+                    column=ti,
+                    namespace=table.namespace,
+                    replace=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"unable to create full text search index {e}",
+                    exec_info=e,
+                )
+
+    for si in table.scalar_indexes or []:
+        if not index_exists(si):
+            try:
+                await room.database.create_scalar_index(
+                    table=table.name,
+                    column=si,
+                    namespace=table.namespace,
+                    replace=True,
+                )
+            except Exception as e:
+                logger.warning(f"unable to create scalar index {e}", exec_info=e)
+
+    logger.info(f"optimizing table {table.name} in {table.namespace}")
+
+    # TODO: use index_stats to determine when indexes need to be updated
+    await room.database.optimize(table=table.name, namespace=table.namespace)
+
+
 class SingleRoomAgent(Agent):
     def __init__(
         self,
@@ -256,75 +320,7 @@ class SingleRoomAgent(Agent):
                         f"ensuring required table exists {requirement.name} in {requirement.namespace}"
                     )
 
-                    await self._room.database.create_table_with_schema(
-                        name=requirement.name,
-                        mode="create_if_not_exists",
-                        schema=requirement.schema,
-                        namespace=requirement.namespace,
-                    )
-
-                    indexes = await self._room.database.list_indexes(
-                        table=requirement.name, namespace=requirement.namespace
-                    )
-
-                    def index_exists(column: str):
-                        for i in indexes:
-                            if column in i.columns:
-                                return True
-
-                        return False
-
-                    for vi in requirement.vector_indexes or []:
-                        if not index_exists(vi):
-                            try:
-                                await self._room.database.create_vector_index(
-                                    table=requirement.name,
-                                    column=vi,
-                                    namespace=requirement.namespace,
-                                    replace=True,
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"unable to create vector index {e}", exec_info=e
-                                )
-
-                    for ti in requirement.full_text_search_indexes or []:
-                        if not index_exists(ti):
-                            try:
-                                await self._room.database.create_full_text_search_index(
-                                    table=requirement.name,
-                                    column=ti,
-                                    namespace=requirement.namespace,
-                                    replace=True,
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"unable to create full text search index {e}",
-                                    exec_info=e,
-                                )
-
-                    for si in requirement.scalar_indexes or []:
-                        if not index_exists(si):
-                            try:
-                                await self._room.database.create_scalar_index(
-                                    table=requirement.name,
-                                    column=si,
-                                    namespace=requirement.namespace,
-                                    replace=True,
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"unable to create scalar index {e}", exec_info=e
-                                )
-
-                    logger.info(
-                        f"optimizing table {requirement.name} in {requirement.namespace}"
-                    )
-
-                    # TODO: use index_stats to determine when indexes need to be updated
-                    await self._room.database.optimize(
-                        table=requirement.name, namespace=requirement.namespace
-                    )
+                    await install_required_table(room=self.room, table=requirement)
 
                 else:
                     raise RoomException("unsupported requirement")
