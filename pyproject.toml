@@ -17,9 +17,9 @@ dependencies = [
   "pyjwt~=2.10",
   "pytest~=8.4",
   "pytest-asyncio~=0.26",
-  "meshagent-api~=0.17.0",
-  "meshagent-tools~=0.17.0",
-  "meshagent-openai~=0.17.0",
+  "meshagent-api~=0.17.1",
+  "meshagent-tools~=0.17.1",
+  "meshagent-openai~=0.17.1",
   "pydantic~=2.11",
   "opentelemetry-distro~=0.54b1",
   "mistune~=3.1.4",
@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 all = [
-    "meshagent-api[all]~=0.17.0",
+    "meshagent-api[all]~=0.17.1",
     "chonkie~=0.5.1",
     "chonkie[semantic]~=0.5.1",
     "chonkie[openai]~=0.5.1",
@@ -35,7 +35,7 @@ all = [
 ]
 
 sync = [
-    "meshagent-api[sync]~=0.17.0",
+    "meshagent-api[sync]~=0.17.1",
 ]
 
 mail = [
