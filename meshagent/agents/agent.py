@@ -223,7 +223,7 @@ class SingleRoomAgent(Agent):
 
     async def start(self, *, room: RoomClient) -> None:
         if self._room is not None:
-            raise RoomException("room is already started")
+            raise RoomException("agent is already started")
 
         self._room = room
 

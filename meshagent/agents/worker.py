@@ -87,20 +87,20 @@ class Worker(SingleRoomAgent):
 
         if toolkit_name is not None:
             logger.info(f"worker will start toolkit {toolkit_name}")
-            self._toolkit = RemoteToolkit(
+            self._worker_toolkit = RemoteToolkit(
                 name=toolkit_name,
                 tools=[
                     SubmitTask(queue=self._queue, agent=self),
                 ],
             )
         else:
-            self._toolkit = None
+            self._worker_toolkit = None
 
     async def start(self, *, room: RoomClient):
         self._done = False
 
-        if self._toolkit is not None:
-            await self._toolkit.start(room=room)
+        if self._worker_toolkit is not None:
+            await self._worker_toolkit.start(room=room)
 
         await super().start(room=room)
 
@@ -111,8 +111,8 @@ class Worker(SingleRoomAgent):
 
         await asyncio.gather(self._main_task)
 
-        if self._toolkit is not None:
-            await self._toolkit.stop()
+        if self._worker_toolkit is not None:
+            await self._worker_toolkit.stop()
 
         await super().stop()
 
