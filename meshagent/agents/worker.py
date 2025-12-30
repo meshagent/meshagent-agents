@@ -2,7 +2,7 @@ from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomClient
 from meshagent.agents import AgentChatContext
-from meshagent.tools import Toolkit
+from meshagent.tools import RemoteToolkit, Tool, Toolkit, make_toolkits, ToolkitBuilder
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
 from typing import Optional
@@ -10,7 +10,38 @@ import json
 from meshagent.tools import ToolContext
 import logging
 
-logger = logging.getLogger("chat")
+logger = logging.getLogger("worker")
+
+
+class SubmitTask(Tool):
+    def __init__(self, *, agent: "Worker", queue: str):
+        self.queue = queue
+        self.agent = agent
+        super().__init__(
+            name=f"queue_{agent.name}_task",
+            title=f"Queue {agent.title} Task",
+            description=f"Queues a new task to the worker -- {agent.description}",
+            input_schema={
+                "type": "object",
+                "required": ["prompt"],
+                "additionalProperties": False,
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                    },
+                },
+            },
+        )
+
+    async def execute(self, context: ToolContext, *, prompt: str):
+        await context.room.queues.send(
+            name=self.queue,
+            message={
+                "prompt": prompt,
+            },
+            create=True,
+        )
+        return None
 
 
 class Worker(SingleRoomAgent):
@@ -26,6 +57,7 @@ class Worker(SingleRoomAgent):
         tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
+        toolkit_name: Optional[str] = None,
     ):
         super().__init__(
             name=name,
@@ -53,8 +85,22 @@ class Worker(SingleRoomAgent):
         self._rules = rules
         self._done = False
 
+        if toolkit_name is not None:
+            logger.info(f"worker will start toolkit {toolkit_name}")
+            self._toolkit = RemoteToolkit(
+                name=toolkit_name,
+                tools=[
+                    SubmitTask(queue=self._queue, agent=self),
+                ],
+            )
+        else:
+            self._toolkit = None
+
     async def start(self, *, room: RoomClient):
         self._done = False
+
+        if self._toolkit is not None:
+            await self._toolkit.start(room=room)
 
         await super().start(room=room)
 
@@ -65,15 +111,25 @@ class Worker(SingleRoomAgent):
 
         await asyncio.gather(self._main_task)
 
+        if self._toolkit is not None:
+            await self._toolkit.stop()
+
         await super().stop()
+
+    async def get_rules(self):
+        return [*self._rules]
 
     async def append_message_context(
         self, *, message: dict, chat_context: AgentChatContext
     ):
-        chat_context.append_user_message(message=json.dumps(message))
+        prompt = message.get("prompt")
+        if prompt is None:
+            logger.warning(
+                "prompt property not found on worker message, inserting whole message into context"
+            )
+            prompt = json.dumps(message)
 
-    def decode_message(self, message: dict):
-        return message
+        chat_context.append_user_message(message=prompt)
 
     async def process_message(
         self,
@@ -91,14 +147,36 @@ class Worker(SingleRoomAgent):
             tool_adapter=self._tool_adapter,
         )
 
-    async def run(self, *, room: RoomClient):
-        toolkits = [
-            *await self.get_required_toolkits(
-                ToolContext(room=room, caller=room.local_participant)
-            ),
-            *self._toolkits,
-        ]
+    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
+        return []
 
+    async def get_message_toolkits(self, *, message: dict) -> list[Toolkit]:
+        toolkits = await self.get_required_toolkits(
+            context=ToolContext(
+                room=self.room,
+                caller=self.room.local_participant,
+                on_behalf_of=None,
+            )
+        )
+
+        tool_providers = [*self.get_toolkit_builders()]
+
+        model = message.get("model", self._llm_adapter.default_model())
+
+        message_tools = message.get("tools")
+
+        if message_tools is not None and len(message_tools) > 0:
+            toolkits.extend(
+                await make_toolkits(
+                    room=self.room,
+                    model=model,
+                    providers=tool_providers,
+                    tools=message_tools,
+                )
+            )
+        return [*self._toolkits, *toolkits]
+
+    async def run(self, *, room: RoomClient):
         backoff = 0
         while not self._done:
             try:
@@ -112,11 +190,13 @@ class Worker(SingleRoomAgent):
                     try:
                         chat_context = await self.init_chat_context()
 
-                        chat_context.append_rules(
+                        chat_context.replace_rules(
                             rules=[
-                                *self._rules,
+                                *await self.get_rules(),
                             ]
                         )
+
+                        toolkits = await self.get_message_toolkits(message=message)
 
                         await self.process_message(
                             chat_context=chat_context,

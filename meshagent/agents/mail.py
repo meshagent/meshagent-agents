@@ -649,10 +649,12 @@ class MailWorker(Worker):
 
     async def start(self, *, room: RoomClient):
         await super().start(room=room)
-        await self._toolkit.start(room=room)
+        if self._toolkit is not None:
+            await self._toolkit.start(room=room)
 
     async def stop(self):
-        await self._toolkit.stop()
+        if self._toolkit is not None:
+            await self._toolkit.stop()
         await super().stop()
 
     async def start_thread(
