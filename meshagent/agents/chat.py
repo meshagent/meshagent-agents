@@ -844,7 +844,7 @@ class ChatBot(SingleRoomAgent):
     def format_message(self, *, user_name: str, message: str, iso_timestamp: str):
         return f"{user_name} said at {iso_timestamp}: {message}"
 
-    def prepare_chat_context(self, *, chat_context: ChatThreadContext):
+    def prepare_chat_context(self, *, chat_context: AgentChatContext):
         pass
 
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):

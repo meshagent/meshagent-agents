@@ -239,37 +239,57 @@ class SingleRoomAgent(Agent):
 
     async def install_requirements(self, participant_id: Optional[str] = None):
         schemas_by_name = dict[str, StorageEntry]()
-
-        schemas = await self._room.storage.list(path=".schemas")
-
-        for schema in schemas:
-            schemas_by_name[schema.name] = schema
-
         toolkits_by_name = dict[str, ToolkitDescription]()
 
-        visible_tools = await self._room.agents.list_toolkits(
-            participant_id=participant_id
-        )
+        async def refresh_schemas():
+            schemas = await self._room.storage.list(path=".schemas")
 
-        for toolkit_description in visible_tools:
-            toolkits_by_name[toolkit_description.name] = toolkit_description
+            for schema in schemas:
+                schemas_by_name[schema.name] = schema
+
+        async def refresh_tools():
+            toolkits_by_name.clear()
+
+            visible_tools = await self._room.agents.list_toolkits(
+                participant_id=participant_id
+            )
+            for toolkit_description in visible_tools:
+                toolkits_by_name[toolkit_description.name] = toolkit_description
 
         installed = False
+
+        await refresh_tools()
+        await refresh_schemas()
 
         builtin_agents_url = "http://localhost:8080"
 
         for requirement in self.get_requirements():
-            if requirement.callable:
-                if isinstance(requirement, RequiredToolkit):
-                    if requirement.name == "ui":
-                        # TODO: maybe requirements can be marked as non installable?
-                        continue
+            if isinstance(requirement, RequiredToolkit):
+                if requirement.name == "ui":
+                    # TODO: maybe requirements can be marked as non installable?
+                    continue
 
-                    if requirement.name not in toolkits_by_name:
+                if requirement.name not in toolkits_by_name:
+                    if not requirement.callable:
+                        if requirement.timeout == 0:
+                            logger.info(
+                                f"{self.name} not waiting for toolkit {requirement.name}"
+                            )
+                            continue
+
+                        async with asyncio.timeout(requirement.timeout):
+                            logger.info(
+                                f"{self.name} waiting for toolkit {requirement.name}"
+                            )
+
+                            while requirement.name not in toolkits_by_name:
+                                await refresh_tools()
+                                await asyncio.sleep(1)
+
+                    else:
                         installed = True
-
                         logger.info(
-                            f"calling required tool into room {requirement.name}"
+                            f"{self.name} calling required tool into room {requirement.name}"
                         )
 
                         if requirement.name.startswith(
@@ -283,47 +303,64 @@ class SingleRoomAgent(Agent):
                             url=url, name=requirement.name, arguments={}
                         )
 
-                elif isinstance(requirement, RequiredSchema):
-                    if requirement.name not in schemas_by_name:
-                        installed = True
-
-                        if requirement.schema is not None:
-                            logger.info(
-                                f"Installing required schema {requirement.name} from json"
-                            )
-                            handle = await self._room.storage.open(
-                                path=f".schemas/{requirement.name}.json", overwrite=True
-                            )
-                            await self._room.storage.write(
-                                handle=handle,
-                                data=json.dumps(requirement.schema.to_json()).encode(),
-                            )
-                            await self._room.storage.close(handle=handle)
-
-                        else:
-                            logger.info(
-                                f"Installing required schema {requirement.name} from registry"
-                            )
-
-                            if requirement.name.startswith(
-                                "https://"
-                            ) or requirement.name.startswith("http://"):
-                                url = requirement.name
-                            else:
-                                url = f"{builtin_agents_url}/schemas/{requirement.name}"
-
-                            await self._room.agents.make_call(
-                                url=url, name=requirement.name, arguments={}
-                            )
-                elif isinstance(requirement, RequiredTable):
+            elif isinstance(requirement, RequiredSchema):
+                if requirement.schema is not None:
                     logger.info(
-                        f"ensuring required table exists {requirement.name} in {requirement.namespace}"
+                        f"{self.name} installing required schema {requirement.name} from json"
                     )
+                    handle = await self._room.storage.open(
+                        path=f".schemas/{requirement.name}.json", overwrite=True
+                    )
+                    await self._room.storage.write(
+                        handle=handle,
+                        data=json.dumps(requirement.schema.to_json()).encode(),
+                    )
+                    await self._room.storage.close(handle=handle)
 
-                    await install_required_table(room=self.room, table=requirement)
+                elif requirement.name not in schemas_by_name:
+                    installed = True
 
-                else:
-                    raise RoomException("unsupported requirement")
+                    if not requirement.callable:
+                        if requirement.timeout == 0:
+                            logger.info(
+                                f"{self.name} not waiting for schema {requirement.name}"
+                            )
+                            continue
+
+                        async with asyncio.timeout(requirement.timeout):
+                            logger.info(
+                                f"{self.name} waiting for schema {requirement.name}"
+                            )
+
+                            while requirement.name not in schemas_by_name:
+                                await refresh_schemas()
+                                await asyncio.sleep(1)
+
+                    else:
+                        logger.info(
+                            f"{self.name} installing required schema {requirement.name} from registry"
+                        )
+
+                        if requirement.name.startswith(
+                            "https://"
+                        ) or requirement.name.startswith("http://"):
+                            url = requirement.name
+                        else:
+                            url = f"{builtin_agents_url}/schemas/{requirement.name}"
+
+                        await self._room.agents.make_call(
+                            url=url, name=requirement.name, arguments={}
+                        )
+
+            elif isinstance(requirement, RequiredTable):
+                logger.info(
+                    f"ensuring required table exists {requirement.name} in {requirement.namespace}"
+                )
+
+                await install_required_table(room=self.room, table=requirement)
+
+            else:
+                raise RoomException("unsupported requirement")
 
         if installed:
             await asyncio.sleep(5)

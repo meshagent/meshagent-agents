@@ -1,6 +1,6 @@
 from meshagent.agents.worker import Worker
-from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit
-from meshagent.api.room_server_client import TextDataType
+from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit, FileResponse
+from meshagent.api.room_server_client import TextDataType, RoomException
 from email import message_from_bytes
 from email.message import EmailMessage
 from meshagent.api import RoomClient
@@ -63,6 +63,43 @@ class SmtpConfiguration:
         self.hostname = hostname
 
 
+class NewEmailThreadWithAttachments(Tool):
+    def __init__(self, *, agent: "MailWorker"):
+        self.agent = agent
+        super().__init__(
+            name="new_email_thread",
+            title="New Email Thread",
+            description="Starts a new email thread that is managed by the mailbot",
+            input_schema={
+                "type": "object",
+                "required": ["to", "body", "subject", "attachments"],
+                "additionalProperties": False,
+                "properties": {
+                    "to": {
+                        "type": "string",
+                    },
+                    "subject": {
+                        "type": "string",
+                    },
+                    "body": {
+                        "type": "string",
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "description": "a list of paths from the room's storage of files to attach",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        )
+
+    async def execute(self, context: ToolContext, *, to: str, subject: str, body: str):
+        await self.agent.start_thread(
+            to_address=to, subject=subject, body=body, attachments=[]
+        )
+        return {}
+
+
 class NewEmailThread(Tool):
     def __init__(self, *, agent: "MailWorker"):
         self.agent = agent
@@ -72,7 +109,7 @@ class NewEmailThread(Tool):
             description="Starts a new email thread that is managed by the mailbot",
             input_schema={
                 "type": "object",
-                "required": ["to", "body", "subject"],
+                "required": ["to", "body", "subject", "attachments"],
                 "additionalProperties": False,
                 "properties": {
                     "to": {
@@ -88,8 +125,31 @@ class NewEmailThread(Tool):
             },
         )
 
-    async def execute(self, context: ToolContext, *, to: str, subject: str, body: str):
-        await self.agent.start_thread(to_address=to, subject=subject, body=body)
+    async def execute(
+        self,
+        context: ToolContext,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        attachments: list[str],
+    ):
+        attachment_data = list[FileResponse]()
+
+        for attachment in attachments:
+            try:
+                attachment_data.append(
+                    await context.room.storage.download(path=attachment)
+                )
+            except Exception as ex:
+                logger.error(f"Unable to download file {ex}", exc_info=ex)
+                raise RoomException(
+                    f"Could not download a file from the room with the path {attachment}. Are you sure the path is correct file?"
+                )
+
+        await self.agent.start_thread(
+            to_address=to, subject=subject, body=body, attachments=attachment_data
+        )
         return {}
 
 
@@ -304,6 +364,7 @@ class MailWorker(Worker):
         toolkit_name: Optional[str] = None,
         whitelist: Optional[list[str]] = None,
         reply_all: bool = False,
+        enable_attachments: bool = True,
     ):
         if smtp is None:
             smtp = SmtpConfiguration()
@@ -311,6 +372,7 @@ class MailWorker(Worker):
         self._domain = domain
         self._smtp = smtp
         self._reply_all = reply_all
+        self._enable_attachments = enable_attachments
 
         super().__init__(
             queue=queue,
@@ -334,7 +396,9 @@ class MailWorker(Worker):
             self._toolkit = RemoteToolkit(
                 name=toolkit_name,
                 tools=[
-                    NewEmailThread(agent=self),
+                    NewEmailThreadWithAttachments(agent=self)
+                    if enable_attachments
+                    else NewEmailThread(agent=self),
                 ],
             )
         else:
@@ -522,11 +586,6 @@ class MailWorker(Worker):
             else:
                 chat_context.append_user_message(json.dumps(msg))
 
-        # TODO: load previous messages
-        return await super().append_message_context(
-            message=message, chat_context=chat_context
-        )
-
     async def get_rules(self):
         return [*self._rules]
 
@@ -601,7 +660,45 @@ class MailWorker(Worker):
         )
         toolkits = await self.get_thread_toolkits(thread_context=thread_context)
 
+        attachment_data = []
+
         try:
+            if self._enable_attachments:
+
+                class AttachTool(Tool):
+                    def __init__(self):
+                        super().__init__(
+                            name="attach file",
+                            description="attach a file from the room to the conversation",
+                            input_schema={
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["path"],
+                                "properties": {
+                                    "path": {
+                                        "type": "string",
+                                        "description": "a path to a file in the room's storage",
+                                    }
+                                },
+                            },
+                        )
+
+                    async def execute(self, context: ToolContext, *, path: str):
+                        try:
+                            attachment_data.append(
+                                await context.room.storage.download(path=path)
+                            )
+                        except Exception as ex:
+                            logger.error(f"Unable to download file {ex}", exc_info=ex)
+                            raise RoomException(
+                                f"Could not download a file from the room with the path {path}. Are you sure the path is correct file?"
+                            )
+
+                toolkits = [
+                    *toolkits,
+                    Toolkit(name="attachments", tools=[AttachTool()]),
+                ]
+
             reply = await self._llm_adapter.next(
                 context=chat_context,
                 room=self.room,
@@ -614,7 +711,9 @@ class MailWorker(Worker):
 
         logger.info(f"replying: {reply}")
 
-        return await self.send_reply_message(message=message, reply=reply)
+        return await self.send_reply_message(
+            message=message, reply=reply, attachments=attachment_data
+        )
 
     def render_markdown(self, body: str):
         markdown = mistune.create_markdown()
@@ -664,6 +763,7 @@ class MailWorker(Worker):
         subject: str,
         body: str,
         from_address: Optional[str] = None,
+        attachments: Optional[list[FileResponse]] = None,
     ):
         msg = self.create_email_message(
             to_address=to_address,
@@ -675,6 +775,18 @@ class MailWorker(Worker):
         reply_msg_dict = await self.save_email_message(
             content=msg.as_bytes(), role="agent"
         )
+
+        if attachments is not None:
+            reply_msg_dict["attachments"] = [*(x.name for x in attachments)]
+
+            for attachment in attachments:
+                maintype, subtype = attachment.mime_type.split("/")
+                msg.add_attachment(
+                    attachment.data,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=attachment.name,
+                )
 
         logger.info(f"starting thread with message {reply_msg_dict}")
 
@@ -784,7 +896,13 @@ class MailWorker(Worker):
         msg.add_alternative(self.render_markdown(body), subtype="html")
         return msg
 
-    async def send_reply_message(self, *, message: dict, reply: str):
+    async def send_reply_message(
+        self,
+        *,
+        message: dict,
+        reply: str,
+        attachments: Optional[list[FileResponse]] = None,
+    ):
         msg = self.create_reply_email_message(
             message=message,
             from_address=self._email_address,
@@ -795,6 +913,18 @@ class MailWorker(Worker):
         reply_msg_dict = await self.save_email_message(
             content=msg.as_bytes(), role="agent"
         )
+
+        if attachments is not None:
+            reply_msg_dict["attachments"] = [*(x.name for x in attachments)]
+
+            for attachment in attachments:
+                maintype, subtype = attachment.mime_type.split("/")
+                msg.add_attachment(
+                    attachment.data,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=attachment.name,
+                )
 
         logger.info(f"replying with message {reply_msg_dict}")
 

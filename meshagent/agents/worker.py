@@ -176,6 +176,9 @@ class Worker(SingleRoomAgent):
             )
         return [*self._toolkits, *toolkits]
 
+    def prepare_chat_context(self, *, chat_context: AgentChatContext):
+        pass
+
     async def run(self, *, room: RoomClient):
         backoff = 0
         while not self._done:
@@ -197,6 +200,8 @@ class Worker(SingleRoomAgent):
                         )
 
                         toolkits = await self.get_message_toolkits(message=message)
+
+                        self.prepare_chat_context(chat_context=chat_context)
 
                         await self.process_message(
                             chat_context=chat_context,
