@@ -14,6 +14,7 @@ license = "Apache-2.0"
 classifiers = []
 keywords = []
 dependencies = [
+  "strictyaml==1.7.3",
   "pyjwt~=2.10",
   "pytest~=8.4",
   "pytest-asyncio~=0.26",

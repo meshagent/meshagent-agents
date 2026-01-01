@@ -28,6 +28,9 @@ from opentelemetry import trace
 import shlex
 import json
 
+from pathlib import Path
+from meshagent.agents.skills import to_prompt
+
 from meshagent.agents.thread_schema import thread_schema
 
 tracer = trace.get_tracer("meshagent.chatbot")
@@ -171,6 +174,7 @@ class ChatBot(SingleRoomAgent):
         labels: Optional[list[str]] = None,
         decision_model: Optional[str] = None,
         always_reply: Optional[bool] = None,
+        skill_dirs: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -214,6 +218,8 @@ class ChatBot(SingleRoomAgent):
 
         self._thread_tasks = dict[str, asyncio.Task]()
         self._open_threads = {}
+
+        self._skill_dirs = skill_dirs
 
     async def _send_and_save_chat(
         self,
@@ -818,6 +824,16 @@ class ChatBot(SingleRoomAgent):
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
     ):
         rules = [*self._rules]
+
+        if self._skill_dirs is not None:
+            rules.append(
+                "You have access to to following skills which follow the agentskills spec:"
+            )
+            rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
+            rules.append(
+                "Use the shell tool to find out more about skills and execute them when they are required"
+            )
+
         client = participant.get_attribute("client")
 
         if self._client_rules is not None and client is not None:
@@ -827,6 +843,7 @@ class ChatBot(SingleRoomAgent):
 
         # Without this rule 5.2 / 5.1 like to start their messages with things like "I could say"
         rules.append("based on the previous transcript, take your turn and respond")
+
         return rules
 
     async def on_chat_received(

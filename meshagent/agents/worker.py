@@ -10,6 +10,9 @@ import json
 from meshagent.tools import ToolContext
 import logging
 
+from pathlib import Path
+from meshagent.agents.skills import to_prompt
+
 logger = logging.getLogger("worker")
 
 
@@ -58,6 +61,7 @@ class Worker(SingleRoomAgent):
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
         toolkit_name: Optional[str] = None,
+        skill_dirs: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -65,6 +69,8 @@ class Worker(SingleRoomAgent):
             description=description,
             requires=requires,
         )
+
+        self._skill_dirs = skill_dirs
 
         self._queue = queue
 
@@ -117,7 +123,18 @@ class Worker(SingleRoomAgent):
         await super().stop()
 
     async def get_rules(self):
-        return [*self._rules]
+        rules = [*self._rules]
+
+        if self._skill_dirs is not None:
+            rules.append(
+                "You have access to to following skills which follow the agentskills spec:"
+            )
+            rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
+            rules.append(
+                "Use the shell tool to find out more about skills and execute them when they are required"
+            )
+
+        return rules
 
     async def append_message_context(
         self, *, message: dict, chat_context: AgentChatContext

@@ -83,6 +83,7 @@ class Agent:
         description: Optional[str] = None,
         requires: Optional[list[Requirement]] = None,
         labels: Optional[list[str]] = None,
+        skills_dirs: Optional[list[str]] = None,
     ):
         self._name = name
         if title is None:
@@ -101,6 +102,7 @@ class Agent:
             labels = []
 
         self._labels = labels
+        self._skills_dirs = None
 
     def get_requirements(self) -> list[Requirement]:
         return self._requires

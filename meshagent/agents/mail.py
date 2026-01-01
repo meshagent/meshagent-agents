@@ -25,6 +25,9 @@ import mistune
 
 import re
 
+from pathlib import Path
+from meshagent.agents.skills import to_prompt
+
 logger = logging.getLogger("mail")
 
 type MessageRole = Literal["user", "agent"]
@@ -365,6 +368,7 @@ class MailWorker(Worker):
         whitelist: Optional[list[str]] = None,
         reply_all: bool = False,
         enable_attachments: bool = True,
+        skill_dirs: Optional[list[str]] = None,
     ):
         if smtp is None:
             smtp = SmtpConfiguration()
@@ -403,6 +407,8 @@ class MailWorker(Worker):
             )
         else:
             self._toolkit = None
+
+        self._skill_dirs = skill_dirs
 
     def get_requirements(self):
         return [
@@ -587,7 +593,18 @@ class MailWorker(Worker):
                 chat_context.append_user_message(json.dumps(msg))
 
     async def get_rules(self):
-        return [*self._rules]
+        rules = [*self._rules]
+
+        if self._skill_dirs is not None:
+            rules.append(
+                "You have access to to following skills which follow the agentskills spec:"
+            )
+            rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
+            rules.append(
+                "Use the shell tool to find out more about skills and execute them when they are required"
+            )
+
+        return rules
 
     async def should_reply(self, *, message: dict) -> bool:
         my_addr = self._email_address.casefold()
