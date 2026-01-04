@@ -133,7 +133,14 @@ class AgentChatContext:
         if self.system_role is not None:
             system_message["content"] = system_message["content"] + plan
         else:
-            self.instructions = (self.instructions or "") + "\n" + plan
+            instructions = self.instructions
+
+            if len(plan) > 0:
+                if instructions is not None:
+                    instructions = instructions + "\n" + plan
+                else:
+                    instructions = plan
+            return instructions
 
     def get_system_instructions(self) -> None | str:
         if self.system_role is not None:

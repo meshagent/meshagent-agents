@@ -125,7 +125,7 @@ class Worker(SingleRoomAgent):
     async def get_rules(self):
         rules = [*self._rules]
 
-        if self._skill_dirs is not None:
+        if self._skill_dirs is not None and len(self._skill_dirs) > 0:
             rules.append(
                 "You have access to to following skills which follow the agentskills spec:"
             )
