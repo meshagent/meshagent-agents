@@ -96,38 +96,6 @@ class NewEmailThreadWithAttachments(Tool):
             },
         )
 
-    async def execute(self, context: ToolContext, *, to: str, subject: str, body: str):
-        await self.agent.start_thread(
-            to_address=to, subject=subject, body=body, attachments=[]
-        )
-        return {}
-
-
-class NewEmailThread(Tool):
-    def __init__(self, *, agent: "MailWorker"):
-        self.agent = agent
-        super().__init__(
-            name="new_email_thread",
-            title="New Email Thread",
-            description="Starts a new email thread that is managed by the mailbot",
-            input_schema={
-                "type": "object",
-                "required": ["to", "body", "subject", "attachments"],
-                "additionalProperties": False,
-                "properties": {
-                    "to": {
-                        "type": "string",
-                    },
-                    "subject": {
-                        "type": "string",
-                    },
-                    "body": {
-                        "type": "string",
-                    },
-                },
-            },
-        )
-
     async def execute(
         self,
         context: ToolContext,
@@ -152,6 +120,45 @@ class NewEmailThread(Tool):
 
         await self.agent.start_thread(
             to_address=to, subject=subject, body=body, attachments=attachment_data
+        )
+        return {}
+
+
+class NewEmailThread(Tool):
+    def __init__(self, *, agent: "MailWorker"):
+        self.agent = agent
+        super().__init__(
+            name="new_email_thread",
+            title="New Email Thread",
+            description="Starts a new email thread that is managed by the mailbot",
+            input_schema={
+                "type": "object",
+                "required": ["to", "body", "subject"],
+                "additionalProperties": False,
+                "properties": {
+                    "to": {
+                        "type": "string",
+                    },
+                    "subject": {
+                        "type": "string",
+                    },
+                    "body": {
+                        "type": "string",
+                    },
+                },
+            },
+        )
+
+    async def execute(
+        self,
+        context: ToolContext,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+    ):
+        await self.agent.start_thread(
+            to_address=to, subject=subject, body=body, attachments=[]
         )
         return {}
 
