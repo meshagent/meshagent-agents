@@ -644,7 +644,9 @@ class MailWorker(Worker):
             from_header = message.get("from") or ""
             _, addr = email.utils.parseaddr(from_header)
             if addr.casefold() not in self._whitelist:
-                logger.info(f"{from_header} not found in whitelist, discarding message")
+                logger.warning(
+                    f"{from_header} not found in whitelist, discarding message"
+                )
                 return False
 
         return True
