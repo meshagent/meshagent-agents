@@ -1,4 +1,3 @@
-from enum import member
 from meshagent.agents.agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
 from meshagent.api import (
