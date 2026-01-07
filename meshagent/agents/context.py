@@ -17,6 +17,7 @@ class AgentChatContext:
         previous_messages: Optional[list[dict]] = None,
         previous_response_id: Optional[str] = None,
         instructions: Optional[str] = None,
+        metadata: Optional[dict] = None
     ):
         self.id = str(uuid.uuid4())
         if messages is None:
@@ -30,8 +31,14 @@ class AgentChatContext:
         self._previous_response_id = previous_response_id
         self._previous_messages = previous_messages
         self._deferred_messages = []
+        self._metadata = metadata or {}
 
         self.instructions = instructions
+
+
+    @property
+    def metadata(self):
+        return self._metadata
 
     @property
     def messages(self):

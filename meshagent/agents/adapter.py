@@ -115,6 +115,7 @@ class MessageStreamLLMAdapter(LLMAdapter):
                 "model": model,
                 "output_schema": output_schema,
                 "on_behalf_of_id": on_behalf_of.id if on_behalf_of else None,
+                "metadata": context.metadata,
             },
         )
 

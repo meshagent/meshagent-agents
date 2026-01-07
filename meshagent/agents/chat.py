@@ -1,3 +1,4 @@
+from enum import member
 from meshagent.agents.agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
 from meshagent.api import (
@@ -772,12 +773,17 @@ class ChatBot(SingleRoomAgent):
 
         has_more_than_one_other_user = False
 
+        thread_participants = []
+
         for member_name in self.get_thread_members(thread=context.thread):
+            thread_participants.append(member_name)
             if member_name != self._room.local_participant.get_attribute(
                 "name"
             ) and member_name != from_user.get_attribute("name"):
                 has_more_than_one_other_user = True
                 break
+
+        context.chat.metadata["thread_participants"] = thread_participants
 
         reply = await self.should_reply(
             has_more_than_one_other_user=has_more_than_one_other_user,
