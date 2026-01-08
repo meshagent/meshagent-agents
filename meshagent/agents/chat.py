@@ -609,8 +609,8 @@ class ChatBot(SingleRoomAgent):
         if evt["type"] != "meshagent.handler.done":
             raise RoomException("expected meshagent.handler.done")
 
-        error = item.get("error")
-        item = item.get("item")
+        error = evt.get("error")
+        item = evt.get("item")
 
         if error is not None:
             pass
@@ -646,8 +646,8 @@ class ChatBot(SingleRoomAgent):
         if evt["type"] != "meshagent.handler.done":
             raise RoomException("expected meshagent.handler.done")
 
-        error = item.get("error")
-        item = item.get("item")
+        error = evt.get("error")
+        item = evt.get("item")
 
         if error is not None:
             pass
