@@ -924,18 +924,18 @@ class ChatBot(SingleRoomAgent):
 
                 if current_file != chat_with_participant.get_attribute("current_file"):
                     logger.info(
-                        f"participant is now looking at {chat_with_participant.get_attribute('current_file')}"
+                        f"{chat_with_participant.get_attribute('name')} is now looking at {chat_with_participant.get_attribute('current_file')}"
                     )
                     current_file = chat_with_participant.get_attribute("current_file")
 
                 if current_file is not None:
                     chat_context.append_assistant_message(
-                        message=f"the user is currently viewing the file at the path: {current_file}"
+                        message=f"{chat_with_participant.get_attribute('name')} is currently viewing the file at the path: {current_file}"
                     )
 
                 elif current_file is not None:
                     chat_context.append_assistant_message(
-                        message="the user is not current viewing any files"
+                        message=f"{chat_with_participant.get_attribute('name')} is not current viewing any files"
                     )
 
                 if thread is None:
