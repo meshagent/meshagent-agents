@@ -19,7 +19,7 @@ The ``TaskRunner`` agent is useful when you want to invoke an agent with a well-
 The ``Worker`` is a queue-based ``SingleRoomAgent`` that processes queued messages with an LLM and optional tools. This is particularly helpful for running asynchronous jobs. With the ``Worker`` agent you can create a set of tasks that need to run in a Room and the ``Worker`` will execute all of the tasks in the queue. 
 
 ### ChatBot
-The ``ChatBot`` is a conversational agent derived from the ``SingleRoomAgent``. It wires an LLMAdapter, optoinal tools, and manages chat threads for each user. This means multiple users can be in the same room interacting with a chat agent, but each user will have private messages with the agent. Check out the [Build a Chat Agent](https://docs.meshagent.com/agents/standard/buildanddeploychatbot) example to learn how to create a simple Chat Agent without tools then add built-in MeshAgent tools and custom tools to the agent.
+The ``ChatBot`` is a conversational agent derived from the ``SingleRoomAgent``. It wires an LLMAdapter, optoinal tools, and manages chat threads for each user. This means multiple users can be in the same room interacting with a chat agent, but each user will have private messages with the agent. Check out the [Build a Chat Agent](https://docs.meshagent.com/agents/standard/chatbot) example to learn how to create a simple Chat Agent without tools then add built-in MeshAgent tools and custom tools to the agent.
 
 ---
 ### Learn more about MeshAgent on our website or check out the docs for additional examples!
