@@ -691,7 +691,7 @@ class TaskRunner(SingleRoomAgent):
                         {
                             "task_id": task_id,
                             "answer": response,
-                            "caller_context": {"chat": chat_context.to_json()},
+                            "caller_context": chat_context.to_json(),
                         }
                     ),
                 )
@@ -705,7 +705,7 @@ class TaskRunner(SingleRoomAgent):
                             {
                                 "task_id": task_id,
                                 "error": str(e),
-                                "caller_context": {"chat": chat_context.to_json()},
+                                "caller_context": chat_context.to_json(),
                             }
                         ),
                     )

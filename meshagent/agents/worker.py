@@ -62,6 +62,7 @@ class Worker(SingleRoomAgent):
         rules: Optional[list[str]] = None,
         toolkit_name: Optional[str] = None,
         skill_dirs: Optional[list[str]] = None,
+        supports_context: bool = True,
     ):
         super().__init__(
             name=name,
@@ -102,6 +103,8 @@ class Worker(SingleRoomAgent):
         else:
             self._worker_toolkit = None
 
+        self.supports_context = supports_context
+
     async def start(self, *, room: RoomClient):
         self._done = False
 
@@ -139,6 +142,14 @@ class Worker(SingleRoomAgent):
     async def append_message_context(
         self, *, message: dict, chat_context: AgentChatContext
     ):
+        if self.supports_context:
+            caller_context_json = message.get("caller_context")
+            if caller_context_json is not None:
+                caller_context = AgentChatContext.from_json(caller_context_json)
+
+                chat_context.messages.extend(caller_context.messages)
+                chat_context.previous_response_id = caller_context.previous_response_id
+
         prompt = message.get("prompt")
         if prompt is None:
             logger.warning(
