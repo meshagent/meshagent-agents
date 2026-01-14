@@ -396,7 +396,7 @@ class MailWorker(Worker):
             toolkits=toolkits,
             rules=rules
             or [
-                "You MUST reply with plain text, do not reply in JSON format or HTML format"
+                "You MUST reply with plain text or markdown, do not reply in JSON format or HTML format"
             ],
         )
         self._email_address = email_address
