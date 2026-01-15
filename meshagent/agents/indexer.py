@@ -425,9 +425,6 @@ class SiteIndexer(TaskRunner):
         if chunker is None:
             chunker = ChonkieChunker()
 
-        if embedder is None:
-            embedder = open_ai_embedding_3_large()
-
         self.chunker = chunker
         self.embedder = embedder
 
@@ -457,6 +454,11 @@ class SiteIndexer(TaskRunner):
             },
             labels=labels,
         )
+    async def start(self, *, room):
+        if self.embedder is None:
+            self.embedder = open_ai_embedding_3_large(openai=get_client(room=room))
+
+        await super().start(room=room)
 
     async def ask(self, *, context, arguments):
         queue = arguments["queue"]
