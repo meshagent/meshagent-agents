@@ -169,15 +169,21 @@ class RagTool(Tool):
 
 
 def open_ai_embedding_3_small(openai: Optional[AsyncOpenAI] = None):
-    return OpenAIEmbedder(model="text-embedding-3-small", max_length=8191, size=1536, openai=openai)
+    return OpenAIEmbedder(
+        model="text-embedding-3-small", max_length=8191, size=1536, openai=openai
+    )
 
 
 def open_ai_embedding_3_large(openai: Optional[AsyncOpenAI] = None):
-    return OpenAIEmbedder(model="text-embedding-3-large", max_length=8191, size=3072, openai=openai)
+    return OpenAIEmbedder(
+        model="text-embedding-3-large", max_length=8191, size=3072, openai=openai
+    )
 
 
 def open_ai_embedding_ada_2(openai: Optional[AsyncOpenAI] = None):
-    return OpenAIEmbedder(model="text-embedding-ada-002", max_length=8191, size=1536, openai=openai)
+    return OpenAIEmbedder(
+        model="text-embedding-ada-002", max_length=8191, size=1536, openai=openai
+    )
 
 
 class RagToolkit(Toolkit):
@@ -454,6 +460,7 @@ class SiteIndexer(TaskRunner):
             },
             labels=labels,
         )
+
     async def start(self, *, room):
         if self.embedder is None:
             self.embedder = open_ai_embedding_3_large(openai=get_client(room=room))
