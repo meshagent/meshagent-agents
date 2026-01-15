@@ -1,5 +1,6 @@
 from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
 from meshagent.tools import Toolkit, Tool, ToolContext
+from meshagent.openai.proxy import get_client
 from meshagent.api.room_server_client import (
     TextDataType,
     VectorDataType,
@@ -167,16 +168,22 @@ class RagTool(Tool):
         return {"results": results}
 
 
-def open_ai_embedding_3_small():
-    return OpenAIEmbedder(model="text-embedding-3-small", max_length=8191, size=1536)
+def open_ai_embedding_3_small(openai: Optional[AsyncOpenAI] = None):
+    return OpenAIEmbedder(
+        model="text-embedding-3-small", max_length=8191, size=1536, openai=openai
+    )
 
 
-def open_ai_embedding_3_large():
-    return OpenAIEmbedder(model="text-embedding-3-large", max_length=8191, size=3072)
+def open_ai_embedding_3_large(openai: Optional[AsyncOpenAI] = None):
+    return OpenAIEmbedder(
+        model="text-embedding-3-large", max_length=8191, size=3072, openai=openai
+    )
 
 
-def open_ai_embedding_ada_2():
-    return OpenAIEmbedder(model="text-embedding-ada-002", max_length=8191, size=1536)
+def open_ai_embedding_ada_2(openai: Optional[AsyncOpenAI] = None):
+    return OpenAIEmbedder(
+        model="text-embedding-ada-002", max_length=8191, size=1536, openai=openai
+    )
 
 
 class RagToolkit(Toolkit):
@@ -223,9 +230,6 @@ class StorageIndexer(SingleRoomAgent):
 
         if chunker is None:
             chunker = ChonkieChunker()
-
-        if embedder is None:
-            embedder = open_ai_embedding_3_large()
 
         self.chunker = chunker
         self.embedder = embedder
@@ -278,6 +282,9 @@ class StorageIndexer(SingleRoomAgent):
             await self.room.database.optimize(table=self.table)
 
     async def start(self, *, room):
+        if self.embedder is None:
+            self.embedder = open_ai_embedding_3_large(openai=get_client(room=room))
+
         await super().start(room=room)
 
         room.storage.on("file.updated", self._on_file_updated)
@@ -424,9 +431,6 @@ class SiteIndexer(TaskRunner):
         if chunker is None:
             chunker = ChonkieChunker()
 
-        if embedder is None:
-            embedder = open_ai_embedding_3_large()
-
         self.chunker = chunker
         self.embedder = embedder
 
@@ -456,6 +460,12 @@ class SiteIndexer(TaskRunner):
             },
             labels=labels,
         )
+
+    async def start(self, *, room):
+        if self.embedder is None:
+            self.embedder = open_ai_embedding_3_large(openai=get_client(room=room))
+
+        await super().start(room=room)
 
     async def ask(self, *, context, arguments):
         queue = arguments["queue"]
