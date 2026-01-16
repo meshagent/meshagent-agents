@@ -78,14 +78,18 @@ class Agent:
     def __init__(
         self,
         *,
-        name: str,
+        name: Optional[str] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
         requires: Optional[list[Requirement]] = None,
         labels: Optional[list[str]] = None,
         skills_dirs: Optional[list[str]] = None,
     ):
-        self._name = name
+        if name is not None:
+            logger.warning(
+                f"agent name property is deprecated and will be removed in a future version {name}"
+            )
+
         if title is None:
             title = name
         self._title = title
@@ -106,10 +110,6 @@ class Agent:
 
     def get_requirements(self) -> list[Requirement]:
         return self._requires
-
-    @property
-    def name(self):
-        return self._name
 
     @property
     def description(self):
@@ -208,7 +208,7 @@ class SingleRoomAgent(Agent):
     def __init__(
         self,
         *,
-        name,
+        name=None,
         title=None,
         description=None,
         requires=None,
@@ -238,6 +238,10 @@ class SingleRoomAgent(Agent):
     @property
     def room(self):
         return self._room
+
+    @property
+    def name(self):
+        return self._room.local_participant.get_attribute("name")
 
     async def install_requirements(self, participant_id: Optional[str] = None):
         schemas_by_name = dict[str, StorageEntry]()
@@ -460,7 +464,7 @@ class TaskRunner(SingleRoomAgent):
     def __init__(
         self,
         *,
-        name,
+        name=None,
         title=None,
         description=None,
         requires=None,
@@ -533,7 +537,6 @@ class TaskRunner(SingleRoomAgent):
 
     def to_json(self) -> dict:
         return {
-            "name": self.name,
             "title": self.title,
             "description": self.description,
             "input_schema": self.input_schema,
@@ -549,8 +552,8 @@ class TaskRunner(SingleRoomAgent):
             await self._room.send_request(
                 "agent.register_agent",
                 {
-                    "name": self.name,
-                    "title": self.title,
+                    "title": self.title
+                    or self.room.local_participant.get_attribute("name"),
                     "description": self.description,
                     "input_schema": self.input_schema,
                     "output_schema": self.output_schema,

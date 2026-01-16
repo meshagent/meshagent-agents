@@ -360,7 +360,7 @@ class MailWorker(Worker):
         self,
         *,
         queue: str = "email",
-        name,
+        name=None,
         title=None,
         description=None,
         requires=None,
