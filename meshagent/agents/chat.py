@@ -14,6 +14,7 @@ from meshagent.tools import Toolkit, ToolContext, make_toolkits, ToolkitBuilder
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
+    OpenAIResponsesAdapter,
 )
 import asyncio
 from typing import Optional, Callable
@@ -312,17 +313,18 @@ class ChatBot(SingleRoomAgent):
             )
         )
 
-        toolkits.append(
-            Toolkit(
-                name="reasoning",
-                tools=[
-                    ChatBotReasoningTool(
-                        room=self._room,
-                        thread_context=thread_context,
-                    )
-                ],
+        if isinstance(self._llm_adapter, OpenAIResponsesAdapter):
+            toolkits.append(
+                Toolkit(
+                    name="reasoning",
+                    tools=[
+                        ChatBotReasoningTool(
+                            room=self._room,
+                            thread_context=thread_context,
+                        )
+                    ],
+                )
             )
-        )
 
         return [*self._toolkits, *toolkits]
 
