@@ -249,7 +249,6 @@ class ChatBot(SingleRoomAgent):
                 self.room.local_participant.get_attribute("name"),
             )
             span.set_attributes({"id": id, "text": text})
-
             await self.room.messaging.send_message(
                 to=to, type="chat", message={"path": path, "text": text}
             )
@@ -398,7 +397,7 @@ class ChatBot(SingleRoomAgent):
         self,
         *,
         thread_context: ChatThreadContext,
-        llm_messages: asyncio.Queue,
+        llm_messages: asyncio.Queue[tuple[dict, RemoteParticipant]],
         thread_attributes: dict,
     ):
         thread = thread_context.thread
@@ -445,7 +444,7 @@ class ChatBot(SingleRoomAgent):
         update_thread_task = asyncio.create_task(update_thread())
         try:
             while True:
-                evt = await llm_messages.get()
+                evt, participant = await llm_messages.get()
 
                 if evt["type"] == "response.content_part.added":
                     partial = ""
@@ -473,7 +472,6 @@ class ChatBot(SingleRoomAgent):
 
                 elif evt["type"] == "response.output_text.done":
                     content_element = None
-
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
                         span.set_attribute(
                             "from_participant_name",
@@ -483,15 +481,14 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes(thread_attributes)
                         span.set_attributes({"text": evt["text"]})
 
-                        for participant in get_online_participants(
+                        online = get_online_participants(
                             room=self._room, thread=thread_context.thread
-                        ):
-                            if participant.id != self._room.local_participant.id:
-                                logger.info(
-                                    f"replying to {participant.get_attribute('name')}"
-                                )
+                        )
+                        for p in online:
+                            if p.id != self._room.local_participant.id:
+                                logger.info(f"replying to {p.get_attribute('name')}")
                                 self._room.messaging.send_message_nowait(
-                                    to=participant,
+                                    to=p,
                                     type="chat",
                                     message={
                                         "type": "chat",
@@ -499,6 +496,21 @@ class ChatBot(SingleRoomAgent):
                                         "text": evt["text"],
                                     },
                                 )
+
+                        if participant not in online:
+                            logger.info(
+                                f"replying to {participant.get_attribute('name')}"
+                            )
+                            self._room.messaging.send_message_nowait(
+                                to=participant,
+                                type="chat",
+                                message={
+                                    "type": "chat",
+                                    "path": thread_context.path,
+                                    "text": evt["text"],
+                                },
+                            )
+
                 elif evt["type"] == "response.image_generation_call.partial_image":
                     await self.handle_image_generation_partial(
                         thread_context=thread_context,
@@ -508,7 +520,6 @@ class ChatBot(SingleRoomAgent):
 
                 elif evt["type"] == "meshagent.handler.added":
                     item = evt["item"]
-                    print(f"{item}", flush=True)
                     if item["type"] == "shell_call":
                         await self.handle_shell_call_output(
                             thread_context=thread_context,
@@ -883,13 +894,8 @@ class ChatBot(SingleRoomAgent):
 
         thread = None
 
-        llm_messages = asyncio.Queue[dict]()
+        llm_messages = asyncio.Queue[tuple[dict, RemoteParticipant]]()
         llm_task = None
-
-        def handle_event(evt):
-            if isinstance(evt, BaseModel):
-                evt = evt.model_dump(mode="json")
-            llm_messages.put_nowait(evt)
 
         try:
             received = None
@@ -945,6 +951,11 @@ class ChatBot(SingleRoomAgent):
                         span.set_attributes(thread_attributes)
 
                         thread = await self.open_thread(path=path)
+
+                        def handle_event(evt):
+                            if isinstance(evt, BaseModel):
+                                evt = evt.model_dump(mode="json")
+                            llm_messages.put_nowait((evt, chat_with_participant))
 
                         thread_context = ChatThreadContext(
                             path=path,
