@@ -10,17 +10,24 @@ from meshagent.api import (
     MeshDocument,
     RequiredSchema,
 )
-from meshagent.tools import Toolkit, ToolContext, make_toolkits, ToolkitBuilder
+from meshagent.tools import (
+    Toolkit,
+    ToolContext,
+    make_toolkits,
+    ToolkitBuilder,
+    ToolkitConfig,
+)
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
     OpenAIResponsesAdapter,
 )
-import asyncio
-from typing import Optional, Callable
-import logging
+
 import uuid
-import datetime
+from datetime import datetime, timezone
+import asyncio
+from typing import Optional, Callable, AsyncIterator
+import logging
 import base64
 from asyncio import CancelledError
 from meshagent.api import RoomException
@@ -157,6 +164,122 @@ class ChatThreadContext:
             self._event_handler(event)
 
 
+class ChatBotClient:
+    def __init__(
+        self,
+        *,
+        room: RoomClient,
+        participant_name: str,
+        thread_path: str,
+    ):
+        self.room = room
+        self.participant_name = participant_name
+        self.thread_path = thread_path
+        self._messages: asyncio.Queue[str] = asyncio.Queue()
+        self._doc = None
+        self._participant: Optional[RemoteParticipant] = None
+
+    async def start(self) -> None:
+        self._doc = await self.room.sync.open(path=self.thread_path)
+        self.room.messaging.on("message", self._on_message)
+        await asyncio.sleep(1)
+        await self._wait_for_participant()
+        if self._participant is not None:
+            await self.room.messaging.send_message(
+                to=self._participant,
+                type="opened",
+                message={"path": self.thread_path},
+                attachment=None,
+            )
+
+    async def stop(self) -> None:
+        await self.room.sync.close(path=self.thread_path)
+        self.room.messaging.off("message", self._on_message)
+
+    async def __aenter__(self) -> "ChatBotClient":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, exc_tb) -> None:
+        await self.stop()
+
+    def _on_message(self, message: RoomMessage) -> None:
+        received_type = message.type
+        received_message = message.message
+
+        if received_type == "chat" and received_message["path"] == self.thread_path:
+            self._messages.put_nowait(received_message["text"])
+
+    async def _wait_for_participant(self) -> None:
+        try:
+            async with asyncio.timeout(30):
+                while self._participant is None:
+                    for participant in self.room.messaging.get_participants():
+                        if participant.get_attribute("name") == self.participant_name:
+                            self._participant = participant
+                            break
+
+                    await asyncio.sleep(1)
+        except asyncio.TimeoutError as exc:
+            raise RoomException(
+                f"timed out waiting for {self.participant_name}"
+            ) from exc
+
+    async def clear(self) -> None:
+        if self._participant is None:
+            return
+
+        await self.room.messaging.send_message(
+            to=self._participant,
+            type="clear",
+            message={"path": self.thread_path},
+            attachment=None,
+        )
+
+    async def send(
+        self, *, text: str, tools: Optional[list[ToolkitConfig]] = None
+    ) -> None:
+        if self._participant is None or self._doc is None:
+            raise RoomException("chat client not started")
+
+        messages = self._doc.root.get_elements_by_tag_name("messages")[0]
+        messages.append_child(
+            tag_name="message",
+            attributes={
+                "id": str(uuid.uuid4()),
+                "text": text,
+                "created_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "author_name": self.room.local_participant.get_attribute("name"),
+            },
+        )
+
+        tool_payload = [tool.model_dump(mode="json") for tool in tools or []]
+        await self.room.messaging.send_message(
+            to=self._participant,
+            type="chat",
+            message={
+                "text": text,
+                "path": self.thread_path,
+                "tools": tool_payload,
+            },
+            attachment=None,
+        )
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self
+
+    async def __anext__(self) -> str:
+        return await self._messages.get()
+
+    async def receive(self) -> str:
+        return await self._messages.get()
+
+    async def receive_nowait(self) -> str:
+        return await self._messages.get_nowait()
+
+
 class ChatBot(SingleRoomAgent):
     def __init__(
         self,
@@ -258,7 +381,7 @@ class ChatBot(SingleRoomAgent):
                 attributes={
                     "id": id,
                     "text": text,
-                    "created_at": datetime.datetime.now(datetime.timezone.utc)
+                    "created_at": datetime.now(timezone.utc)
                     .isoformat()
                     .replace("+00:00", "Z"),
                     "author_name": self.room.local_participant.get_attribute("name"),
@@ -453,7 +576,7 @@ class ChatBot(SingleRoomAgent):
                         tag_name="message",
                         attributes={
                             "text": "",
-                            "created_at": datetime.datetime.now(datetime.timezone.utc)
+                            "created_at": datetime.now(timezone.utc)
                             .isoformat()
                             .replace("+00:00", "Z"),
                             "author_name": self.room.local_participant.get_attribute(
@@ -586,7 +709,7 @@ class ChatBot(SingleRoomAgent):
             attributes={
                 "id": item_id,
                 "text": "",
-                "created_at": datetime.datetime.now(datetime.timezone.utc)
+                "created_at": datetime.now(timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "author_name": self.room.local_participant.get_attribute("name"),
@@ -1023,9 +1146,7 @@ class ChatBot(SingleRoomAgent):
                         )
 
                     iso_timestamp = (
-                        datetime.datetime.now(datetime.timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z")
+                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                     )
 
                     chat_context.append_user_message(
