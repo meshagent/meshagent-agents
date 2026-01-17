@@ -359,7 +359,7 @@ class MailWorker(Worker):
     def __init__(
         self,
         *,
-        queue: str = "email",
+        queue: Optional[str] = None,
         name=None,
         title=None,
         description=None,
@@ -379,6 +379,9 @@ class MailWorker(Worker):
     ):
         if smtp is None:
             smtp = SmtpConfiguration()
+
+        if queue is None:
+            queue = email_address
 
         self._domain = domain
         self._smtp = smtp
