@@ -67,7 +67,7 @@ class SmtpConfiguration:
 
 
 class NewEmailThreadWithAttachments(Tool):
-    def __init__(self, *, agent: "MailWorker"):
+    def __init__(self, *, agent: "MailBot"):
         self.agent = agent
         super().__init__(
             name="new_email_thread",
@@ -125,7 +125,7 @@ class NewEmailThreadWithAttachments(Tool):
 
 
 class NewEmailThread(Tool):
-    def __init__(self, *, agent: "MailWorker"):
+    def __init__(self, *, agent: "MailBot"):
         self.agent = agent
         super().__init__(
             name="new_email_thread",
@@ -355,7 +355,7 @@ def _clean_header_list(values) -> list[str]:
     return [v for v in (str(x).strip() for x in values) if v]
 
 
-class MailWorker(Worker):
+class MailBot(Worker):
     def __init__(
         self,
         *,
