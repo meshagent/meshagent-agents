@@ -740,7 +740,7 @@ class ChatBot(SingleRoomAgent):
             attributes={"command": shlex.join(command), "pwd": working_directory},
         )
 
-        evt = await llm_messages.get()
+        evt, participant = await llm_messages.get()
 
         if evt["type"] != "meshagent.handler.done":
             raise RoomException("expected meshagent.handler.done")
@@ -777,7 +777,7 @@ class ChatBot(SingleRoomAgent):
             )
             exec_elements.append(exec_element)
 
-        evt = await llm_messages.get()
+        evt, participant = await llm_messages.get()
 
         if evt["type"] != "meshagent.handler.done":
             raise RoomException("expected meshagent.handler.done")
