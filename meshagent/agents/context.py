@@ -28,7 +28,7 @@ class AgentChatContext:
         if previous_messages is None:
             previous_messages = list[dict]()
 
-        self._previous_response_id = previous_response_id
+        self.previous_response_id = previous_response_id
         self._previous_messages = previous_messages
         self._deferred_messages = []
         self._metadata = metadata or {}
@@ -55,12 +55,8 @@ class AgentChatContext:
     def previous_messages(self):
         return self._previous_messages
 
-    @property
-    def previous_response_id(self):
-        return self._previous_response_id
-
     def track_response(self, id: str):
-        self._previous_response_id = id
+        self.previous_response_id = id
         self._previous_messages.extend(self.messages)
         self.messages.clear()
         self.messages.extend(self._deferred_messages)

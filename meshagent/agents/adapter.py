@@ -29,11 +29,38 @@ class ToolResponseAdapter(ABC):
 
 
 class LLMAdapter(Generic[TEvent]):
+    outputTokenMax: float = float("inf")
+
     @abstractmethod
     def default_model(self) -> str: ...
 
     def create_chat_context(self) -> AgentChatContext:
         return AgentChatContext()
+
+    def context_window_size(self, model: str) -> float:
+        return float("inf")
+
+    def needs_compaction(self, *, context: AgentChatContext) -> bool:
+        return False
+
+    async def compact(
+        self,
+        *,
+        context: AgentChatContext,
+        room: RoomClient,
+        model: Optional[str] = None,
+    ) -> None:
+        return None
+
+    async def truncate(
+        self,
+        *,
+        context: AgentChatContext,
+        model: str,
+        room: Optional[RoomClient] = None,
+        toolkits: Optional[list] = None,
+    ) -> None:
+        return None
 
     async def check_for_termination(
         self, *, context: AgentChatContext, room: RoomClient
