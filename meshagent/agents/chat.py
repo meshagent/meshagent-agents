@@ -171,6 +171,7 @@ class ChatBotClient:
         room: RoomClient,
         participant_name: str,
         thread_path: str,
+        timeout: float = 30,
     ):
         self.room = room
         self.participant_name = participant_name
@@ -178,6 +179,7 @@ class ChatBotClient:
         self._messages: asyncio.Queue[str] = asyncio.Queue()
         self._doc = None
         self._participant: Optional[RemoteParticipant] = None
+        self._timeout = timeout
 
     async def start(self) -> None:
         self._doc = await self.room.sync.open(path=self.thread_path)
@@ -212,7 +214,7 @@ class ChatBotClient:
 
     async def _wait_for_participant(self) -> None:
         try:
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(self._timeout):
                 while self._participant is None:
                     for participant in self.room.messaging.get_participants():
                         if participant.get_attribute("name") == self.participant_name:
