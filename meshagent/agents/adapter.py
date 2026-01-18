@@ -52,15 +52,15 @@ class LLMAdapter(Generic[TEvent]):
     ) -> None:
         return None
 
-    async def truncate(
+    async def get_input_tokens(
         self,
         *,
         context: AgentChatContext,
         model: str,
         room: Optional[RoomClient] = None,
         toolkits: Optional[list] = None,
-    ) -> None:
-        return None
+    ) -> int:
+        return 0
 
     async def check_for_termination(
         self, *, context: AgentChatContext, room: RoomClient
