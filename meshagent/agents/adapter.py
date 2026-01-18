@@ -59,6 +59,7 @@ class LLMAdapter(Generic[TEvent]):
         model: str,
         room: Optional[RoomClient] = None,
         toolkits: Optional[list] = None,
+        output_schema: Optional[dict] = None,
     ) -> int:
         return 0
 
