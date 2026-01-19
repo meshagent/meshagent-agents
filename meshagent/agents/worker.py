@@ -52,7 +52,7 @@ class Worker(SingleRoomAgent):
         self,
         *,
         queue: str,
-        name,
+        name=None,
         title=None,
         description=None,
         requires=None,

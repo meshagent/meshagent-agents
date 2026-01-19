@@ -209,7 +209,7 @@ class StorageIndexer(SingleRoomAgent):
     def __init__(
         self,
         *,
-        name,
+        name=None,
         title=None,
         description=None,
         requires=None,

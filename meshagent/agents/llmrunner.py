@@ -20,7 +20,6 @@ class LLMTaskRunner(TaskRunner):
     def __init__(
         self,
         *,
-        name: str,
         llm_adapter: LLMAdapter,
         title: Optional[str] = None,
         description: Optional[str] = None,
@@ -90,7 +89,6 @@ class LLMTaskRunner(TaskRunner):
         static_toolkits = list(toolkits or [])
 
         super().__init__(
-            name=name,
             title=title,
             description=description,
             input_schema=input_schema,
@@ -208,7 +206,6 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
     def __init__(
         self,
         *,
-        name: str,
         llm_adapter: LLMAdapter,
         supports_tools: bool = True,
         title: Optional[str] = None,
@@ -223,7 +220,6 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             additional_properties={"output_schema": {"type": "object"}},
         )
         super().__init__(
-            name=name,
             llm_adapter=llm_adapter,
             supports_tools=supports_tools,
             title=title,
