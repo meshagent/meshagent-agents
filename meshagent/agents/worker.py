@@ -139,6 +139,14 @@ class Worker(SingleRoomAgent):
 
         return rules
 
+    def get_prompt_for_message(self, *, message: dict) -> str:
+        prompt = message.get("prompt")
+        if prompt is None:
+            logger.warning(
+                "prompt property not found on worker message, inserting whole message into context"
+            )
+            prompt = json.dumps(message)
+
     async def append_message_context(
         self, *, message: dict, chat_context: AgentChatContext
     ):
@@ -150,12 +158,7 @@ class Worker(SingleRoomAgent):
                 chat_context.messages.extend(caller_context.messages)
                 chat_context.previous_response_id = caller_context.previous_response_id
 
-        prompt = message.get("prompt")
-        if prompt is None:
-            logger.warning(
-                "prompt property not found on worker message, inserting whole message into context"
-            )
-            prompt = json.dumps(message)
+        prompt = self.get_prompt_for_message(message=message)
 
         chat_context.append_user_message(message=prompt)
 
