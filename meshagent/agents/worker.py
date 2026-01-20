@@ -147,6 +147,8 @@ class Worker(SingleRoomAgent):
             )
             prompt = json.dumps(message)
 
+        return prompt
+
     async def append_message_context(
         self, *, message: dict, chat_context: AgentChatContext
     ):
