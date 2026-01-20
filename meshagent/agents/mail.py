@@ -630,8 +630,8 @@ class MailBot(Worker):
             (my_addr in to_addrs) or (my_addr in cc_addrs) or (delivered_to == my_addr)
         )
         if not addressed:
-            logger.info(
-                f"message not addressed to {self._email_address}; "
+            logger.warn(
+                f"message not addressed to {self._email_address}, message will be ignored by the mailbot; "
                 f"to={message.get('to')!r} cc={message.get('cc')!r} delivered_to={delivered_to!r}"
             )
             return False
