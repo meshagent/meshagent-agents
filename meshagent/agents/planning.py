@@ -1,4 +1,4 @@
-from meshagent.agents.agent import AgentCallContext, AgentException
+from meshagent.agents.task_runner import TaskContext, AgentException
 from meshagent.api import Requirement
 from meshagent.api.messaging import TextResponse
 from meshagent.tools import Toolkit, Tool, ToolContext
@@ -31,7 +31,7 @@ goto_next_step_message = """
 """
 
 
-def is_reasoning_done(*, context: AgentCallContext, response: dict) -> bool:
+def is_reasoning_done(*, context: TaskContext, response: dict) -> bool:
     parsed = response["response"]["data"][0]
     if "abort" in parsed:
         abort = parsed["abort"]
@@ -371,12 +371,12 @@ class PlanningResponder(TaskRunner):
         chat.append_rules(rules=all_rules)
         return chat
 
-    async def ask(self, context: AgentCallContext, arguments: dict):
+    async def ask(self, context: TaskContext, arguments: dict):
         class ResponseTool(Tool):
             def __init__(
                 self,
                 output_schema: dict,
-                context: AgentCallContext,
+                context: TaskContext,
                 parent: PlanningResponder,
             ):
                 super().__init__(
@@ -526,14 +526,14 @@ class DynamicPlanningResponder(TaskRunner):
         chat.append_rules(rules=all_rules)
         return chat
 
-    async def ask(self, context: AgentCallContext, arguments: dict):
+    async def ask(self, context: TaskContext, arguments: dict):
         dynamic_schema = arguments["output_schema"]
 
         class ResponseTool(Tool):
             def __init__(
                 self,
                 output_schema: dict,
-                context: AgentCallContext,
+                context: TaskContext,
                 parent: PlanningResponder,
             ):
                 output_schema = deepcopy(output_schema)

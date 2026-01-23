@@ -5,7 +5,7 @@ from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
 from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents import TaskRunner
-from meshagent.agents.agent import AgentCallContext
+from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 import tarfile
 import io
@@ -113,10 +113,10 @@ class LLMTaskRunner(TaskRunner):
     def get_toolkit_builders(self) -> list[ToolkitBuilder]:
         return []
 
-    async def get_context_toolkits(self, *, context: AgentCallContext) -> list[Toolkit]:
+    async def get_context_toolkits(self, *, context: TaskContext) -> list[Toolkit]:
         return []
 
-    async def get_rules(self, *, context: AgentCallContext):
+    async def get_rules(self, *, context: TaskContext):
         rules = [*self._extra_rules]
 
         participant = context.caller
@@ -132,7 +132,7 @@ class LLMTaskRunner(TaskRunner):
     async def ask(
         self,
         *,
-        context: AgentCallContext,
+        context: TaskContext,
         arguments: dict,
         attachment: Optional[bytes] = None,
     ):
@@ -233,7 +233,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             annotations=annotations,
         )
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict):
+    async def ask(self, *, context: TaskContext, arguments: dict):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")

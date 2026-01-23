@@ -1,11 +1,12 @@
 from .agent import (
     Agent,
-    AgentCallContext,
     AgentChatContext,
     RequiredToolkit,
-    TaskRunner,
     SingleRoomAgent,
 )
+
+from .context import TaskContext
+from .task_runner import TaskRunner
 from .development import connect_development_agent
 from .listener import Listener, ListenerContext
 from .adapter import ToolResponseAdapter, LLMAdapter
@@ -15,7 +16,7 @@ from .version import __version__
 
 __all__ = [
     Agent,
-    AgentCallContext,
+    TaskContext,
     AgentChatContext,
     RequiredToolkit,
     TaskRunner,

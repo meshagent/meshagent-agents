@@ -5,14 +5,14 @@ from typing import Optional
 from meshagent.agents import TaskRunner
 from meshagent.api.schema_document import Element, Text
 from meshagent.api.room_server_client import RoomClient, MeshDocument
-from meshagent.agents.agent import AgentCallContext
+from meshagent.agents.task_runner import TaskContext
 
 logger = logging.getLogger(__name__)
 
 
 class ListenerContext:
     def __init__(
-        self, document: MeshDocument, room: RoomClient, call_context: AgentCallContext
+        self, document: MeshDocument, room: RoomClient, call_context: TaskContext
     ):
         self.document = document
         self.call_context = call_context
@@ -69,7 +69,7 @@ class Listener(TaskRunner):
     ) -> bool:
         return False
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict):
+    async def ask(self, *, context: TaskContext, arguments: dict):
         output_path = arguments["path"]
         room = context.room
         logger.info("Visitor connecting to %s", output_path)

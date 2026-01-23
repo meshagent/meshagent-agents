@@ -1,6 +1,6 @@
 from .adapter import LLMAdapter, Toolkit, ToolResponseAdapter
 from meshagent.api.schema_util import prompt_schema
-from .agent import AgentCallContext
+from .agent import TaskContext
 from typing import Optional
 from meshagent.agents import TaskRunner
 from meshagent.api import RequiredToolkit
@@ -43,7 +43,7 @@ class PromptAgent(TaskRunner):
         chat.append_rules(self.rules)
         return chat
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict):
+    async def ask(self, *, context: TaskContext, arguments: dict):
         context.chat.append_user_message(arguments["prompt"])
 
         toolkits = [*self.toolkits, *context.toolkits]

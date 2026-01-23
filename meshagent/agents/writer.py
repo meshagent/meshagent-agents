@@ -1,4 +1,4 @@
-from meshagent.agents.agent import AgentCallContext
+from meshagent.agents.task_runner import TaskContext
 from meshagent.api.room_server_client import RoomClient
 from meshagent.api.schema_document import Document
 from meshagent.api import Requirement
@@ -17,7 +17,7 @@ class WriterContext:
         self,
         room: RoomClient,
         document: Document,
-        call_context: AgentCallContext,
+        call_context: TaskContext,
         path: str,
     ):
         self._room = room
@@ -38,7 +38,7 @@ class WriterContext:
         return self._document
 
     @property
-    def call_context(self) -> AgentCallContext:
+    def call_context(self) -> TaskContext:
         return self._call_context
 
 
@@ -76,7 +76,7 @@ class Writer(TaskRunner):
     async def write(self, writer_context: WriterContext, arguments: dict) -> dict:
         pass
 
-    async def ask(self, *, context: AgentCallContext, arguments: dict):
+    async def ask(self, *, context: TaskContext, arguments: dict):
         path = arguments["path"]
 
         client = context.room

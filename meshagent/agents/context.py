@@ -210,7 +210,7 @@ class AgentChatContext:
         )
 
 
-class AgentCallContext:
+class TaskContext:
     def __init__(
         self,
         *,

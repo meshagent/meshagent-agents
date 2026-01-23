@@ -16,7 +16,7 @@ from meshagent.agents.skills import to_prompt
 logger = logging.getLogger("worker")
 
 
-class SubmitTask(Tool):
+class SubmitWork(Tool):
     def __init__(self, *, agent: "Worker", queue: str):
         self.queue = queue
         self.agent = agent
@@ -97,7 +97,7 @@ class Worker(SingleRoomAgent):
             self._worker_toolkit = RemoteToolkit(
                 name=toolkit_name,
                 tools=[
-                    SubmitTask(queue=self._queue, agent=self),
+                    SubmitWork(queue=self._queue, agent=self),
                 ],
             )
         else:
