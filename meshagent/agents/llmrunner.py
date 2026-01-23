@@ -30,16 +30,27 @@ class LLMTaskRunner(TaskRunner):
         input_prompt: bool = True,
         input_schema: Optional[dict] = None,
         output_schema: Optional[dict] = None,
+        allow_model_selection: True,
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
         annotations: Optional[list[str]] = None,
         client_rules: Optional[dict[str, list[str]]] = None,
     ):
+        self.allow_model_selection = allow_model_selection
+
         if input_schema is None:
             if input_prompt:
                 input_schema = prompt_schema(
                     description="use a prompt to generate content"
                 )
+
+                if allow_model_selection:
+                    input_schema = merge(
+                        schema=input_schema,
+                        additional_properties={
+                            "model": {"type": ["string", "null"]},
+                        },
+                    )
 
                 toolkit_builders = self.get_toolkit_builders()
                 if len(toolkit_builders) > 0:
@@ -67,7 +78,6 @@ class LLMTaskRunner(TaskRunner):
                                     "anyOf": toolkit_config_schemas,
                                 },
                             },
-                            "model": {"type": ["string", "null"]},
                         },
                     )
 
@@ -141,7 +151,10 @@ class LLMTaskRunner(TaskRunner):
             raise ValueError("`prompt` is required")
 
         message_tools = arguments.get("tools")
-        model = arguments.get("model", self._llm_adapter.default_model())
+        if self.allow_model_selection:
+            model = arguments.get("model", self._llm_adapter.default_model())
+        else:
+            model = self._llm_adapter.default_model()
 
         context.chat.append_rules(await self.get_rules(context=context))
 
@@ -233,7 +246,13 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             annotations=annotations,
         )
 
-    async def ask(self, *, context: TaskContext, arguments: dict, attachment: Optional[bytes] = None):
+    async def ask(
+        self,
+        *,
+        context: TaskContext,
+        arguments: dict,
+        attachment: Optional[bytes] = None,
+    ):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
