@@ -30,7 +30,7 @@ class LLMTaskRunner(TaskRunner):
         input_prompt: bool = True,
         input_schema: Optional[dict] = None,
         output_schema: Optional[dict] = None,
-        allow_model_selection: True,
+        allow_model_selection: bool = True,
         rules: Optional[list[str]] = None,
         labels: Optional[list[str]] = None,
         annotations: Optional[list[str]] = None,
