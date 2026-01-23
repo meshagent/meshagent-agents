@@ -233,7 +233,7 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
             annotations=annotations,
         )
 
-    async def ask(self, *, context: TaskContext, arguments: dict):
+    async def ask(self, *, context: TaskContext, arguments: dict, attachment: Optional[bytes] = None):
         prompt = arguments.get("prompt")
         if prompt is None:
             raise ValueError("`prompt` is required")
