@@ -1,24 +1,18 @@
 from typing import Optional
-from meshagent.api.messaging import unpack_message, pack_message
 from meshagent.tools import RemoteToolkit
-from meshagent.agents.agent import RoomTool
 
-from meshagent.api import (
-    Participant,
-    RemoteParticipant,
-)
-from meshagent.api.protocol import Protocol
 from meshagent.tools import (
     Toolkit,
     Tool,
     ToolContext,
 )
+from meshagent.api.messaging import ensure_response
 from meshagent.api.room_server_client import RoomClient
 from jsonschema import validate
 from .context import TaskContext
 from meshagent.api.schema_util import no_arguments_schema
 import logging
-import asyncio
+from meshagent.tools import Response
 
 from meshagent.agents.agent import SingleRoomAgent
 
@@ -37,7 +31,7 @@ class RunTaskTool(Tool):
 
     async def execute(
         self, context: ToolContext, *, attachment: Optional[bytes] = None, **kwargs
-    ):
+    ) -> Response | dict | str | None:
         chat_context = await self.agent.init_chat_context()
         call_context = TaskContext(
             chat=chat_context,
@@ -111,7 +105,7 @@ class TaskRunner(SingleRoomAgent):
         context: TaskContext,
         arguments: dict,
         attachment: Optional[bytes] = None,
-    ) -> dict:
+    ) -> Response | dict | str | None:
         raise Exception("Not implemented")
 
     @property
@@ -153,6 +147,26 @@ class TaskRunner(SingleRoomAgent):
         )
         await self._worker_toolkit.start(room=room)
 
+    async def run(
+        self, *, room: RoomClient, arguments: dict, attachment: Optional[bytes] = None
+    ) -> Response:
+        await super().start(room=room)
+        try:
+            runner = RunTaskTool(agent=self)
+            response = await runner.execute(
+                context=ToolContext(
+                    caller=room.local_participant,
+                    room=room,
+                ),
+                attachment=attachment,
+                **arguments,
+            )
+
+            return ensure_response(response)
+
+        finally:
+            await super().stop()
+
     async def stop(self):
         await self._worker_toolkit.stop()
 
@@ -161,143 +175,3 @@ class TaskRunner(SingleRoomAgent):
         )
 
         await super().stop()
-
-    async def _ask(
-        self, protocol: Protocol, message_id: int, msg_type: str, data: bytes
-    ):
-        async def worker():
-            # Decode and parse the message
-            message, attachment = unpack_message(data)
-            logger.info("agent got message %s", message)
-            args = message["arguments"]
-            task_id = message["task_id"]
-            toolkits_json = message["toolkits"]
-
-            # context_json = message["context"]
-
-            chat_context = None
-
-            try:
-                chat_context = await self.init_chat_context()
-
-                caller: Participant | None = None
-                on_behalf_of: Participant | None = None
-                on_behalf_of_id = message.get("on_behalf_of_id", None)
-
-                for participant in self._room.messaging.get_participants():
-                    if message["caller_id"] == participant.id:
-                        caller = participant
-                        break
-
-                    if on_behalf_of_id == participant.id:
-                        on_behalf_of = participant
-                        break
-
-                if caller is None:
-                    caller = RemoteParticipant(
-                        id=message["caller_id"], role="user", attributes={}
-                    )
-
-                if on_behalf_of_id is not None and on_behalf_of is None:
-                    on_behalf_of = RemoteParticipant(
-                        id=message["on_behalf_of_id"], role="user", attributes={}
-                    )
-
-                tool_target = caller
-                if on_behalf_of is not None:
-                    tool_target = on_behalf_of
-
-                toolkits = [
-                    *self._toolkits,
-                    *await self.get_required_toolkits(
-                        context=ToolContext(
-                            room=self.room,
-                            caller=caller,
-                            on_behalf_of=on_behalf_of,
-                            caller_context={"chat": chat_context.to_json()},
-                        )
-                    ),
-                ]
-
-                context = TaskContext(
-                    chat=chat_context,
-                    room=self.room,
-                    caller=caller,
-                    on_behalf_of=on_behalf_of,
-                    toolkits=toolkits,
-                )
-
-                for toolkit_json in toolkits_json:
-                    tools = []
-                    for tool_json in toolkit_json["tools"]:
-                        tools.append(
-                            RoomTool(
-                                on_behalf_of_id=on_behalf_of_id,
-                                participant_id=tool_target.id,
-                                toolkit_name=toolkit_json["name"],
-                                name=tool_json["name"],
-                                title=tool_json["title"],
-                                description=tool_json["description"],
-                                input_schema=tool_json["input_schema"],
-                                thumbnail_url=toolkit_json["thumbnail_url"],
-                                defs=tool_json.get("defs", None),
-                            )
-                        )
-
-                    context.toolkits.append(
-                        Toolkit(
-                            name=toolkit_json["name"],
-                            title=toolkit_json["title"],
-                            description=toolkit_json["description"],
-                            thumbnail_url=toolkit_json["thumbnail_url"],
-                            tools=tools,
-                        )
-                    )
-
-                if attachment is not None and len(attachment) > 0:
-                    response = await self.ask(
-                        context=context, arguments=args, attachment=attachment
-                    )
-                else:
-                    response = await self.ask(context=context, arguments=args)
-
-                await protocol.send(
-                    type="agent.ask_response",
-                    data=pack_message(
-                        {
-                            "task_id": task_id,
-                            "answer": response,
-                            "caller_context": chat_context.to_json(),
-                        }
-                    ),
-                )
-
-            except Exception as e:
-                logger.error("Task runner failed to complete task", exc_info=e)
-                if chat_context is not None:
-                    await protocol.send(
-                        type="agent.ask_response",
-                        data=pack_message(
-                            {
-                                "task_id": task_id,
-                                "error": str(e),
-                                "caller_context": chat_context.to_json(),
-                            }
-                        ),
-                    )
-                else:
-                    await protocol.send(
-                        type="agent.ask_response",
-                        data=pack_message(
-                            {
-                                "task_id": task_id,
-                                "error": str(e),
-                            }
-                        ),
-                    )
-
-        def on_done(task: asyncio.Task):
-            task.result()
-
-        task = asyncio.create_task(worker())
-        task.add_done_callback(on_done)
