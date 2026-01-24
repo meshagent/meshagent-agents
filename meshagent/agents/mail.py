@@ -1,5 +1,6 @@
 from meshagent.agents.worker import Worker
 from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit, FileResponse
+from meshagent.tools.storage import StorageToolkit
 from meshagent.api.room_server_client import TextDataType, RoomException
 from email import message_from_bytes
 from email.message import EmailMessage
@@ -714,9 +715,20 @@ class MailBot(Worker):
 
                     async def execute(self, context: ToolContext, *, path: str):
                         try:
-                            attachment_data.append(
-                                await context.room.storage.download(path=path)
-                            )
+                            storage_toolkits = [
+                                t for t in toolkits if isinstance(t, StorageToolkit)
+                            ]
+
+                            if len(storage_toolkits) > 0:
+                                attachment_data.append(
+                                    await storage_toolkits[0].read_file(
+                                        context=context, path=path
+                                    )
+                                )
+                            else:
+                                attachment_data.append(
+                                    await context.room.storage.download(path=path)
+                                )
                         except Exception as ex:
                             logger.error(f"Unable to download file {ex}", exc_info=ex)
                             raise RoomException(
