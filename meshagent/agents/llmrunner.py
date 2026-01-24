@@ -181,6 +181,7 @@ class LLMTaskRunner(TaskRunner):
             *self.toolkits,
             *context.toolkits,
             *await self.get_context_toolkits(context=context),
+            *await self.get_required_toolkits(context=context),
         ]
 
         if message_tools is not None and len(message_tools) > 0:
@@ -268,7 +269,12 @@ class DynamicLLMTaskRunner(LLMTaskRunner):
 
         context.chat.append_user_message(prompt)
 
-        combined_toolkits: list[Toolkit] = [*self.toolkits, *context.toolkits]
+        combined_toolkits: list[Toolkit] = [
+            *self.toolkits,
+            *context.toolkits,
+            *await self.get_context_toolkits(context=context),
+            *await self.get_required_toolkits(context=context),
+        ]
 
         resp = await self._llm_adapter.next(
             context=context.chat,
