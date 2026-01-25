@@ -56,7 +56,6 @@ class LLMTaskRunner(TaskRunner):
                         },
                     )
 
-                
                 if input_path:
                     input_schema = merge(
                         schema=input_schema,
@@ -64,7 +63,6 @@ class LLMTaskRunner(TaskRunner):
                             "path": {"type": ["string", "null"]},
                         },
                     )
-
 
                 toolkit_builders = self.get_toolkit_builders()
                 if len(toolkit_builders) > 0:
@@ -169,13 +167,13 @@ class LLMTaskRunner(TaskRunner):
             model = arguments.get("model", self._llm_adapter.default_model())
         else:
             model = self._llm_adapter.default_model()
-        
+
         path = None
         thread_adapter = None
-        
+
         if self.input_path:
             path = arguments.get("path")
-        
+
         if path is not None:
             thread_adapter = ThreadAdapter(
                 room=self.room,
