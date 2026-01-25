@@ -6,6 +6,7 @@ from meshagent.tools import (
     Tool,
     ToolContext,
 )
+from meshagent.api import Participant
 from meshagent.api.messaging import ensure_response
 from meshagent.api.room_server_client import RoomClient
 from jsonschema import validate
@@ -148,14 +149,19 @@ class TaskRunner(SingleRoomAgent):
         await self._worker_toolkit.start(room=room)
 
     async def run(
-        self, *, room: RoomClient, arguments: dict, attachment: Optional[bytes] = None
+        self,
+        *,
+        room: RoomClient,
+        arguments: dict,
+        attachment: Optional[bytes] = None,
+        caller: Optional[Participant] = None,
     ) -> Response:
         await super().start(room=room)
         try:
             runner = RunTaskTool(agent=self)
             response = await runner.execute(
                 context=ToolContext(
-                    caller=room.local_participant,
+                    caller=caller or room.local_participant,
                     room=room,
                 ),
                 attachment=attachment,

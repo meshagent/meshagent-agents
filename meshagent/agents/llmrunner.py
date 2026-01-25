@@ -7,6 +7,8 @@ from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents import TaskRunner
 from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.thread_adapter import ThreadAdapter
+
 import tarfile
 import io
 import mimetypes
@@ -156,60 +158,84 @@ class LLMTaskRunner(TaskRunner):
         else:
             model = self._llm_adapter.default_model()
 
-        context.chat.append_rules(await self.get_rules(context=context))
-
-        context.chat.append_user_message(prompt)
-
-        if attachment is not None:
-            buf = io.BytesIO(attachment)
-            with tarfile.open(fileobj=buf, mode="r:*") as tar:
-                for member in tar.getmembers():
-                    if member.isfile():
-                        mime_type, encoding = mimetypes.guess_type(member.name)
-                        f = tar.extractfile(member)
-                        content = f.read()
-                        if mime_type.startswith("image/"):
-                            context.chat.append_image_message(
-                                data=content, mime_type=mime_type
-                            )
-                        else:
-                            context.chat.append_file_message(
-                                filename=member.name, data=content, mime_type=mime_type
-                            )
-
-        combined_toolkits: list[Toolkit] = [
-            *self.toolkits,
-            *context.toolkits,
-            *await self.get_context_toolkits(context=context),
-            *await self.get_required_toolkits(context=context),
-        ]
-
-        if message_tools is not None and len(message_tools) > 0:
-            combined_toolkits.extend(
-                await make_toolkits(
-                    room=self.room,
-                    model=model,
-                    providers=self.get_toolkit_builders(),
-                    tools=message_tools,
-                )
+        path = arguments.get("path")
+        thread_adapter = None
+        if path is not None:
+            thread_adapter = ThreadAdapter(
+                room=self.room,
+                path=path,
             )
 
-        resp = await self._llm_adapter.next(
-            context=context.chat,
-            room=context.room,
-            toolkits=combined_toolkits,
-            tool_adapter=self._tool_adapter,
-            output_schema=self.output_schema,
-        )
+            await thread_adapter.start()
+            thread_adapter.append_messages(context=context.chat)
+            thread_adapter.append_text_message(text=prompt, participant=context.caller)
 
-        # Validate the LLM output against the declared output schema if one was provided
-        if self.output_schema:
-            try:
-                validate(instance=resp, schema=self.output_schema)
-            except ValidationError as exc:
-                raise RuntimeError("LLM output failed schema validation") from exc
+        try:
+            context.chat.append_rules(await self.get_rules(context=context))
 
-        return resp
+            context.chat.append_user_message(prompt)
+
+            if attachment is not None:
+                buf = io.BytesIO(attachment)
+                with tarfile.open(fileobj=buf, mode="r:*") as tar:
+                    for member in tar.getmembers():
+                        if member.isfile():
+                            mime_type, encoding = mimetypes.guess_type(member.name)
+                            f = tar.extractfile(member)
+                            content = f.read()
+                            if mime_type.startswith("image/"):
+                                context.chat.append_image_message(
+                                    data=content, mime_type=mime_type
+                                )
+                            else:
+                                context.chat.append_file_message(
+                                    filename=member.name,
+                                    data=content,
+                                    mime_type=mime_type,
+                                )
+
+            combined_toolkits: list[Toolkit] = [
+                *self.toolkits,
+                *context.toolkits,
+                *await self.get_context_toolkits(context=context),
+                *await self.get_required_toolkits(context=context),
+            ]
+
+            if message_tools is not None and len(message_tools) > 0:
+                combined_toolkits.extend(
+                    await make_toolkits(
+                        room=self.room,
+                        model=model,
+                        providers=self.get_toolkit_builders(),
+                        tools=message_tools,
+                    )
+                )
+
+            def push(event: dict):
+                if thread_adapter is not None:
+                    thread_adapter.push(event=event)
+
+            resp = await self._llm_adapter.next(
+                context=context.chat,
+                room=context.room,
+                toolkits=combined_toolkits,
+                tool_adapter=self._tool_adapter,
+                output_schema=self.output_schema,
+                event_handler=push,
+            )
+
+            # Validate the LLM output against the declared output schema if one was provided
+            if self.output_schema:
+                try:
+                    validate(instance=resp, schema=self.output_schema)
+                except ValidationError as exc:
+                    raise RuntimeError("LLM output failed schema validation") from exc
+
+            return resp
+
+        finally:
+            if thread_adapter is not None:
+                await thread_adapter.stop()
 
 
 class DynamicLLMTaskRunner(LLMTaskRunner):
