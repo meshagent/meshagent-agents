@@ -30,6 +30,7 @@ class LLMTaskRunner(TaskRunner):
         requires: Optional[list[Requirement]] = None,
         supports_tools: bool = True,
         input_prompt: bool = True,
+        input_path: bool = False,
         input_schema: Optional[dict] = None,
         output_schema: Optional[dict] = None,
         allow_model_selection: bool = True,
@@ -39,6 +40,7 @@ class LLMTaskRunner(TaskRunner):
         client_rules: Optional[dict[str, list[str]]] = None,
     ):
         self.allow_model_selection = allow_model_selection
+        self.input_path = input_path
 
         if input_schema is None:
             if input_prompt:
@@ -53,6 +55,16 @@ class LLMTaskRunner(TaskRunner):
                             "model": {"type": ["string", "null"]},
                         },
                     )
+
+                
+                if input_path:
+                    input_schema = merge(
+                        schema=input_schema,
+                        additional_properties={
+                            "path": {"type": ["string", "null"]},
+                        },
+                    )
+
 
                 toolkit_builders = self.get_toolkit_builders()
                 if len(toolkit_builders) > 0:
@@ -157,9 +169,13 @@ class LLMTaskRunner(TaskRunner):
             model = arguments.get("model", self._llm_adapter.default_model())
         else:
             model = self._llm_adapter.default_model()
-
-        path = arguments.get("path")
+        
+        path = None
         thread_adapter = None
+        
+        if self.input_path:
+            path = arguments.get("path")
+        
         if path is not None:
             thread_adapter = ThreadAdapter(
                 room=self.room,
