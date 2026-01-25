@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import base64
 import logging
 import shlex
@@ -9,7 +8,6 @@ from typing import Optional, Callable
 from meshagent.api import RemoteParticipant
 
 from opentelemetry import trace
-from pydantic import BaseModel
 
 from meshagent.agents.agent import AgentChatContext
 from meshagent.agents.thread_schema import thread_schema
