@@ -1007,23 +1007,6 @@ class ChatBot(SingleRoomAgent):
     async def _on_get_thread_toolkits_message(self, *, message: RoomMessage):
         path = message.message["path"]
 
-        thread_context = None
-        if path in self._open_threads:
-            adapter = self._open_threads[path]
-            thread = adapter.thread
-
-            if thread is not None:
-                thread_context = ChatThreadContext(
-                    path=path,
-                    chat=AgentChatContext(),
-                    thread=thread,
-                    participants=get_online_participants(room=self.room, thread=thread),
-                )
-
-        if thread_context is None:
-            logger.warning("thread toolkits requested for a thread that is not open")
-            return
-
         chat_with_participant = None
         for participant in self._room.messaging.get_participants():
             if participant.id == message.from_participant_id:
