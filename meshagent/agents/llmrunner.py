@@ -182,7 +182,7 @@ class LLMTaskRunner(TaskRunner):
 
             await thread_adapter.start()
             thread_adapter.append_messages(context=context.chat)
-            thread_adapter.append_text_message(text=prompt, participant=context.caller)
+            thread_adapter.write_text_message(text=prompt, participant=context.caller)
 
         try:
             context.chat.append_rules(await self.get_rules(context=context))

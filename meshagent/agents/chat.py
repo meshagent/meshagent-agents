@@ -958,7 +958,7 @@ class ChatBot(SingleRoomAgent):
                                         to=chat_with_participant,
                                         path=path,
                                         id=str(uuid.uuid4()),
-                                        text="There was an error while communicating with the LLM. Please try again later.",
+                                        text="An unexpected error occured. Please try again later.",
                                         thread_attributes=thread_attributes,
                                     )
 
