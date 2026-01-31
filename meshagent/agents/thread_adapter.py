@@ -97,7 +97,9 @@ class ThreadAdapter:
         if doc_messages is None:
             raise Exception("thread was not properly initialized")
 
-    def append_text_message(self, *, text: str, participant: RemoteParticipant) -> None:
+    def write_text_message(
+        self, *, text: str, participant: RemoteParticipant | str
+    ) -> None:
         doc_messages: Element = self._thread.root.get_children_by_tag_name("messages")[
             0
         ]
@@ -109,7 +111,9 @@ class ThreadAdapter:
                 "created_at": datetime.now(timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
-                "author_name": participant.get_attribute("name"),
+                "author_name": participant.get_attribute("name")
+                if participant is RemoteParticipant
+                else participant,
             },
         )
 
