@@ -3,6 +3,7 @@ import base64
 import logging
 import shlex
 import uuid
+from meshagent.tools import tool, Toolkit
 from datetime import datetime, timezone
 from typing import Optional, Callable
 from meshagent.api import RemoteParticipant
@@ -18,18 +19,32 @@ from meshagent.api import (
     RoomException,
 )
 
+
 tracer = trace.get_tracer("meshagent.thread_adapter")
 
 logger = logging.getLogger("thread_adapter")
 
 
+def default_format_message(self, *, user_name: str, message: str, iso_timestamp: str):
+    return f"{user_name} said at {iso_timestamp}: {message}"
+
+
 class ThreadAdapter:
-    def __init__(self, *, room: RoomClient, path: str):
+    def __init__(
+        self,
+        *,
+        room: RoomClient,
+        path: str,
+        format_message: Optional[Callable] = None,
+        max_append_message_count: int = 25,
+    ):
         self._room = room
         self._thread_path = path
         self._processor_task: Optional[asyncio.Task] = None
         self._llm_messages: asyncio.Queue = asyncio.Queue()
         self._thread: Optional[MeshDocument] = None
+        self._format_message = format_message or default_format_message
+        self._max_append_message_count = max_append_message_count
 
     async def start(self) -> None:
         self._thread = await self._room.sync.open(
@@ -55,19 +70,107 @@ class ThreadAdapter:
     def push(self, *, event: dict) -> None:
         self._llm_messages.put_nowait(event)
 
-    def append_messages(
+    def make_toolkit(self):
+        toolkit = Toolkit(
+            name="search",
+            description="tools for searching conversation history",
+            tools=[
+                self.grep_tool,
+                self.get_message_range,
+                self.count_tool,
+            ],
+        )
+        return toolkit
+
+    @tool(
+        name="get_message_range",
+        description="gets a range of messages, index 0 is the first message in the conversation",
+    )
+    def get_message_range(self, *, start: int, end: int) -> str:
+        messages = self._thread.root.get_children_by_tag_name("messages")[
+            0
+        ].get_children()
+
+        elements = messages[start:end]
+
+        if len(elements) == 0:
+            return "no messages were found within the specified range"
+
+        response = "matching messages:\n"
+
+        for element in elements:
+            response = response + self._format_message(
+                user_name=element["author_name"],
+                message=element["text"],
+                iso_timestamp=element["created_at"],
+            )
+
+        return response
+
+    @tool(
+        name="count_current_thread_messages",
+        description="return the number of messages in the current thread (including those outside the context window)",
+    )
+    def count_tool(
         self,
         *,
-        context: AgentChatContext,
-        format_message: Optional[Callable[..., str]] = None,
-    ) -> None:
+        pattern: str,
+        ignore_case: bool,
+        messages_before: int,
+        messages_after: int,
+    ) -> str:
+        messages = self._thread.root.get_children_by_tag_name("messages")[0]
+        return f"{len(messages.get_children())}"
+
+    @tool(
+        name="grep_current_thread",
+        description="search the current thread for text, includes messages outside the current context window",
+    )
+    def grep_tool(
+        self,
+        *,
+        pattern: str,
+        ignore_case: bool,
+        messages_before: int,
+        messages_after: int,
+    ) -> str:
+        messages = self._thread.root.get_children_by_tag_name("messages")[0]
+        elements = messages.grep(
+            pattern,
+            ignore_case=ignore_case,
+            before=messages_before,
+            after=messages_after,
+        )
+        if len(elements) == 0:
+            return "no messages were found with the specified pattern"
+
+        response = "matching messages:\n"
+
+        for element in elements:
+            response = response + self._format_message(
+                user_name=element["author_name"],
+                message=element["text"],
+                iso_timestamp=element["created_at"],
+            )
+
+        return response
+
+    def append_messages(self, *, context: AgentChatContext) -> None:
         doc_messages = None
 
         for prop in self._thread.root.get_children():
             if prop.tag_name == "messages":
                 doc_messages = prop
 
-                for element in doc_messages.get_children():
+                messages = list(doc_messages.get_children())
+                if len(messages) > self._max_append_message_count:
+                    first_message = len(messages) - self._max_append_message_count
+                    messages = messages[first_message:]
+                    context.append_assistant_message(
+                        f"there are more messages outside the current context window, the index of the first message loaded is {first_message}"
+                    )
+
+                for element in messages:
                     if isinstance(element, Element) and element.tag_name == "message":
                         msg = element["text"]
                         if element[
@@ -75,16 +178,13 @@ class ThreadAdapter:
                         ] == self._room.local_participant.get_attribute("name"):
                             context.append_assistant_message(msg)
                         else:
-                            if format_message is not None:
-                                context.append_user_message(
-                                    format_message(
-                                        user_name=element["author_name"],
-                                        message=msg,
-                                        iso_timestamp=element["created_at"],
-                                    )
+                            context.append_user_message(
+                                self._format_message(
+                                    user_name=element["author_name"],
+                                    message=element["text"],
+                                    iso_timestamp=element["created_at"],
                                 )
-                            else:
-                                context.append_user_message(msg)
+                            )
 
                         for child in element.get_children():
                             if child.tag_name == "file":

@@ -11,10 +11,12 @@ from meshagent.api import (
 )
 from meshagent.tools import (
     Toolkit,
+    Tool,
     ToolContext,
     make_toolkits,
     ToolkitBuilder,
     ToolkitConfig,
+    tool,
 )
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
@@ -446,7 +448,9 @@ class ChatBot(SingleRoomAgent):
                 )
             )
 
-        return [*self._toolkits, *toolkits]
+        toolkit = self._open_threads[thread_context.path].make_toolkit()
+
+        return [*self._toolkits, *toolkits, toolkit]
 
     async def init_chat_context(self) -> AgentChatContext:
         context = self._llm_adapter.create_chat_context()
@@ -456,7 +460,9 @@ class ChatBot(SingleRoomAgent):
     async def open_thread(self, *, path: str) -> ThreadAdapter:
         logger.info(f"opening thread {path}")
         if path not in self._open_threads:
-            adapter = ThreadAdapter(room=self.room, path=path)
+            adapter = ThreadAdapter(
+                room=self.room, path=path, format_message=self.format_message
+            )
             await adapter.start()
             self._open_threads[path] = adapter
 
@@ -797,7 +803,6 @@ class ChatBot(SingleRoomAgent):
 
                         thread_adapter.append_messages(
                             context=chat_context,
-                            format_message=self.format_message,
                         )
 
                 if received.type == "opened":
