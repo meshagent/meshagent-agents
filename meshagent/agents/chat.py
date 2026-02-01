@@ -11,12 +11,10 @@ from meshagent.api import (
 )
 from meshagent.tools import (
     Toolkit,
-    Tool,
     ToolContext,
     make_toolkits,
     ToolkitBuilder,
     ToolkitConfig,
-    tool,
 )
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
