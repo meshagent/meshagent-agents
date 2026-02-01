@@ -8,7 +8,6 @@ from meshagent.api import (
     Requirement,
     Element,
     MeshDocument,
-    RequiredSchema,
 )
 from meshagent.tools import (
     Toolkit,
@@ -38,7 +37,6 @@ from pydantic import BaseModel
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 
-from meshagent.agents.thread_schema import thread_schema
 
 tracer = trace.get_tracer("meshagent.chatbot")
 
@@ -412,7 +410,6 @@ class ChatBot(SingleRoomAgent):
     def get_requirements(self):
         return [
             *super().get_requirements(),
-            RequiredSchema(name="thread", schema=thread_schema),
         ]
 
     async def get_online_participants(
