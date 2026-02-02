@@ -76,7 +76,7 @@ class Agent:
         title: Optional[str] = None,
         description: Optional[str] = None,
         requires: Optional[list[Requirement]] = None,
-        labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
         skills_dirs: Optional[list[str]] = None,
     ):
         if name is not None:
@@ -96,10 +96,10 @@ class Agent:
 
         self._requires = requires
 
-        if labels is None:
-            labels = []
+        if annotations is None:
+            annotations = []
 
-        self._labels = labels
+        self._annotations = annotations
         self._skills_dirs = None
 
     def get_requirements(self) -> list[Requirement]:
@@ -118,8 +118,8 @@ class Agent:
         return self._requires
 
     @property
-    def labels(self):
-        return self._labels
+    def annotations(self):
+        return self._annotations
 
     async def init_chat_context(self) -> AgentChatContext:
         return AgentChatContext()
@@ -130,7 +130,7 @@ class Agent:
             "title": self.title,
             "description": self.description,
             "requires": list(map(lambda x: x.to_json(), self.requires)),
-            "labels": self.labels,
+            "annotations": self.annotations,
         }
 
 
@@ -206,14 +206,14 @@ class SingleRoomAgent(Agent):
         title=None,
         description=None,
         requires=None,
-        labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
             title=title,
             description=description,
             requires=requires,
-            labels=labels,
+            annotations=annotations,
         )
         self._room = None
 

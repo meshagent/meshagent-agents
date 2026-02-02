@@ -21,7 +21,7 @@ class PromptAgent(TaskRunner):
         description: Optional[str] = None,
         requires: Optional[list[RequiredToolkit]] = None,
         supports_tools: Optional[bool] = None,
-        labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -31,7 +31,7 @@ class PromptAgent(TaskRunner):
             output_schema=output_schema,
             requires=requires,
             supports_tools=supports_tools,
-            labels=labels,
+            annotations=annotations,
         )
         self.rules = rules
         self.tools = tools

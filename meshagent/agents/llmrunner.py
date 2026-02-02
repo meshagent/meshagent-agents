@@ -35,7 +35,6 @@ class LLMTaskRunner(TaskRunner):
         output_schema: Optional[dict] = None,
         allow_model_selection: bool = True,
         rules: Optional[list[str]] = None,
-        labels: Optional[list[str]] = None,
         annotations: Optional[list[str]] = None,
         client_rules: Optional[dict[str, list[str]]] = None,
     ):
@@ -117,9 +116,8 @@ class LLMTaskRunner(TaskRunner):
             output_schema=output_schema,
             requires=requires,
             supports_tools=supports_tools,
-            labels=labels,
-            toolkits=static_toolkits,
             annotations=annotations,
+            toolkits=static_toolkits,
         )
 
         self._extra_rules = rules or []

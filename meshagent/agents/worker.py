@@ -63,12 +63,14 @@ class Worker(SingleRoomAgent):
         toolkit_name: Optional[str] = None,
         skill_dirs: Optional[list[str]] = None,
         supports_context: bool = True,
+        annotations: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
             title=title,
             description=description,
             requires=requires,
+            annotations=annotations,
         )
 
         self._skill_dirs = skill_dirs

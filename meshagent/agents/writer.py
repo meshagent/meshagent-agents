@@ -54,6 +54,7 @@ class Writer(TaskRunner):
         description: Optional[str] = None,
         requires: Optional[list[Requirement]] = None,
         supports_tools: Optional[bool] = None,
+        annotations: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -63,6 +64,7 @@ class Writer(TaskRunner):
             title=title,
             requires=requires,
             supports_tools=supports_tools,
+            annotations=annotations,
         )
 
         self._create = create

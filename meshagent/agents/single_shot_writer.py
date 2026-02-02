@@ -23,7 +23,7 @@ class SingleShotWriter(Writer):
         requires: Optional[list[Requirement]] = None,
         toolkits: Optional[list[Toolkit]] = None,
         supports_tools: Optional[bool] = None,
-        labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -41,6 +41,7 @@ class SingleShotWriter(Writer):
             },
             requires=requires,
             supports_tools=supports_tools,
+            annotations=annotations,
         )
         self._rules = rules
         self._llm_adapter = llm_adapter
@@ -48,7 +49,6 @@ class SingleShotWriter(Writer):
         if toolkits is None:
             toolkits = []
         self._toolkits = toolkits
-        self._labels = labels
 
     async def init_chat_context(self):
         context = self._llm_adapter.create_chat_context()

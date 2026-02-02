@@ -377,6 +377,7 @@ class MailBot(Worker):
         reply_all: bool = False,
         enable_attachments: bool = True,
         skill_dirs: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         if smtp is None:
             smtp = SmtpConfiguration()
@@ -398,6 +399,7 @@ class MailBot(Worker):
             llm_adapter=llm_adapter,
             tool_adapter=tool_adapter,
             toolkits=toolkits,
+            annotations=annotations,
             rules=rules
             or [
                 "You MUST reply with plain text or markdown, do not reply in JSON format or HTML format"

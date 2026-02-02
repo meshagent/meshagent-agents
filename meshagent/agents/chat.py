@@ -294,7 +294,7 @@ class ChatBot(SingleRoomAgent):
         client_rules: Optional[dict[str, list[str]]] = None,
         auto_greet_message: Optional[str] = None,
         empty_state_title: Optional[str] = None,
-        labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
         decision_model: Optional[str] = None,
         always_reply: Optional[bool] = None,
         skill_dirs: Optional[list[str]] = None,
@@ -304,7 +304,7 @@ class ChatBot(SingleRoomAgent):
             title=title,
             description=description,
             requires=requires,
-            labels=labels,
+            annotations=annotations,
         )
 
         if toolkits is None:

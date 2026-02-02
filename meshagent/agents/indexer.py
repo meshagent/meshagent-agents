@@ -213,7 +213,7 @@ class StorageIndexer(SingleRoomAgent):
         title=None,
         description=None,
         requires=None,
-        labels=None,
+        annotations=None,
         chunker: Optional[Chunker] = None,
         embedder: Optional[Embedder] = None,
         table: str = "storage_index",
@@ -223,7 +223,7 @@ class StorageIndexer(SingleRoomAgent):
             title=title,
             description=description,
             requires=requires,
-            labels=labels,
+            annotations=annotations,
         )
 
         self._chan = Chan[FileIndexEvent]()
@@ -426,7 +426,7 @@ class SiteIndexer(TaskRunner):
         description=None,
         requires=None,
         supports_tools=None,
-        labels: Optional[list[str]] = None,
+        annotations: Optional[list[str]] = None,
     ):
         if chunker is None:
             chunker = ChonkieChunker()
@@ -458,7 +458,7 @@ class SiteIndexer(TaskRunner):
                 "additionalProperties": False,
                 "properties": {},
             },
-            labels=labels,
+            annotations=annotations,
         )
 
     async def start(self, *, room):

@@ -59,16 +59,15 @@ class TaskRunner(SingleRoomAgent):
         supports_tools: Optional[bool] = None,
         input_schema: dict,
         output_schema: Optional[dict] = None,
-        labels: Optional[list[str]] = None,
-        toolkits: Optional[list[Toolkit]] = None,
         annotations: Optional[list[str]] = None,
+        toolkits: Optional[list[Toolkit]] = None,
     ):
         super().__init__(
             name=name,
             title=title,
             description=description,
             requires=requires,
-            labels=labels,
+            annotations=annotations,
         )
 
         if toolkits is None:
@@ -89,7 +88,6 @@ class TaskRunner(SingleRoomAgent):
         self._supports_tools = supports_tools
         self._input_schema = input_schema
         self._output_schema = output_schema
-        self._annotations = annotations
 
         self._worker_toolkit = None
 
@@ -114,10 +112,6 @@ class TaskRunner(SingleRoomAgent):
         return self._supports_tools
 
     @property
-    def annotations(self):
-        return self._annotations
-
-    @property
     def input_schema(self):
         return self._input_schema
 
@@ -133,7 +127,6 @@ class TaskRunner(SingleRoomAgent):
             "output_schema": self.output_schema,
             "requires": list(map(lambda x: x.to_json(), self.requires)),
             "supports_tools": self.supports_tools,
-            "labels": self.labels,
             "annotations": self.annotations,
         }
 
