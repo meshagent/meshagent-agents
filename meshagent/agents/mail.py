@@ -614,7 +614,7 @@ class MailBot(Worker):
             )
             rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
             rules.append(
-                "Use the shell tool to find out more about skills and execute them when they are required"
+                "Use the shell or storage tool to find out more about skills and execute them when they are required"
             )
 
         return rules
