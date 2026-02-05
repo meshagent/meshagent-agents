@@ -546,7 +546,7 @@ class ChatBot(SingleRoomAgent):
                     },
                     "next_user": {
                         "type": "string",
-                        "description": "who would be expectd to send the next message in the conversation",
+                        "description": "who would be expected to send the next message in the conversation",
                     },
                     "expecting_assistant_reply": {"type": "boolean"},
                 },
