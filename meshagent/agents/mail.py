@@ -759,7 +759,7 @@ class MailBot(Worker):
         )
 
     def render_markdown(self, body: str):
-        markdown = mistune.create_markdown()
+        markdown = mistune.create_markdown(plugins=["table"])
         return markdown(body)
 
     def create_email_message(
