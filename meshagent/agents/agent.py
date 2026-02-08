@@ -16,7 +16,9 @@ from meshagent.tools import (
     Toolkit,
     Tool,
     ToolContext,
+    RemoteToolkit,
 )
+
 from meshagent.api.room_server_client import RoomClient
 from .context import AgentChatContext
 import logging
@@ -216,6 +218,10 @@ class SingleRoomAgent(Agent):
             annotations=annotations,
         )
         self._room = None
+        self._exposed_toolkits = None
+
+    async def get_exposed_toolkits(self) -> list[RemoteToolkit]:
+        return []
 
     async def start(self, *, room: RoomClient) -> None:
         if self._room is not None:
@@ -225,16 +231,23 @@ class SingleRoomAgent(Agent):
 
         await self.install_requirements()
 
+        self._exposed_toolkits = await self.get_exposed_toolkits()
+
+        for tk in self._exposed_toolkits:
+            await tk.start(room=room)
+
     async def stop(self) -> None:
+        for tk in self._exposed_toolkits:
+            await tk.stop()
+
         self._room = None
-        pass
 
     @property
-    def room(self):
+    def room(self) -> RoomClient:
         return self._room
 
     @property
-    def name(self):
+    def name(self) -> str:
         return self._room.local_participant.get_attribute("name")
 
     async def install_requirements(self, participant_id: Optional[str] = None):
@@ -365,15 +378,13 @@ class SingleRoomAgent(Agent):
         if installed:
             await asyncio.sleep(5)
 
-    async def get_toolkits(
-        self, context: ToolContext, remote_toolkits: list[RequiredToolkit]
-    ):
+    async def get_required_toolkits(self, context: ToolContext) -> list[Toolkit]:
         tool_target = context.caller
         if context.on_behalf_of is not None:
             tool_target = context.on_behalf_of
 
         toolkits_by_name = dict[str, ToolkitDescription]()
-
+        toolkits_by_participant = dict[str, list[ToolkitDescription]]()
         toolkits = list[Toolkit]()
 
         visible_tools = await self._room.agents.list_toolkits(
@@ -383,9 +394,25 @@ class SingleRoomAgent(Agent):
         for toolkit_description in visible_tools:
             toolkits_by_name[toolkit_description.name] = toolkit_description
 
-        for required_toolkit in remote_toolkits:
+        for required_toolkit in self.requires:
             if isinstance(required_toolkit, RequiredToolkit):
-                toolkit = toolkits_by_name.get(required_toolkit.name, None)
+                if required_toolkit.participant_name is None:
+                    toolkit = toolkits_by_name.get(required_toolkit.name, None)
+                else:
+                    if required_toolkit.participant_name not in toolkits_by_participant:
+                        toolkits_by_participant[
+                            required_toolkit.participant_name
+                        ] = await self._room.agents.list_toolkits(
+                            participant_name=required_toolkit.participant_name
+                        )
+
+                    for tk in toolkits_by_participant[
+                        required_toolkit.participant_name
+                    ]:
+                        if tk.name == required_toolkit.name:
+                            toolkit = tk
+                            break
+
                 if toolkit is None:
                     if context.on_behalf_of is not None:
                         raise RoomException(
@@ -433,7 +460,7 @@ class SingleRoomAgent(Agent):
                             input_schema=tool_description.input_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=tool_target.id,
+                            participant_id=tool_description.participant_id,
                             defs=tool_description.defs,
                         )
                         room_tools.append(tool)
@@ -449,6 +476,3 @@ class SingleRoomAgent(Agent):
                 )
 
         return toolkits
-
-    async def get_required_toolkits(self, context: ToolContext) -> list[Toolkit]:
-        return await self.get_toolkits(context, self.requires)
