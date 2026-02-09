@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from meshagent.agents.agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
 from meshagent.api import (
@@ -15,6 +16,7 @@ from meshagent.tools import (
     make_toolkits,
     ToolkitBuilder,
     ToolkitConfig,
+    RemoteToolkit,
 )
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
 from meshagent.openai.tools.responses_adapter import (
@@ -33,7 +35,7 @@ from meshagent.api import RoomException
 from opentelemetry import trace
 import json
 from pydantic import BaseModel
-
+from meshagent.tools import tool
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 
@@ -279,6 +281,14 @@ class ChatBotClient:
         return await self._messages.get_nowait()
 
 
+@dataclass
+class _QueuedChatMessage:
+    type: str
+    message: dict
+    from_participant: RemoteParticipant
+    result: asyncio.Future = field(default_factory=asyncio.Future)
+
+
 class ChatBot(SingleRoomAgent):
     def __init__(
         self,
@@ -322,7 +332,7 @@ class ChatBot(SingleRoomAgent):
         self._llm_adapter = llm_adapter
         self._tool_adapter = tool_adapter
 
-        self._message_channels = dict[str, Chan[RoomMessage]]()
+        self._message_channels = dict[str, Chan[_QueuedChatMessage]]()
 
         self._room: RoomClient | None = None
         self._toolkits = toolkits
@@ -565,7 +575,7 @@ class ChatBot(SingleRoomAgent):
         model: str,
         from_user: RemoteParticipant,
         event_handler,
-    ):
+    ) -> str:
         online = await self.get_online_participants(
             thread=context.thread, exclude=[self.room.local_participant]
         )
@@ -624,7 +634,7 @@ class ChatBot(SingleRoomAgent):
 
         self.prepare_chat_context(chat_context=context.chat)
 
-        await self._llm_adapter.next(
+        return await self._llm_adapter.next(
             context=context.chat,
             room=self._room,
             toolkits=toolkits,
@@ -737,17 +747,7 @@ class ChatBot(SingleRoomAgent):
                 received = await messages.recv()
                 logger.debug(f"received message on thread {path}: {received.type}")
 
-                chat_with_participant = None
-                for participant in self._room.messaging.get_participants():
-                    if participant.id == received.from_participant_id:
-                        chat_with_participant = participant
-                        break
-
-                if chat_with_participant is None:
-                    logger.warning(
-                        "participant does not have messaging enabled, skipping message"
-                    )
-                    continue
+                chat_with_participant = received.from_participant
 
                 thread_attributes = {
                     "agent_name": self.name,
@@ -943,7 +943,7 @@ class ChatBot(SingleRoomAgent):
                                             )
                                         )
 
-                                    await self.handle_user_message(
+                                    result = await self.handle_user_message(
                                         context=thread_context,
                                         toolkits=message_toolkits,
                                         event_handler=thread_context.emit,
@@ -951,16 +951,20 @@ class ChatBot(SingleRoomAgent):
                                         from_user=chat_with_participant,
                                     )
 
+                                    received.result.set_result(result)
+
                                 except Exception as e:
                                     logger.error("An error was encountered", exc_info=e)
+                                    text = "An unexpected error occured. Please try again later."
                                     await self._send_and_save_chat(
                                         thread=thread,
                                         to=chat_with_participant,
                                         path=path,
                                         id=str(uuid.uuid4()),
-                                        text="An unexpected error occured. Please try again later.",
+                                        text=text,
                                         thread_attributes=thread_attributes,
                                     )
+                                    received.result.set_result(text)
 
                         finally:
 
@@ -987,9 +991,9 @@ class ChatBot(SingleRoomAgent):
 
             asyncio.shield(cleanup())
 
-    def _get_message_channel(self, key: str) -> Chan[RoomMessage]:
+    def _get_message_channel(self, key: str) -> Chan[_QueuedChatMessage]:
         if key not in self._message_channels:
-            chan = Chan[RoomMessage]()
+            chan = Chan[_QueuedChatMessage]()
             self._message_channels[key] = chan
 
         chan = self._message_channels[key]
@@ -1029,6 +1033,145 @@ class ChatBot(SingleRoomAgent):
             },
         )
 
+    async def get_exposed_toolkits(self) -> list[RemoteToolkit]:
+        exposed_toolkits = await super().get_exposed_toolkits()
+
+        @tool(
+            description=f"sends a chat to {self.room.local_participant.get_attribute('name')} and gets the response"
+        )
+        async def ask(context: ToolContext, *, path: str, text: str) -> str:
+            qm = _QueuedChatMessage(
+                type="chat",
+                message={
+                    "text": text,
+                    "path": path,
+                },
+                from_participant=context.on_behalf_of or context.caller,
+            )
+
+            thread = await self.open_thread(path=path)
+
+            thread.write_text_message(
+                text=text, participant=context.on_behalf_of or context.caller
+            )
+
+            messages = self._ensure_thread(path=path)
+            messages.send_nowait(qm)
+
+            return await qm.result
+
+        chatbot_toolkit = RemoteToolkit(
+            name=f"{self.name}",
+            description=f"tools for interacting with {self.name}",
+            public=False,
+            tools=[ask],
+        )
+
+        exposed_toolkits.append(chatbot_toolkit)
+        return exposed_toolkits
+
+    def _ensure_thread(self, path: str) -> Chan[_QueuedChatMessage]:
+        messages = self._get_message_channel(path)
+        if path not in self._thread_tasks or self._thread_tasks[path].done():
+
+            def thread_done(task: asyncio.Task):
+                self._thread_tasks.pop(path)
+                self._message_channels.pop(path)
+                try:
+                    task.result()
+                except CancelledError:
+                    pass
+                except Exception as e:
+                    logger.error(f"The chat thread ended with an error {e}", exc_info=e)
+
+            logger.debug(f"spawning chat thread for {path}")
+            task = asyncio.create_task(self._spawn_thread(messages=messages, path=path))
+            task.add_done_callback(thread_done)
+
+            self._thread_tasks[path] = task
+
+        return messages
+
+    def on_message(
+        self, message: RoomMessage, from_participant: Optional[RemoteParticipant] = None
+    ) -> _QueuedChatMessage | None:
+        if message.type == "get_thread_toolkit_builders":
+            task = asyncio.create_task(
+                self._on_get_thread_toolkits_message(message=message)
+            )
+
+            def on_done(task: asyncio.Task):
+                try:
+                    task.result()
+                except Exception as ex:
+                    logger.error(f"unable to get tool providers {ex}", exc_info=ex)
+
+            task.add_done_callback(on_done)
+
+        if (
+            message.type == "chat"
+            or message.type == "opened"
+            or message.type == "clear"
+        ):
+            path = message.message["path"]
+
+            logger.debug(f"queued incoming message for thread {path}: {message.type}")
+
+            if from_participant is None:
+                for participant in self._room.messaging.get_participants():
+                    if participant.id == message.from_participant_id:
+                        from_participant = participant
+                        break
+
+                if from_participant is None:
+                    logger.warning(
+                        "participant does not have messaging enabled, skipping message"
+                    )
+                    return
+
+            msg = _QueuedChatMessage(
+                type=message.type,
+                message=message.message,
+                from_participant=from_participant,
+            )
+
+            messages = self._ensure_thread(path=path)
+
+            messages.send_nowait(msg)
+
+            return msg
+
+        elif message.type == "cancel":
+            path = message.message["path"]
+            if path in self._thread_tasks:
+                self._thread_tasks[path].cancel()
+
+        elif message.type == "typing":
+
+            def callback(task: asyncio.Task):
+                try:
+                    task.result()
+                except CancelledError:
+                    pass
+                except Exception:
+                    pass
+
+            async def remove_timeout(id: str):
+                await asyncio.sleep(1)
+                self._is_typing.pop(id)
+
+            if message.from_participant_id in self._is_typing:
+                self._is_typing[message.from_participant_id].cancel()
+
+            timeout = asyncio.create_task(
+                remove_timeout(id=message.from_participant_id)
+            )
+            timeout.add_done_callback(callback)
+
+            self._is_typing[message.from_participant_id] = timeout
+
+        return None
+
     async def start(self, *, room):
         await super().start(room=room)
 
@@ -1038,87 +1181,7 @@ class ChatBot(SingleRoomAgent):
             "empty_state_title", self._empty_state_title
         )
 
-        def on_message(message: RoomMessage):
-            if message.type == "get_thread_toolkit_builders":
-                task = asyncio.create_task(
-                    self._on_get_thread_toolkits_message(message=message)
-                )
-
-                def on_done(task: asyncio.Task):
-                    try:
-                        task.result()
-                    except Exception as ex:
-                        logger.error(f"unable to get tool providers {ex}", exc_info=ex)
-
-                task.add_done_callback(on_done)
-
-            if (
-                message.type == "chat"
-                or message.type == "opened"
-                or message.type == "clear"
-            ):
-                path = message.message["path"]
-
-                messages = self._get_message_channel(path)
-
-                logger.debug(
-                    f"queued incoming message for thread {path}: {message.type}"
-                )
-
-                messages.send_nowait(message)
-
-                if path not in self._thread_tasks or self._thread_tasks[path].done():
-
-                    def thread_done(task: asyncio.Task):
-                        self._thread_tasks.pop(path)
-                        self._message_channels.pop(path)
-                        try:
-                            task.result()
-                        except CancelledError:
-                            pass
-                        except Exception as e:
-                            logger.error(
-                                f"The chat thread ended with an error {e}", exc_info=e
-                            )
-
-                    logger.debug(f"spawning chat thread for {path}")
-                    task = asyncio.create_task(
-                        self._spawn_thread(messages=messages, path=path)
-                    )
-                    task.add_done_callback(thread_done)
-
-                    self._thread_tasks[path] = task
-
-            elif message.type == "cancel":
-                path = message.message["path"]
-                if path in self._thread_tasks:
-                    self._thread_tasks[path].cancel()
-
-            elif message.type == "typing":
-
-                def callback(task: asyncio.Task):
-                    try:
-                        task.result()
-                    except CancelledError:
-                        pass
-                    except Exception:
-                        pass
-
-                async def remove_timeout(id: str):
-                    await asyncio.sleep(1)
-                    self._is_typing.pop(id)
-
-                if message.from_participant_id in self._is_typing:
-                    self._is_typing[message.from_participant_id].cancel()
-
-                timeout = asyncio.create_task(
-                    remove_timeout(id=message.from_participant_id)
-                )
-                timeout.add_done_callback(callback)
-
-                self._is_typing[message.from_participant_id] = timeout
-
-        room.messaging.on("message", on_message)
+        room.messaging.on("message", self.on_message)
 
         if self._auto_greet_message is not None:
 

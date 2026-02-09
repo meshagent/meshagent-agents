@@ -212,7 +212,7 @@ class ThreadAdapter:
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "author_name": participant.get_attribute("name")
-                if participant is RemoteParticipant
+                if isinstance(participant, RemoteParticipant)
                 else participant,
             },
         )
