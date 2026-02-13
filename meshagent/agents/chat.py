@@ -238,7 +238,11 @@ class ChatBotClient:
         )
 
     async def send(
-        self, *, text: str, tools: Optional[list[ToolkitConfig]] = None
+        self,
+        *,
+        text: str,
+        tools: Optional[list[ToolkitConfig]] = None,
+        attachments: Optional[list[dict]] = None,
     ) -> None:
         if self._participant is None or self._doc is None:
             raise RoomException("chat client not started")
@@ -255,6 +259,10 @@ class ChatBotClient:
                 "author_name": self.room.local_participant.get_attribute("name"),
             },
         )
+
+        if attachments is not None:
+            for attachment in attachments:
+                messages.append_child(tag_name="file", attributes=attachment)
 
         tool_payload = [tool.model_dump(mode="json") for tool in tools or []]
         await self.room.messaging.send_message(
@@ -440,6 +448,34 @@ class ChatBot(SingleRoomAgent):
                 on_behalf_of=participant,
                 caller_context={"chat": thread_context.chat.to_json()},
                 event_handler=thread_context.emit,
+            )
+        )
+
+        @tool(
+            name="attach_file",
+            description="attach a file to the thread so the user can see it",
+        )
+        async def attach_file(path: str):
+            messages = thread_context.thread.root.get_elements_by_tag_name("messages")[
+                0
+            ]
+            message = messages.append_child(
+                tag_name="message",
+                attributes={
+                    "id": str(uuid.uuid4()),
+                    "text": "",
+                    "created_at": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "author_name": self.room.local_participant.get_attribute("name"),
+                },
+            )
+            message.append_child(tag_name="file", attributes={"path": path})
+
+        toolkits.append(
+            Toolkit(
+                name="thread tools",
+                tools=[attach_file],
             )
         )
 
