@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
 from meshagent.agents.agent import SingleRoomAgent, AgentChatContext
 from meshagent.api.chan import Chan
 from meshagent.api import (
@@ -23,12 +24,15 @@ from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
     OpenAIResponsesAdapter,
 )
-from meshagent.agents.thread_adapter import ThreadAdapter
+from meshagent.agents.thread_adapter import (
+    ThreadAdapter,
+    response_event_to_agent_event,
+)
 
 import uuid
 from datetime import datetime, timezone
 import asyncio
-from typing import Optional, Callable, AsyncIterator
+from typing import Any, Optional, Callable, AsyncIterator, Awaitable
 import logging
 from asyncio import CancelledError
 from meshagent.api import RoomException
@@ -161,6 +165,13 @@ class ChatThreadContext:
     def emit(self, event: dict):
         if self._event_handler is not None:
             self._event_handler(event)
+
+    @property
+    def context_id(self) -> str:
+        return self.chat.id
+
+    def to_caller_context(self) -> dict:
+        return {"chat": self.chat.to_json()}
 
 
 class ChatBotClient:
@@ -297,7 +308,7 @@ class _QueuedChatMessage:
     result: asyncio.Future = field(default_factory=asyncio.Future)
 
 
-class ChatBot(SingleRoomAgent):
+class ChatBotBase(SingleRoomAgent, ABC):
     def __init__(
         self,
         *,
@@ -305,15 +316,12 @@ class ChatBot(SingleRoomAgent):
         title=None,
         description=None,
         requires: Optional[list[Requirement]] = None,
-        llm_adapter: LLMAdapter,
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
         client_rules: Optional[dict[str, list[str]]] = None,
         auto_greet_message: Optional[str] = None,
         empty_state_title: Optional[str] = None,
         annotations: Optional[list[str]] = None,
-        decision_model: Optional[str] = None,
         always_reply: Optional[bool] = None,
         skill_dirs: Optional[list[str]] = None,
     ):
@@ -328,17 +336,10 @@ class ChatBot(SingleRoomAgent):
         if toolkits is None:
             toolkits = []
 
-        self._decision_model = (
-            "gpt-4.1-mini" if decision_model is None else decision_model
-        )
-
         if always_reply is None:
             always_reply = False
 
         self._always_reply = always_reply
-
-        self._llm_adapter = llm_adapter
-        self._tool_adapter = tool_adapter
 
         self._message_channels = dict[str, Chan[_QueuedChatMessage]]()
 
@@ -359,8 +360,22 @@ class ChatBot(SingleRoomAgent):
 
         self._thread_tasks = dict[str, asyncio.Task]()
         self._open_threads = {}
+        self._thread_contexts: dict[str, ChatThreadContext] = {}
 
         self._skill_dirs = skill_dirs
+
+    async def _clear_thread_status(self, *, path: str) -> None:
+        del path
+
+    def _clear_thread_status_nowait(self, *, path: str) -> None:
+        del path
+
+    def _update_thread_status_from_event(self, *, path: str, event: dict) -> None:
+        del path
+        del event
+
+    async def _clear_all_thread_statuses(self) -> None:
+        pass
 
     async def _send_and_save_chat(
         self,
@@ -410,12 +425,12 @@ class ChatBot(SingleRoomAgent):
         *,
         thread: MeshDocument,
         path: str,
-        chat_context: AgentChatContext,
+        thread_context: ChatThreadContext,
         participant: RemoteParticipant,
         thread_attributes: dict,
     ):
         if self._auto_greet_message is not None:
-            chat_context.append_user_message(self._auto_greet_message)
+            thread_context.chat.append_user_message(self._auto_greet_message)
             await self._send_and_save_chat(
                 id=str(uuid.uuid4()),
                 to=RemoteParticipant(id=participant.id),
@@ -446,7 +461,7 @@ class ChatBot(SingleRoomAgent):
                 room=self.room,
                 caller=self.room.local_participant,
                 on_behalf_of=participant,
-                caller_context={"chat": thread_context.chat.to_json()},
+                caller_context=thread_context.to_caller_context(),
                 event_handler=thread_context.emit,
             )
         )
@@ -479,34 +494,34 @@ class ChatBot(SingleRoomAgent):
             )
         )
 
-        if isinstance(self._llm_adapter, OpenAIResponsesAdapter):
-            toolkits.append(
-                Toolkit(
-                    name="reasoning",
-                    tools=[
-                        ChatBotReasoningTool(
-                            room=self._room,
-                            thread_context=thread_context,
-                        )
-                    ],
-                )
-            )
-
         toolkit = self._open_threads[thread_context.path].make_toolkit()
 
         return [*self._toolkits, *toolkits, toolkit]
 
-    async def init_chat_context(self) -> AgentChatContext:
-        context = self._llm_adapter.create_chat_context()
-        context.append_rules(self._rules)
-        return context
+    @abstractmethod
+    def default_model(self) -> str: ...
+
+    @abstractmethod
+    async def create_thread_context(
+        self,
+        *,
+        path: str,
+        thread: MeshDocument,
+        participants: list[RemoteParticipant],
+        event_handler: Callable[[dict], None],
+    ) -> ChatThreadContext: ...
+
+    def create_thread_adapter(self, *, path: str) -> ThreadAdapter:
+        return ThreadAdapter(
+            room=self.room,
+            path=path,
+            format_message=self.format_message,
+        )
 
     async def open_thread(self, *, path: str) -> ThreadAdapter:
         logger.info(f"opening thread {path}")
         if path not in self._open_threads:
-            adapter = ThreadAdapter(
-                room=self.room, path=path, format_message=self.format_message
-            )
+            adapter = self.create_thread_adapter(path=path)
             await adapter.start()
             self._open_threads[path] = adapter
 
@@ -519,11 +534,71 @@ class ChatBot(SingleRoomAgent):
         if adapter is not None:
             await adapter.stop()
 
-    async def prepare_llm_context(self, *, thread_context: ChatThreadContext):
-        """
-        called prior to sending the request to the LLM in case the agent needs to modify the context prior to sending
-        """
+    async def on_thread_open(self, *, thread_context: ChatThreadContext):
         pass
+
+    async def on_thread_clear(self, *, thread_context: ChatThreadContext):
+        pass
+
+    async def on_thread_cancel(self, *, thread_context: ChatThreadContext):
+        pass
+
+    async def on_thread_close(self, *, thread_context: ChatThreadContext):
+        pass
+
+    async def on_approved(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        from_participant: RemoteParticipant,
+        message: dict,
+    ):
+        pass
+
+    async def on_rejected(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        from_participant: RemoteParticipant,
+        message: dict,
+    ):
+        pass
+
+    async def _safe_invoke_thread_event(
+        self,
+        *,
+        event_name: str,
+        thread_context: ChatThreadContext,
+        handler: Callable[..., Awaitable[None]],
+    ) -> None:
+        try:
+            await handler(thread_context=thread_context)
+        except Exception as e:
+            logger.error(
+                f"chatbot thread event hook '{event_name}' failed",
+                exc_info=e,
+            )
+
+    async def _safe_invoke_chat_event(
+        self,
+        *,
+        event_name: str,
+        thread_context: ChatThreadContext,
+        from_participant: RemoteParticipant,
+        message: dict[str, Any],
+        handler: Callable[..., Awaitable[None]],
+    ) -> None:
+        try:
+            await handler(
+                thread_context=thread_context,
+                from_participant=from_participant,
+                message=message,
+            )
+        except Exception as e:
+            logger.error(
+                f"chatbot chat event hook '{event_name}' failed",
+                exc_info=e,
+            )
 
     def get_thread_members(self, *, thread: MeshDocument) -> list[str]:
         results = []
@@ -534,151 +609,6 @@ class ChatBot(SingleRoomAgent):
                     results.append(member.get_attribute("name"))
 
         return results
-
-    async def should_reply(
-        self,
-        *,
-        context: ChatThreadContext,
-        has_more_than_one_other_user: bool,
-        toolkits: list[Toolkit],
-        from_user: RemoteParticipant,
-        online: list[Participant],
-    ):
-        if not has_more_than_one_other_user or self._always_reply:
-            return True
-
-        online_set = {}
-
-        all_members = []
-        online_members = []
-
-        for m in self.get_thread_members(thread=context.thread):
-            all_members.append(m)
-
-        for o in online:
-            if o.get_attribute("name") not in online_set:
-                online_set[o.get_attribute("name")] = True
-                online_members.append(o.get_attribute("name"))
-
-        logger.info(
-            "multiple participants detected, checking whether agent should reply to conversation"
-        )
-
-        cloned_context = context.chat.copy()
-        cloned_context.replace_rules(
-            rules=[
-                "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
-                f'your name (the assistant) is "{self.room.local_participant.get_attribute("name")}"',
-                "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
-                "if the user poses a question to everyone, they are talking to you",
-                f"members of thread are currently {all_members}",
-                f"users online currently are {online_members}",
-            ]
-        )
-        response = await self._llm_adapter.next(
-            context=cloned_context,
-            room=self._room,
-            model=self._decision_model or self._llm_adapter.default_model(),
-            on_behalf_of=from_user,
-            toolkits=[],
-            output_schema={
-                "type": "object",
-                "required": ["reasoning", "expecting_assistant_reply", "next_user"],
-                "additionalProperties": False,
-                "properties": {
-                    "reasoning": {
-                        "type": "string",
-                        "description": "explain why you think the user was or was not expecting you to reply",
-                    },
-                    "next_user": {
-                        "type": "string",
-                        "description": "who would be expected to send the next message in the conversation",
-                    },
-                    "expecting_assistant_reply": {"type": "boolean"},
-                },
-            },
-        )
-
-        logger.info(f"should reply check returned {response}")
-
-        return response["expecting_assistant_reply"]
-
-    async def handle_user_message(
-        self,
-        *,
-        context: ChatThreadContext,
-        toolkits: list[Toolkit],
-        model: str,
-        from_user: RemoteParticipant,
-        event_handler,
-    ) -> str:
-        online = await self.get_online_participants(
-            thread=context.thread, exclude=[self.room.local_participant]
-        )
-
-        for participant in get_online_participants(
-            room=self._room, thread=context.thread
-        ):
-            self._room.messaging.send_message_nowait(
-                to=participant,
-                type="listening",
-                message={"listening": True, "path": context.path},
-            )
-
-        has_more_than_one_other_user = False
-
-        thread_participants = []
-
-        for member_name in self.get_thread_members(thread=context.thread):
-            thread_participants.append(member_name)
-            if member_name != self._room.local_participant.get_attribute(
-                "name"
-            ) and member_name != from_user.get_attribute("name"):
-                has_more_than_one_other_user = True
-                break
-
-        context.chat.metadata["thread_participants"] = thread_participants
-
-        reply = await self.should_reply(
-            has_more_than_one_other_user=has_more_than_one_other_user,
-            online=online,
-            context=context,
-            toolkits=toolkits,
-            from_user=from_user,
-        )
-
-        for participant in get_online_participants(
-            room=self._room, thread=context.thread
-        ):
-            self._room.messaging.send_message_nowait(
-                to=participant,
-                type="listening",
-                message={"listening": False, "path": context.path},
-            )
-
-        if not reply:
-            return
-
-        for participant in get_online_participants(
-            room=self._room, thread=context.thread
-        ):
-            self._room.messaging.send_message_nowait(
-                to=participant,
-                type="thinking",
-                message={"thinking": True, "path": context.path},
-            )
-
-        self.prepare_chat_context(chat_context=context.chat)
-
-        return await self._llm_adapter.next(
-            context=context.chat,
-            room=self._room,
-            toolkits=toolkits,
-            tool_adapter=self._tool_adapter,
-            event_handler=event_handler,
-            model=model,
-            on_behalf_of=from_user,
-        )
 
     async def get_rules(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
@@ -712,21 +642,14 @@ class ChatBot(SingleRoomAgent):
         thread_context: ChatThreadContext,
         from_participant: RemoteParticipant,
         message: dict,
-    ):
-        rules = await self.get_rules(
-            thread_context=thread_context, participant=from_participant
-        )
-        thread_context.chat.replace_rules(rules)
+    ) -> Optional[str]:
+        return None
 
     def format_message(self, *, user_name: str, message: str, iso_timestamp: str):
         return f"{user_name} said at {iso_timestamp}: {message}"
 
-    def prepare_chat_context(self, *, chat_context: AgentChatContext):
-        pass
-
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
-        chat_context = await self.init_chat_context()
         opened = False
 
         current_file = None
@@ -774,6 +697,7 @@ class ChatBot(SingleRoomAgent):
                 return
 
             thread_adapter.push(event=evt)
+            self._update_thread_status_from_event(path=path, event=evt)
 
         try:
             received = None
@@ -781,6 +705,7 @@ class ChatBot(SingleRoomAgent):
             while True:
                 logger.debug(f"waiting for message on thread {path}")
                 received = await messages.recv()
+
                 logger.debug(f"received message on thread {path}: {received.type}")
 
                 chat_with_participant = received.from_participant
@@ -804,16 +729,6 @@ class ChatBot(SingleRoomAgent):
                     )
                     current_file = chat_with_participant.get_attribute("current_file")
 
-                if current_file is not None:
-                    chat_context.append_assistant_message(
-                        message=f"{chat_with_participant.get_attribute('name')} is currently viewing the file at the path: {current_file}"
-                    )
-
-                elif current_file is not None:
-                    chat_context.append_assistant_message(
-                        message=f"{chat_with_participant.get_attribute('name')} is not current viewing any files"
-                    )
-
                 if thread is None:
                     with tracer.start_as_current_span("chatbot.thread.open") as span:
                         span.set_attributes(thread_attributes)
@@ -823,9 +738,8 @@ class ChatBot(SingleRoomAgent):
                         if thread is None:
                             raise RoomException("thread was not opened")
 
-                        thread_context = ChatThreadContext(
+                        thread_context = await self.create_thread_context(
                             path=path,
-                            chat=chat_context,
                             thread=thread,
                             participants=get_online_participants(
                                 room=self.room, thread=thread
@@ -834,30 +748,54 @@ class ChatBot(SingleRoomAgent):
                                 evt, chat_with_participant
                             ),
                         )
+                        self._thread_contexts[path] = thread_context
 
                         thread_adapter.append_messages(
-                            context=chat_context,
+                            context=thread_context.chat,
                         )
 
                 if received.type == "opened":
                     if not opened:
                         opened = True
 
+                        if thread_context is not None:
+                            await self._safe_invoke_thread_event(
+                                event_name="open",
+                                thread_context=thread_context,
+                                handler=self.on_thread_open,
+                            )
+
                         await self._greet(
                             path=path,
-                            chat_context=chat_context,
+                            thread_context=thread_context,
                             participant=chat_with_participant,
                             thread=thread,
                             thread_attributes=thread_attributes,
                         )
                 elif received.type == "clear":
-                    chat_context = await self.init_chat_context()
-                    thread_context.chat = chat_context
+                    thread_context = await self.create_thread_context(
+                        path=path,
+                        thread=thread,
+                        participants=get_online_participants(
+                            room=self.room, thread=thread
+                        ),
+                        event_handler=lambda evt: handle_event(
+                            evt, chat_with_participant
+                        ),
+                    )
+                    self._thread_contexts[path] = thread_context
                     messages_element: Element = thread.root.get_children_by_tag_name(
                         "messages"
                     )[0]
                     for child in list(messages_element.get_children()):
                         child.delete()
+
+                    if thread_context is not None:
+                        await self._safe_invoke_thread_event(
+                            event_name="clear",
+                            thread_context=thread_context,
+                            handler=self.on_thread_clear,
+                        )
 
                 elif received.type == "chat":
                     if thread is None:
@@ -867,33 +805,17 @@ class ChatBot(SingleRoomAgent):
                     logger.debug(
                         "chatbot received a chat",
                         extra={
-                            "context": chat_context.id,
+                            "context": (
+                                thread_context.context_id
+                                if thread_context is not None
+                                else None
+                            ),
                             "participant_id": self.room.local_participant.id,
                             "participant_name": self.room.local_participant.get_attribute(
                                 "name"
                             ),
                             "text": received.message["text"],
                         },
-                    )
-
-                    attachments = received.message.get("attachments", [])
-                    text = received.message["text"]
-
-                    for attachment in attachments:
-                        chat_context.append_assistant_message(
-                            message=f"the user attached a file at the path '{attachment['path']}'"
-                        )
-
-                    iso_timestamp = (
-                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                    )
-
-                    chat_context.append_user_message(
-                        message=self.format_message(
-                            user_name=chat_with_participant.get_attribute("name"),
-                            message=text,
-                            iso_timestamp=iso_timestamp,
-                        )
                     )
 
                 if received is not None and received.type == "chat":
@@ -913,9 +835,8 @@ class ChatBot(SingleRoomAgent):
 
                         try:
                             if thread_context is None:
-                                thread_context = ChatThreadContext(
+                                thread_context = await self.create_thread_context(
                                     path=path,
-                                    chat=chat_context,
                                     thread=thread,
                                     participants=get_online_participants(
                                         room=self.room, thread=thread
@@ -924,83 +845,42 @@ class ChatBot(SingleRoomAgent):
                                         evt, chat_with_participant
                                     ),
                                 )
+                                self._thread_contexts[path] = thread_context
                             else:
                                 thread_context.participants = get_online_participants(
                                     room=self.room, thread=thread
                                 )
 
-                            await self.on_chat_received(
+                            for participant in get_online_participants(
+                                room=self._room, thread=thread
+                            ):
+                                self._room.messaging.send_message_nowait(
+                                    to=participant,
+                                    type="thinking",
+                                    message={"thinking": True, "path": path},
+                                )
+
+                            result = await self.on_chat_received(
                                 thread_context=thread_context,
                                 from_participant=chat_with_participant,
                                 message=received.message,
                             )
+                            received.result.set_result(result)
 
-                            with tracer.start_as_current_span("chatbot.llm") as span:
-                                try:
-                                    with tracer.start_as_current_span(
-                                        "get_thread_toolkits"
-                                    ) as span:
-                                        thread_toolkits = (
-                                            await self.get_thread_toolkits(
-                                                thread_context=thread_context,
-                                                participant=chat_with_participant,
-                                            )
-                                        )
-
-                                    with tracer.start_as_current_span(
-                                        "get_thread_toolkit_builders"
-                                    ) as span:
-                                        thread_tool_providers = (
-                                            self.get_toolkit_builders()
-                                        )
-
-                                    await self.prepare_llm_context(
-                                        thread_context=thread_context
-                                    )
-
-                                    message_toolkits = [*thread_toolkits]
-
-                                    model = received.message.get(
-                                        "model", self._llm_adapter.default_model()
-                                    )
-
-                                    message_tools = received.message.get("tools")
-
-                                    if (
-                                        message_tools is not None
-                                        and len(message_tools) > 0
-                                    ):
-                                        message_toolkits.extend(
-                                            await make_toolkits(
-                                                room=self.room,
-                                                model=model,
-                                                providers=thread_tool_providers,
-                                                tools=message_tools,
-                                            )
-                                        )
-
-                                    result = await self.handle_user_message(
-                                        context=thread_context,
-                                        toolkits=message_toolkits,
-                                        event_handler=thread_context.emit,
-                                        model=model,
-                                        from_user=chat_with_participant,
-                                    )
-
-                                    received.result.set_result(result)
-
-                                except Exception as e:
-                                    logger.error("An error was encountered", exc_info=e)
-                                    text = "An unexpected error occured. Please try again later."
-                                    await self._send_and_save_chat(
-                                        thread=thread,
-                                        to=chat_with_participant,
-                                        path=path,
-                                        id=str(uuid.uuid4()),
-                                        text=text,
-                                        thread_attributes=thread_attributes,
-                                    )
-                                    received.result.set_result(text)
+                        except Exception as e:
+                            logger.error("An error was encountered", exc_info=e)
+                            text = (
+                                "An unexpected error occured. Please try again later."
+                            )
+                            await self._send_and_save_chat(
+                                thread=thread,
+                                to=chat_with_participant,
+                                path=path,
+                                id=str(uuid.uuid4()),
+                                text=text,
+                                thread_attributes=thread_attributes,
+                            )
+                            received.result.set_result(text)
 
                         finally:
 
@@ -1023,6 +903,14 @@ class ChatBot(SingleRoomAgent):
                     logger.info(f"thread was ended {path}")
                     logger.info("chatbot thread ended", extra={"path": path})
 
+                    thread_context = self._thread_contexts.pop(path, None)
+                    if thread_context is not None:
+                        await self._safe_invoke_thread_event(
+                            event_name="close",
+                            thread_context=thread_context,
+                            handler=self.on_thread_close,
+                        )
+
                     await self.close_thread(path=path)
 
             asyncio.shield(cleanup())
@@ -1038,6 +926,8 @@ class ChatBot(SingleRoomAgent):
 
     async def stop(self):
         await super().stop()
+
+        await self._clear_all_thread_statuses()
 
         for thread in self._thread_tasks.values():
             thread.cancel()
@@ -1177,10 +1067,90 @@ class ChatBot(SingleRoomAgent):
 
             return msg
 
+        elif message.type == "approved" or message.type == "rejected":
+            path = message.message["path"]
+
+            if from_participant is None:
+                for participant in self._room.messaging.get_participants():
+                    if participant.id == message.from_participant_id:
+                        from_participant = participant
+                        break
+
+                if from_participant is None:
+                    logger.warning(
+                        "participant does not have messaging enabled, skipping message"
+                    )
+                    return
+
+            async def handle_approval_response():
+                thread_context = self._thread_contexts.get(path)
+                if thread_context is None:
+                    logger.warning(
+                        f"unable to process {message.type} for thread {path}: thread is not open"
+                    )
+                    return
+
+                if message.type == "approved":
+                    await self._safe_invoke_chat_event(
+                        event_name="approved",
+                        thread_context=thread_context,
+                        from_participant=from_participant,
+                        message=message.message,
+                        handler=self.on_approved,
+                    )
+                else:
+                    await self._safe_invoke_chat_event(
+                        event_name="rejected",
+                        thread_context=thread_context,
+                        from_participant=from_participant,
+                        message=message.message,
+                        handler=self.on_rejected,
+                    )
+
+            task = asyncio.create_task(handle_approval_response())
+
+            def on_done(task: asyncio.Task):
+                try:
+                    task.result()
+                except CancelledError:
+                    pass
+                except Exception as ex:
+                    logger.error(
+                        f"unable to process {message.type} message for thread {path}",
+                        exc_info=ex,
+                    )
+
+            task.add_done_callback(on_done)
+
         elif message.type == "cancel":
             path = message.message["path"]
-            if path in self._thread_tasks:
-                self._thread_tasks[path].cancel()
+
+            async def handle_cancel():
+                thread_context = self._thread_contexts.get(path)
+                if thread_context is not None:
+                    await self._safe_invoke_thread_event(
+                        event_name="cancel",
+                        thread_context=thread_context,
+                        handler=self.on_thread_cancel,
+                    )
+
+                if path in self._thread_tasks:
+                    self._thread_tasks[path].cancel()
+
+            task = asyncio.create_task(handle_cancel())
+
+            def on_done(task: asyncio.Task):
+                try:
+                    task.result()
+                except CancelledError:
+                    pass
+                except Exception as ex:
+                    logger.error(
+                        f"unable to process cancel message for thread {path}",
+                        exc_info=ex,
+                    )
+
+            task.add_done_callback(on_done)
 
         elif message.type == "typing":
 
@@ -1229,3 +1199,460 @@ class ChatBot(SingleRoomAgent):
 
         logger.debug("Enabling chatbot messaging")
         await room.messaging.enable()
+
+
+class ChatBot(ChatBotBase):
+    def __init__(
+        self,
+        *,
+        name=None,
+        title=None,
+        description=None,
+        requires: Optional[list[Requirement]] = None,
+        llm_adapter: LLMAdapter,
+        tool_adapter: Optional[ToolResponseAdapter] = None,
+        toolkits: Optional[list[Toolkit]] = None,
+        rules: Optional[list[str]] = None,
+        client_rules: Optional[dict[str, list[str]]] = None,
+        auto_greet_message: Optional[str] = None,
+        empty_state_title: Optional[str] = None,
+        annotations: Optional[list[str]] = None,
+        decision_model: Optional[str] = None,
+        always_reply: Optional[bool] = None,
+        skill_dirs: Optional[list[str]] = None,
+    ):
+        self._llm_adapter = llm_adapter
+        self._tool_adapter = tool_adapter
+        self._decision_model = (
+            "gpt-4.1-mini" if decision_model is None else decision_model
+        )
+        self._thread_status_values: dict[str, str] = {}
+        self._thread_status_keys: dict[str, str] = {}
+        self._thread_status_locks: dict[str, asyncio.Lock] = {}
+
+        super().__init__(
+            name=name,
+            title=title,
+            description=description,
+            requires=requires,
+            toolkits=toolkits,
+            rules=rules,
+            client_rules=client_rules,
+            auto_greet_message=auto_greet_message,
+            empty_state_title=empty_state_title,
+            annotations=annotations,
+            always_reply=always_reply,
+            skill_dirs=skill_dirs,
+        )
+
+    def default_model(self) -> str:
+        return self._llm_adapter.default_model()
+
+    def _thread_status_attribute_name(self, *, path: str) -> str:
+        return f"thread.status.{path}"
+
+    def _status_lock(self, *, path: str) -> asyncio.Lock:
+        lock = self._thread_status_locks.get(path)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._thread_status_locks[path] = lock
+        return lock
+
+    async def _set_thread_status(self, *, path: str, status: Optional[str]) -> None:
+        if self._room is None or self._room.local_participant is None:
+            return
+
+        attribute_name = self._thread_status_attribute_name(path=path)
+        if status is None:
+            self._thread_status_values.pop(path, None)
+            await self._room.local_participant.set_attribute(attribute_name, None)
+            return
+
+        normalized = status.strip()
+        if normalized == "":
+            self._thread_status_values.pop(path, None)
+            await self._room.local_participant.set_attribute(attribute_name, None)
+            return
+
+        if self._thread_status_values.get(path) == normalized:
+            return
+
+        self._thread_status_values[path] = normalized
+        await self._room.local_participant.set_attribute(attribute_name, normalized)
+
+    async def _apply_thread_status(self, *, path: str, status: Optional[str]) -> None:
+        lock = self._status_lock(path=path)
+        async with lock:
+            await self._set_thread_status(path=path, status=status)
+
+    def _set_thread_status_nowait(self, *, path: str, status: Optional[str]) -> None:
+        async def run() -> None:
+            try:
+                await self._apply_thread_status(path=path, status=status)
+            except Exception as ex:
+                logger.error(
+                    f"unable to set thread status for {path}",
+                    exc_info=ex,
+                )
+
+        asyncio.create_task(run())
+
+    def _status_event_details(
+        self, *, event: dict
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        normalized_event = None
+        event_type = event.get("type")
+        if event_type in ("agent.event", "codex.event"):
+            normalized_event = event
+        else:
+            normalized_event = response_event_to_agent_event(event)
+
+        if not isinstance(normalized_event, dict):
+            return None, None, None
+
+        kind = normalized_event.get("kind")
+        if not isinstance(kind, str):
+            kind = ""
+        kind = kind.strip().lower()
+        if kind not in (
+            "exec",
+            "tool",
+            "web",
+            "search",
+            "diff",
+            "image",
+        ):
+            return None, None, None
+
+        state = normalized_event.get("state")
+        if not isinstance(state, str):
+            state = ""
+        state = state.strip().lower()
+
+        key = None
+        for candidate in (
+            normalized_event.get("correlation_key"),
+            normalized_event.get("event_key"),
+            normalized_event.get("item_id"),
+            normalized_event.get("name"),
+            normalized_event.get("method"),
+        ):
+            if isinstance(candidate, str) and candidate.strip() != "":
+                key = candidate.strip()
+                break
+
+        text = None
+        for candidate in (
+            normalized_event.get("headline"),
+            normalized_event.get("summary"),
+            normalized_event.get("name"),
+            normalized_event.get("method"),
+        ):
+            if isinstance(candidate, str):
+                normalized = candidate.strip()
+                if normalized != "":
+                    text = normalized
+                    break
+
+        return key, state, text
+
+    def _update_thread_status_from_event(self, *, path: str, event: dict) -> None:
+        key, state, text = self._status_event_details(event=event)
+        if state is None:
+            return
+
+        is_active = state in (
+            "queued",
+            "in_progress",
+            "running",
+            "pending",
+            "searching",
+        )
+        if is_active:
+            if text is None:
+                return
+            if key is not None:
+                self._thread_status_keys[path] = key
+            self._set_thread_status_nowait(path=path, status=text)
+            return
+
+        if key is not None:
+            tracked = self._thread_status_keys.get(path)
+            if tracked is not None and tracked == key:
+                self._clear_thread_status_nowait(path=path)
+            return
+
+        if state in ("completed", "failed", "cancelled"):
+            self._clear_thread_status_nowait(path=path)
+
+    async def _clear_thread_status(self, *, path: str) -> None:
+        self._thread_status_keys.pop(path, None)
+        await self._apply_thread_status(path=path, status=None)
+
+    def _clear_thread_status_nowait(self, *, path: str) -> None:
+        self._thread_status_keys.pop(path, None)
+        self._set_thread_status_nowait(path=path, status=None)
+
+    async def _clear_all_thread_statuses(self) -> None:
+        paths = {
+            *self._thread_status_values.keys(),
+            *self._thread_status_keys.keys(),
+        }
+        for path in paths:
+            await self._set_thread_status(path=path, status=None)
+        self._thread_status_keys.clear()
+        self._thread_status_values.clear()
+        self._thread_status_locks.clear()
+
+    async def create_thread_context(
+        self,
+        *,
+        path: str,
+        thread: MeshDocument,
+        participants: list[RemoteParticipant],
+        event_handler: Callable[[dict], None],
+    ) -> ChatThreadContext:
+        return ChatThreadContext(
+            path=path,
+            thread=thread,
+            participants=participants,
+            event_handler=event_handler,
+            chat=await self.init_chat_context(),
+        )
+
+    # Backwards compatibility for existing subclasses overriding init_chat_context.
+    async def init_chat_context(self) -> AgentChatContext:
+        context = self._llm_adapter.create_chat_context()
+        context.append_rules(self._rules)
+        return context
+
+    async def prepare_llm_context(self, *, thread_context: ChatThreadContext):
+        """
+        called prior to sending the request to the LLM in case the agent needs to modify the context prior to sending
+        """
+        pass
+
+    def prepare_chat_context(self, *, chat_context: AgentChatContext):
+        pass
+
+    async def get_thread_toolkits(
+        self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
+    ) -> list[Toolkit]:
+        toolkits = await super().get_thread_toolkits(
+            thread_context=thread_context, participant=participant
+        )
+
+        if isinstance(self._llm_adapter, OpenAIResponsesAdapter):
+            toolkits.insert(
+                0,
+                Toolkit(
+                    name="reasoning",
+                    tools=[
+                        ChatBotReasoningTool(
+                            room=self._room,
+                            thread_context=thread_context,
+                        )
+                    ],
+                ),
+            )
+
+        return toolkits
+
+    async def should_reply(
+        self,
+        *,
+        context: ChatThreadContext,
+        has_more_than_one_other_user: bool,
+        toolkits: list[Toolkit],
+        from_user: RemoteParticipant,
+        online: list[Participant],
+    ):
+        if not has_more_than_one_other_user or self._always_reply:
+            return True
+
+        online_set = {}
+
+        all_members = []
+        online_members = []
+
+        for m in self.get_thread_members(thread=context.thread):
+            all_members.append(m)
+
+        for o in online:
+            if o.get_attribute("name") not in online_set:
+                online_set[o.get_attribute("name")] = True
+                online_members.append(o.get_attribute("name"))
+
+        logger.info(
+            "multiple participants detected, checking whether agent should reply to conversation"
+        )
+
+        cloned_context = context.chat.copy()
+        cloned_context.replace_rules(
+            rules=[
+                "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
+                f'your name (the assistant) is "{self.room.local_participant.get_attribute("name")}"',
+                "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
+                "if the user poses a question to everyone, they are talking to you",
+                f"members of thread are currently {all_members}",
+                f"users online currently are {online_members}",
+            ]
+        )
+        response = await self._llm_adapter.next(
+            context=cloned_context,
+            room=self._room,
+            model=self._decision_model or self._llm_adapter.default_model(),
+            on_behalf_of=from_user,
+            toolkits=[],
+            output_schema={
+                "type": "object",
+                "required": ["reasoning", "expecting_assistant_reply", "next_user"],
+                "additionalProperties": False,
+                "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "explain why you think the user was or was not expecting you to reply",
+                    },
+                    "next_user": {
+                        "type": "string",
+                        "description": "who would be expected to send the next message in the conversation",
+                    },
+                    "expecting_assistant_reply": {"type": "boolean"},
+                },
+            },
+        )
+
+        logger.info(f"should reply check returned {response}")
+
+        return response["expecting_assistant_reply"]
+
+    async def on_thread_open(self, *, thread_context: ChatThreadContext):
+        await self._clear_thread_status(path=thread_context.path)
+
+    async def on_thread_clear(self, *, thread_context: ChatThreadContext):
+        await self._clear_thread_status(path=thread_context.path)
+
+    async def on_thread_cancel(self, *, thread_context: ChatThreadContext):
+        await self._clear_thread_status(path=thread_context.path)
+
+    async def on_thread_close(self, *, thread_context: ChatThreadContext):
+        await self._clear_thread_status(path=thread_context.path)
+
+    async def on_chat_received(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        from_participant: RemoteParticipant,
+        message: dict,
+    ) -> Optional[str]:
+        rules = await self.get_rules(
+            thread_context=thread_context,
+            participant=from_participant,
+        )
+        thread_context.chat.replace_rules(rules)
+
+        attachments = message.get("attachments", [])
+        for attachment in attachments:
+            thread_context.chat.append_assistant_message(
+                message=f"the user attached a file at the path '{attachment['path']}'"
+            )
+
+        text = message["text"]
+        iso_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        thread_context.chat.append_user_message(
+            message=self.format_message(
+                user_name=from_participant.get_attribute("name"),
+                message=text,
+                iso_timestamp=iso_timestamp,
+            )
+        )
+
+        model = message.get("model", self.default_model())
+
+        with tracer.start_as_current_span("chatbot.llm"):
+            with tracer.start_as_current_span("get_thread_toolkits"):
+                thread_toolkits = await self.get_thread_toolkits(
+                    thread_context=thread_context,
+                    participant=from_participant,
+                )
+
+            with tracer.start_as_current_span("get_thread_toolkit_builders"):
+                thread_tool_providers = self.get_toolkit_builders()
+
+            await self.prepare_llm_context(thread_context=thread_context)
+
+            message_toolkits = [*thread_toolkits]
+            message_tools = message.get("tools")
+
+            if message_tools is not None and len(message_tools) > 0:
+                message_toolkits.extend(
+                    await make_toolkits(
+                        room=self.room,
+                        model=model,
+                        providers=thread_tool_providers,
+                        tools=message_tools,
+                    )
+                )
+
+        online = await self.get_online_participants(
+            thread=thread_context.thread, exclude=[self.room.local_participant]
+        )
+
+        for participant in get_online_participants(
+            room=self._room, thread=thread_context.thread
+        ):
+            self._room.messaging.send_message_nowait(
+                to=participant,
+                type="listening",
+                message={"listening": True, "path": thread_context.path},
+            )
+
+        has_more_than_one_other_user = False
+
+        thread_participants = []
+
+        for member_name in self.get_thread_members(thread=thread_context.thread):
+            thread_participants.append(member_name)
+            if member_name != self._room.local_participant.get_attribute(
+                "name"
+            ) and member_name != from_participant.get_attribute("name"):
+                has_more_than_one_other_user = True
+                break
+
+        thread_context.chat.metadata["thread_participants"] = thread_participants
+
+        reply = await self.should_reply(
+            has_more_than_one_other_user=has_more_than_one_other_user,
+            online=online,
+            context=thread_context,
+            toolkits=message_toolkits,
+            from_user=from_participant,
+        )
+
+        for participant in get_online_participants(
+            room=self._room, thread=thread_context.thread
+        ):
+            self._room.messaging.send_message_nowait(
+                to=participant,
+                type="listening",
+                message={"listening": False, "path": thread_context.path},
+            )
+
+        if not reply:
+            return None
+
+        self.prepare_chat_context(chat_context=thread_context.chat)
+
+        await self._clear_thread_status(path=thread_context.path)
+        try:
+            return await self._llm_adapter.next(
+                context=thread_context.chat,
+                room=self._room,
+                toolkits=message_toolkits,
+                tool_adapter=self._tool_adapter,
+                event_handler=thread_context.emit,
+                model=model,
+                on_behalf_of=from_participant,
+            )
+        finally:
+            await self._clear_thread_status(path=thread_context.path)

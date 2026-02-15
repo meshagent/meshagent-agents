@@ -35,7 +35,13 @@ thread_schema = MeshSchema(
             properties=[
                 ChildProperty(
                     name="items",
-                    child_tag_names=["message", "exec", "ui", "reasoning"],
+                    child_tag_names=[
+                        "message",
+                        "exec",
+                        "ui",
+                        "reasoning",
+                        "event",
+                    ],
                     description="the messages in this thread",
                 )
             ],
@@ -154,6 +160,82 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="created_at",
                     description="the time that the reasoning started",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
+            tag_name="event",
+            description="a structured event emitted by an agent backend",
+            properties=[
+                ValueProperty(
+                    name="id",
+                    description="a unique id for this event",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="source",
+                    description="backend source, for example codex/openai/anthropic/chatkit",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="name",
+                    description="normalized event name",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="kind",
+                    description="high-level event category, for example turn/item/plan/diff/exec",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="state",
+                    description="lifecycle state, for example queued/in_progress/completed/failed/cancelled/info",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="method",
+                    description="source event or rpc method",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="item_id",
+                    description="item id for this event, when available",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="item_type",
+                    description="item type for this event, when available",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="summary",
+                    description="short human readable summary",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="headline",
+                    description="primary event headline for compact rendering",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="details",
+                    description="optional newline-delimited detail lines for structured rendering",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="data",
+                    description="serialized backend payload",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the date this event was emitted in ISO format",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="updated_at",
+                    description="the date this event was last updated in ISO format",
                     type="string",
                 ),
             ],
