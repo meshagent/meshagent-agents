@@ -1486,12 +1486,17 @@ class ChatBot(ChatBotBase):
         logger.info(
             "multiple participants detected, checking whether agent should reply to conversation"
         )
-        
+
         toolkits_json = ""
         for toolkit in toolkits:
-            toolkits_json = toolkits_json + f"\n{toolkit.name} ({toolkit.title}): {toolkit.description}"
+            toolkits_json = (
+                toolkits_json
+                + f"\n{toolkit.name} ({toolkit.title}): {toolkit.description}"
+            )
             for t in toolkit.tools:
-                toolkits_json = toolkits_json + f"\n - {t.name} ({t.title}): {t.description}"
+                toolkits_json = (
+                    toolkits_json + f"\n - {t.name} ({t.title}): {t.description}"
+                )
 
         print(toolkits_json)
 
@@ -1507,7 +1512,7 @@ class ChatBot(ChatBotBase):
                 f"users online currently are {online_members}",
                 "if in doubt, reply to the user",
                 f"if the user is asking for something that these toolkits can do, they want an answer from you: {toolkits_json}",
-                "if the user they appear to be talking to is offline, then they probably are talking to you"
+                "if the user they appear to be talking to is offline, then they probably are talking to you",
             ]
         )
         response = await self._llm_adapter.next(
