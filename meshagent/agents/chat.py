@@ -1486,6 +1486,14 @@ class ChatBot(ChatBotBase):
         logger.info(
             "multiple participants detected, checking whether agent should reply to conversation"
         )
+        
+        toolkits_json = ""
+        for toolkit in toolkits:
+            toolkits_json = toolkits_json + f"\n{toolkit.name} ({toolkit.title}): {toolkit.description}"
+            for t in toolkit.tools:
+                toolkits_json = toolkits_json + f"\n - {t.name} ({t.title}): {t.description}"
+
+        print(toolkits_json)
 
         cloned_context = context.chat.copy()
         cloned_context.replace_rules(
@@ -1494,8 +1502,12 @@ class ChatBot(ChatBotBase):
                 f'your name (the assistant) is "{self.room.local_participant.get_attribute("name")}"',
                 "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
                 "if the user poses a question to everyone, they are talking to you",
+                "to help identify the different users in the conversation, every message in the thread will start with '{user_name} said at {time}'",
                 f"members of thread are currently {all_members}",
                 f"users online currently are {online_members}",
+                "if in doubt, reply to the user",
+                f"if the user is asking for something that these toolkits can do, they want an answer from you: {toolkits_json}",
+                "if the user they appear to be talking to is offline, then they probably are talking to you"
             ]
         )
         response = await self._llm_adapter.next(
