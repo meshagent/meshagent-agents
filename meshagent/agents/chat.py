@@ -260,6 +260,26 @@ class ChatBotClient:
             attachment=None,
         )
 
+    async def send_approval_decision(
+        self, *, approval_id: str, approve: bool
+    ) -> None:
+        if self._participant is None:
+            return
+
+        normalized_id = approval_id.strip()
+        if normalized_id == "":
+            raise RoomException("approval_id is required")
+
+        await self.room.messaging.send_message(
+            to=self._participant,
+            type="approved" if approve else "rejected",
+            message={
+                "path": self.thread_path,
+                "approval_id": normalized_id,
+            },
+            attachment=None,
+        )
+
     async def send(
         self,
         *,

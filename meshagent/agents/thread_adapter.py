@@ -994,7 +994,7 @@ class ThreadAdapter:
 
         action = item["action"]
         command = action["command"]
-        working_directory = action["working_directory"]
+        working_dir = action["working_dir"]
 
         for prop in self._thread.root.get_children():
             if prop.tag_name == "messages":
@@ -1003,7 +1003,7 @@ class ThreadAdapter:
 
         exec_element = messages.append_child(
             tag_name="exec",
-            attributes={"command": shlex.join(command), "pwd": working_directory},
+            attributes={"command": shlex.join(command), "pwd": working_dir},
         )
 
         evt = await self._llm_messages.get()
