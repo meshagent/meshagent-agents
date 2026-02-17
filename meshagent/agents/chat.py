@@ -260,9 +260,7 @@ class ChatBotClient:
             attachment=None,
         )
 
-    async def send_approval_decision(
-        self, *, approval_id: str, approve: bool
-    ) -> None:
+    async def send_approval_decision(self, *, approval_id: str, approve: bool) -> None:
         if self._participant is None:
             return
 
