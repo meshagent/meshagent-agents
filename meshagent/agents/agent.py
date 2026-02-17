@@ -396,6 +396,7 @@ class SingleRoomAgent(Agent):
 
         for required_toolkit in self.requires:
             if isinstance(required_toolkit, RequiredToolkit):
+                toolkit = None
                 if required_toolkit.participant_name is None:
                     toolkit = toolkits_by_name.get(required_toolkit.name, None)
                 else:
