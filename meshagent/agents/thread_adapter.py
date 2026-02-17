@@ -898,6 +898,8 @@ class ThreadAdapter:
                     updates.put_nowait((content_element, partial))
 
                 elif evt["type"] == "response.output_text.done":
+                    if content_element is not None:
+                        updates.put_nowait((content_element, evt["text"]))
                     content_element = None
                     with tracer.start_as_current_span("chatbot.thread.message") as span:
                         span.set_attribute(
