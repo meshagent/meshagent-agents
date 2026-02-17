@@ -36,6 +36,7 @@ from typing import Any, Optional, Callable, AsyncIterator, Awaitable
 import logging
 from asyncio import CancelledError
 from meshagent.api import RoomException
+from meshagent.api.chan import ChanClosed
 from opentelemetry import trace
 import json
 from pydantic import BaseModel
@@ -244,6 +245,17 @@ class ChatBotClient:
         await self.room.messaging.send_message(
             to=self._participant,
             type="clear",
+            message={"path": self.thread_path},
+            attachment=None,
+        )
+
+    async def cancel(self) -> None:
+        if self._participant is None:
+            return
+
+        await self.room.messaging.send_message(
+            to=self._participant,
+            type="cancel",
             message={"path": self.thread_path},
             attachment=None,
         )
@@ -573,6 +585,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
     ) -> None:
         try:
             await handler(thread_context=thread_context)
+        except ChanClosed:
+            logger.debug(
+                "chatbot thread event hook '%s' skipped because room channel is closed",
+                event_name,
+            )
         except Exception as e:
             logger.error(
                 f"chatbot thread event hook '{event_name}' failed",
