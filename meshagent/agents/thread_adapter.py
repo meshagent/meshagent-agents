@@ -7,7 +7,7 @@ import uuid
 from meshagent.tools import tool, Toolkit
 from datetime import datetime, timezone
 from typing import Any, Optional, Callable
-from meshagent.api import RemoteParticipant
+from meshagent.api import RemoteParticipant, Participant
 
 from opentelemetry import trace
 
@@ -521,6 +521,8 @@ class ThreadAdapter:
         self._active_events_by_key.clear()
 
         if self._thread is not None:
+            # TODO: Wait for pending changes to sync
+            await asyncio.sleep(3)
             await self._room.sync.close(path=self._thread_path)
             self._thread = None
 
@@ -820,7 +822,7 @@ class ThreadAdapter:
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "author_name": participant.get_attribute("name")
-                if isinstance(participant, RemoteParticipant)
+                if isinstance(participant, Participant)
                 else participant,
             },
         )

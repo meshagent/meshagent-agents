@@ -1,0 +1,248 @@
+import re
+
+import pytest
+
+import meshagent.agents.llmrunner as llmrunner_module
+from meshagent.agents.adapter import LLMAdapter
+from meshagent.agents.context import AgentChatContext
+from meshagent.agents.llmrunner import LLMTaskRunner
+from meshagent.agents.task_runner import TaskContext
+
+
+class _FakeParticipant:
+    def __init__(self, *, name: str, participant_id: str):
+        self._name = name
+        self.id = participant_id
+
+    def get_attribute(self, key: str):
+        if key == "name":
+            return self._name
+        return None
+
+
+class _FakeRoom:
+    def __init__(self):
+        self.local_participant = _FakeParticipant(
+            name="assistant",
+            participant_id="assistant-id",
+        )
+
+
+class _FakeThreadAdapter:
+    instances: list["_FakeThreadAdapter"] = []
+
+    def __init__(self, *, room, path: str):
+        del room
+        self.path = path
+        self.started = False
+        self.stopped = False
+        self.appended = False
+        self.writes: list[tuple[str, str]] = []
+        self.events: list[dict] = []
+        _FakeThreadAdapter.instances.append(self)
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    def append_messages(self, *, context: AgentChatContext) -> None:
+        del context
+        self.appended = True
+
+    def write_text_message(self, *, text: str, participant) -> None:
+        if isinstance(participant, str):
+            participant_name = participant
+        else:
+            participant_name = participant.get_attribute("name") or ""
+
+        self.writes.append((text, participant_name))
+
+    def push(self, *, event: dict) -> None:
+        self.events.append(event)
+
+
+class _FakeLLMAdapter(LLMAdapter):
+    def __init__(self, *, generated_thread_name: str = "release planning"):
+        self.generated_thread_name = generated_thread_name
+        self.calls: list[dict] = []
+
+    def default_model(self) -> str:
+        return "test-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        tool_adapter=None,
+        output_schema=None,
+        event_handler=None,
+        model=None,
+        on_behalf_of=None,
+    ):
+        self.calls.append(
+            {
+                "context": context,
+                "room": room,
+                "toolkits": toolkits,
+                "tool_adapter": tool_adapter,
+                "output_schema": output_schema,
+                "model": model,
+                "on_behalf_of": on_behalf_of,
+            }
+        )
+
+        if output_schema is not None:
+            return {"thread_name": self.generated_thread_name}
+
+        if event_handler is not None:
+            event_handler({"type": "response.content_part.added"})
+            event_handler(
+                {"type": "response.output_text.done", "text": "assistant response"}
+            )
+
+        return "assistant response"
+
+
+def _make_context() -> TaskContext:
+    room = _FakeRoom()
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    return TaskContext(
+        chat=AgentChatContext(system_role=None),
+        room=room,
+        caller=caller,
+        on_behalf_of=None,
+        toolkits=[],
+    )
+
+
+def test_llm_task_runner_input_schema_path_only_for_manual_mode() -> None:
+    adapter = _FakeLLMAdapter()
+    manual_runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="manual")
+    auto_runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="auto")
+    none_runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="none")
+
+    assert "path" in manual_runner.input_schema["properties"]
+    assert "path" not in auto_runner.input_schema["properties"]
+    assert "path" not in none_runner.input_schema["properties"]
+
+
+def test_llm_task_runner_fallback_thread_name_uses_timestamp() -> None:
+    adapter = _FakeLLMAdapter()
+    runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="auto")
+    thread_name = runner._fallback_thread_name(prompt="any prompt")
+
+    assert re.fullmatch(r"thread-\d{8}-\d{6}", thread_name) is not None
+
+
+@pytest.mark.asyncio
+async def test_llm_task_runner_manual_threading_uses_input_path(monkeypatch) -> None:
+    _FakeThreadAdapter.instances.clear()
+    monkeypatch.setattr(llmrunner_module, "ThreadAdapter", _FakeThreadAdapter)
+
+    adapter = _FakeLLMAdapter()
+    runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="manual")
+    context = _make_context()
+
+    async def _no_required_toolkits(*, context):
+        del context
+        return []
+
+    monkeypatch.setattr(runner, "get_required_toolkits", _no_required_toolkits)
+
+    result = await runner.ask(
+        context=context,
+        arguments={"prompt": "hello", "path": "/threads/manual"},
+    )
+
+    assert result == "assistant response"
+    assert len(adapter.calls) == 1
+
+    assert len(_FakeThreadAdapter.instances) == 1
+    thread_adapter = _FakeThreadAdapter.instances[0]
+    assert thread_adapter.path == "/threads/manual"
+    assert thread_adapter.started
+    assert thread_adapter.appended
+    assert thread_adapter.stopped
+    assert thread_adapter.writes == [("hello", "caller")]
+    assert [event["type"] for event in thread_adapter.events] == [
+        "response.content_part.added",
+        "response.output_text.done",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_task_runner_auto_threading_generates_path(monkeypatch) -> None:
+    _FakeThreadAdapter.instances.clear()
+    monkeypatch.setattr(llmrunner_module, "ThreadAdapter", _FakeThreadAdapter)
+
+    adapter = _FakeLLMAdapter(generated_thread_name="Release Planning / Q1")
+    runner = LLMTaskRunner(
+        llm_adapter=adapter,
+        threading_mode="auto",
+        thread_dir="/threads",
+    )
+    context = _make_context()
+
+    async def _no_required_toolkits(*, context):
+        del context
+        return []
+
+    monkeypatch.setattr(runner, "get_required_toolkits", _no_required_toolkits)
+
+    result = await runner.ask(
+        context=context,
+        arguments={"prompt": "Plan the Q1 release milestones"},
+    )
+
+    assert result == "assistant response"
+    assert len(adapter.calls) == 2
+
+    thread_name_call = adapter.calls[0]
+    assert thread_name_call["output_schema"] is not None
+    assert thread_name_call["output_schema"]["required"] == ["thread_name"]
+
+    assert len(_FakeThreadAdapter.instances) == 1
+    thread_adapter = _FakeThreadAdapter.instances[0]
+    assert thread_adapter.path == "/threads/release-planning-q1.thread"
+    assert thread_adapter.writes == [("Plan the Q1 release milestones", "caller")]
+
+
+@pytest.mark.asyncio
+async def test_llm_task_runner_auto_threading_uses_custom_name_rules(
+    monkeypatch,
+) -> None:
+    _FakeThreadAdapter.instances.clear()
+    monkeypatch.setattr(llmrunner_module, "ThreadAdapter", _FakeThreadAdapter)
+
+    adapter = _FakeLLMAdapter(generated_thread_name="custom thread")
+    runner = LLMTaskRunner(
+        llm_adapter=adapter,
+        threading_mode="auto",
+        thread_dir="/threads",
+        thread_name_rules=["pick a kebab-case name from this task prompt"],
+    )
+    context = _make_context()
+
+    async def _no_required_toolkits(*, context):
+        del context
+        return []
+
+    monkeypatch.setattr(runner, "get_required_toolkits", _no_required_toolkits)
+
+    result = await runner.ask(
+        context=context,
+        arguments={"prompt": "Do custom naming"},
+    )
+
+    assert result == "assistant response"
+    assert len(adapter.calls) == 2
+    thread_name_call = adapter.calls[0]
+    assert thread_name_call["context"].instructions is not None
+    assert (
+        "pick a kebab-case name from this task prompt"
+        in thread_name_call["context"].instructions
+    )

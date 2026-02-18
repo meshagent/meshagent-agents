@@ -11,6 +11,7 @@ from meshagent.api.messaging import ensure_response
 from meshagent.api.room_server_client import RoomClient
 from jsonschema import validate
 from .context import TaskContext
+from .thread_adapter import ThreadAdapter
 from meshagent.api.schema_util import no_arguments_schema
 import logging
 from meshagent.tools import Response
@@ -106,6 +107,16 @@ class TaskRunner(SingleRoomAgent):
         attachment: Optional[bytes] = None,
     ) -> Response | dict | str | None:
         raise Exception("Not implemented")
+
+    def create_thread_adapter(
+        self,
+        *,
+        context: TaskContext,
+        arguments: dict,
+        attachment: Optional[bytes] = None,
+    ) -> ThreadAdapter | None:
+        del context, arguments, attachment
+        return None
 
     @property
     def supports_tools(self):

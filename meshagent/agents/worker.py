@@ -5,6 +5,7 @@ from meshagent.agents import AgentChatContext
 from meshagent.tools import RemoteToolkit, Tool, Toolkit, make_toolkits, ToolkitBuilder
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
+import contextlib
 from typing import Optional
 import json
 from meshagent.tools import ToolContext
@@ -133,15 +134,36 @@ class Worker(SingleRoomAgent):
 
         self.supports_context = supports_context
 
+    async def preflight_start(self, *, room: RoomClient) -> None:
+        del room
+
     async def start(self, *, room: RoomClient):
         self._done = False
 
-        if self._worker_toolkit is not None:
-            await self._worker_toolkit.start(room=room)
+        worker_toolkit_started = False
+        room_agent_started = False
+        try:
+            if self._worker_toolkit is not None:
+                await self._worker_toolkit.start(room=room)
+                worker_toolkit_started = True
 
-        await super().start(room=room)
+            await super().start(room=room)
+            room_agent_started = True
 
-        self._main_task = asyncio.create_task(self.run(room=room))
+            await self.preflight_start(room=room)
+
+            self._main_task = asyncio.create_task(self.run(room=room))
+        except Exception:
+            self._done = True
+
+            if room_agent_started:
+                with contextlib.suppress(Exception):
+                    await super().stop()
+
+            if worker_toolkit_started and self._worker_toolkit is not None:
+                with contextlib.suppress(Exception):
+                    await self._worker_toolkit.stop()
+            raise
 
     async def stop(self):
         self._done = True
