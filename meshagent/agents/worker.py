@@ -16,6 +16,32 @@ from meshagent.agents.skills import to_prompt
 logger = logging.getLogger("worker")
 
 
+def _summarize_worker_message(*, message: object) -> str:
+    if not isinstance(message, dict):
+        return f"type={type(message).__name__}"
+
+    keys = sorted(str(key) for key in message.keys())
+    if len(keys) > 8:
+        shown_keys = [*keys[:8], f"+{len(keys) - 8} more"]
+    else:
+        shown_keys = keys
+
+    summary: list[str] = [f"keys={shown_keys}"]
+
+    prompt_value = message.get("prompt")
+    if isinstance(prompt_value, str):
+        prompt_preview = " ".join(prompt_value.split())
+        if len(prompt_preview) > 120:
+            prompt_preview = f"{prompt_preview[:117]}..."
+        summary.append(f"prompt={prompt_preview!r}")
+
+    body_value = message.get("body")
+    if isinstance(body_value, str):
+        summary.append(f"body_len={len(body_value)}")
+
+    return ", ".join(summary)
+
+
 class SubmitWork(Tool):
     def __init__(self, *, agent: "Worker", queue: str):
         self.queue = queue
@@ -245,7 +271,12 @@ class Worker(SingleRoomAgent):
                         )
 
                     except Exception as e:
-                        logger.error(f"Failed to process: {e}\n{message}", exc_info=e)
+                        logger.error(
+                            "Failed to process worker message: %s (%s)",
+                            e,
+                            _summarize_worker_message(message=message),
+                            exc_info=e,
+                        )
 
             except Exception as e:
                 logger.error(
