@@ -22,7 +22,7 @@ dependencies = [
   "meshagent-tools~=0.27.2",
   "meshagent-openai~=0.27.2",
   "pydantic~=2.11",
-  "opentelemetry-distro~=0.54b1",
+  "opentelemetry-distro~=0.59b0",
   "mistune~=3.1.4",
 ]
 
