@@ -1,35 +1,20 @@
-import logging
-import posixpath
-import re
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Optional
 
 from jsonschema import validate, ValidationError
 from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
 from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
-from meshagent.agents import TaskRunner
-from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.thread_adapter import ThreadAdapter
+from meshagent.agents.threaded_task_runner import ThreadedTaskRunner, ThreadingMode
 
 import tarfile
 import io
 import mimetypes
 
-logger = logging.getLogger(__name__)
 
-ThreadingMode = Literal["auto", "manual", "none"]
-
-DEFAULT_THREAD_NAME_RULES = [
-    "generate a concise topic name for storing this task in a thread",
-    "return only a thread_name value suitable for a file name",
-    "thread_name should be 2-6 words, lowercase, and topic-focused",
-    "do not include slashes or a .thread extension",
-]
-
-
-class LLMTaskRunner(TaskRunner):
+class LLMTaskRunner(ThreadedTaskRunner):
     """
     A Task Runner that uses an LLM execution loop until the task is complete.
     """
@@ -57,18 +42,10 @@ class LLMTaskRunner(TaskRunner):
         client_rules: Optional[dict[str, list[str]]] = None,
     ):
         self.allow_model_selection = allow_model_selection
-        if threading_mode is None:
-            resolved_threading_mode: ThreadingMode = "manual" if input_path else "none"
-        else:
-            resolved_threading_mode = threading_mode
-
-        self.threading_mode = resolved_threading_mode
-        self.input_path = resolved_threading_mode == "manual"
-        self.thread_dir = thread_dir
-        if thread_name_rules is not None and len(thread_name_rules) > 0:
-            self.thread_name_rules = [*thread_name_rules]
-        else:
-            self.thread_name_rules = [*DEFAULT_THREAD_NAME_RULES]
+        resolved_threading_mode = self.resolve_threading_mode(
+            threading_mode=threading_mode,
+            input_path=input_path,
+        )
 
         if input_schema is None:
             if input_prompt:
@@ -84,13 +61,10 @@ class LLMTaskRunner(TaskRunner):
                         },
                     )
 
-                if self.threading_mode == "manual":
-                    input_schema = merge(
-                        schema=input_schema,
-                        additional_properties={
-                            "path": {"type": ["string", "null"]},
-                        },
-                    )
+                input_schema = self.with_manual_thread_path_schema(
+                    input_schema=input_schema,
+                    threading_mode=resolved_threading_mode,
+                )
 
                 toolkit_builders = self.get_toolkit_builders()
                 if len(toolkit_builders) > 0:
@@ -147,6 +121,12 @@ class LLMTaskRunner(TaskRunner):
             supports_tools=supports_tools,
             annotations=annotations,
             toolkits=static_toolkits,
+            input_path=input_path,
+            threading_mode=threading_mode,
+            thread_dir=thread_dir,
+            thread_name_rules=thread_name_rules,
+            thread_name_adapter=llm_adapter,
+            thread_adapter_type=ThreadAdapter,
         )
 
         self._extra_rules = rules or []
@@ -177,117 +157,6 @@ class LLMTaskRunner(TaskRunner):
                 rules.extend(cr)
 
         return rules
-
-    def _sanitize_thread_name(self, *, value: str) -> str:
-        normalized = value.strip().lower()
-        if normalized.endswith(".thread"):
-            normalized = normalized[: -len(".thread")]
-
-        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
-        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
-        if normalized == "":
-            normalized = "thread"
-        return normalized[:64].strip("-") or "thread"
-
-    def _fallback_thread_name(self, *, prompt: str) -> str:
-        del prompt
-        return f"thread-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-
-    def _thread_path_for_name(self, *, thread_name: str) -> str:
-        return posixpath.join(self.thread_dir, f"{thread_name}.thread")
-
-    async def _generate_thread_path(
-        self,
-        *,
-        context: TaskContext,
-        prompt: str,
-        model: str,
-    ) -> str:
-        cloned_context = context.chat.copy()
-        cloned_context.replace_rules(rules=self.thread_name_rules)
-        cloned_context.append_user_message(prompt)
-
-        generated_name = self._fallback_thread_name(prompt=prompt)
-        try:
-            response = await self._llm_adapter.next(
-                context=cloned_context,
-                room=context.room,
-                model=model,
-                on_behalf_of=context.on_behalf_of,
-                toolkits=[],
-                output_schema={
-                    "type": "object",
-                    "required": ["thread_name"],
-                    "additionalProperties": False,
-                    "properties": {
-                        "thread_name": {
-                            "type": "string",
-                            "description": "2-6 word topic name for the task thread",
-                        },
-                    },
-                },
-            )
-            if isinstance(response, dict):
-                thread_name = response.get("thread_name")
-                if isinstance(thread_name, str):
-                    generated_name = self._sanitize_thread_name(value=thread_name)
-        except Exception as ex:
-            logger.warning(
-                "unable to auto-generate thread name, using fallback", exc_info=ex
-            )
-
-        return self._thread_path_for_name(thread_name=generated_name)
-
-    async def resolve_thread_path(
-        self,
-        *,
-        context: TaskContext,
-        arguments: dict,
-        prompt: str,
-        model: str,
-    ) -> str | None:
-        if self.threading_mode == "none":
-            return None
-
-        if self.threading_mode == "manual":
-            path = arguments.get("path")
-            if path is None:
-                return None
-            if not isinstance(path, str):
-                raise ValueError("`path` must be a string or null")
-            if path == "":
-                return None
-            return path
-
-        return await self._generate_thread_path(
-            context=context,
-            prompt=prompt,
-            model=model,
-        )
-
-    def create_thread_adapter(
-        self,
-        *,
-        context: TaskContext,
-        arguments: dict,
-        attachment: Optional[bytes] = None,
-    ) -> ThreadAdapter | None:
-        del attachment
-        if self.threading_mode == "none":
-            return None
-
-        path = arguments.get("path")
-        if path is None:
-            return None
-        if not isinstance(path, str):
-            raise ValueError("`path` must be a string or null")
-        if path == "":
-            return None
-
-        return ThreadAdapter(
-            room=context.room,
-            path=path,
-        )
 
     async def ask(
         self,
