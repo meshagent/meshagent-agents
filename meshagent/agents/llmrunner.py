@@ -5,13 +5,18 @@ from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
 from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
 from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.completions_thread_adapter import CompletionsThreadAdapter
 from meshagent.agents.task_runner import TaskContext
-from meshagent.agents.thread_adapter import ThreadAdapter
+from meshagent.agents.responses_thread_adapter import ResponsesThreadAdapter
 from meshagent.agents.threaded_task_runner import ThreadedTaskRunner, ThreadingMode
+from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
 
 import tarfile
 import io
 import mimetypes
+
+ThreadAdapter = ResponsesThreadAdapter
+CompletionsAdapterThreadAdapter = CompletionsThreadAdapter
 
 
 class LLMTaskRunner(ThreadedTaskRunner):
@@ -111,6 +116,9 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 }
 
         static_toolkits = list(toolkits or [])
+        thread_adapter_type = ThreadAdapter
+        if isinstance(llm_adapter, OpenAICompletionsAdapter):
+            thread_adapter_type = CompletionsAdapterThreadAdapter
 
         super().__init__(
             title=title,
@@ -126,7 +134,7 @@ class LLMTaskRunner(ThreadedTaskRunner):
             thread_dir=thread_dir,
             thread_name_rules=thread_name_rules,
             thread_name_adapter=llm_adapter,
-            thread_adapter_type=ThreadAdapter,
+            thread_adapter_type=thread_adapter_type,
         )
 
         self._extra_rules = rules or []
@@ -210,17 +218,31 @@ class LLMTaskRunner(ThreadedTaskRunner):
                     for member in tar.getmembers():
                         if member.isfile():
                             mime_type, encoding = mimetypes.guess_type(member.name)
+                            del encoding
                             f = tar.extractfile(member)
+                            if f is None:
+                                continue
                             content = f.read()
-                            if mime_type.startswith("image/"):
+
+                            normalized_mime_type = (
+                                mime_type or "application/octet-stream"
+                            )
+                            if (
+                                normalized_mime_type.startswith("image/")
+                                and context.chat.supports_images
+                            ):
                                 context.chat.append_image_message(
-                                    data=content, mime_type=mime_type
+                                    data=content, mime_type=normalized_mime_type
                                 )
-                            else:
+                            elif context.chat.supports_files:
                                 context.chat.append_file_message(
                                     filename=member.name,
                                     data=content,
-                                    mime_type=mime_type,
+                                    mime_type=normalized_mime_type,
+                                )
+                            else:
+                                context.chat.append_user_message(
+                                    f"the user attached a file named '{member.name}' with mime type '{normalized_mime_type}'"
                                 )
 
             combined_toolkits: list[Toolkit] = [
@@ -265,3 +287,26 @@ class LLMTaskRunner(ThreadedTaskRunner):
         finally:
             if thread_adapter is not None:
                 await thread_adapter.stop()
+
+    def create_thread_adapter(
+        self,
+        *,
+        context: TaskContext,
+        arguments: dict,
+        attachment: Optional[bytes] = None,
+    ):
+        del attachment
+        selected_path = self._selected_thread_path(arguments=arguments)
+        if selected_path is None:
+            return None
+
+        if issubclass(self._thread_adapter_type, ResponsesThreadAdapter):
+            return self._thread_adapter_type(
+                room=context.room,
+                path=selected_path,
+            )
+
+        return self._thread_adapter_type(
+            room=context.room,
+            path=selected_path,
+        )

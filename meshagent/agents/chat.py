@@ -24,8 +24,11 @@ from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
     OpenAIResponsesAdapter,
 )
-from meshagent.agents.thread_adapter import (
-    ThreadAdapter,
+from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
+from meshagent.agents.thread_adapter import ThreadAdapter
+from meshagent.agents.completions_thread_adapter import CompletionsThreadAdapter
+from meshagent.agents.responses_thread_adapter import (
+    ResponsesThreadAdapter,
     response_event_to_agent_event,
 )
 
@@ -542,7 +545,14 @@ class ChatBotBase(SingleRoomAgent, ABC):
     ) -> ChatThreadContext: ...
 
     def create_thread_adapter(self, *, path: str) -> ThreadAdapter:
-        return ThreadAdapter(
+        if isinstance(self._llm_adapter, OpenAICompletionsAdapter):
+            return CompletionsThreadAdapter(
+                room=self.room,
+                path=path,
+                format_message=self.format_message,
+            )
+
+        return ResponsesThreadAdapter(
             room=self.room,
             path=path,
             format_message=self.format_message,
@@ -1036,8 +1046,8 @@ class ChatBotBase(SingleRoomAgent, ABC):
         if path not in self._thread_tasks or self._thread_tasks[path].done():
 
             def thread_done(task: asyncio.Task):
-                self._thread_tasks.pop(path)
-                self._message_channels.pop(path)
+                self._thread_tasks.pop(path, None)
+                self._message_channels.pop(path, None)
                 try:
                     task.result()
                 except CancelledError:

@@ -1,9 +1,9 @@
 from typing import Optional
 from copy import deepcopy
+from meshagent.api import RoomException
 from meshagent.api import RoomClient
 from meshagent.tools import Toolkit
 from meshagent.api.participant import Participant
-import base64
 
 import uuid
 
@@ -55,6 +55,14 @@ class AgentChatContext:
     def previous_messages(self):
         return self._previous_messages
 
+    @property
+    def supports_images(self) -> bool:
+        return False
+
+    @property
+    def supports_files(self) -> bool:
+        return False
+
     def track_response(self, id: str):
         self.previous_response_id = id
         self._previous_messages.extend(self.messages)
@@ -86,33 +94,17 @@ class AgentChatContext:
             self.instructions = plan
 
     def append_image_message(self, *, mime_type: str, data: bytes) -> dict:
-        m = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_image",
-                    "image_url": f"data:{mime_type};base64,{base64.b64encode(data).decode()}",
-                },
-            ],
-        }
-        self.messages.append(m)
-        return m
+        del mime_type
+        del data
+        raise RoomException("this chat context does not support image inputs")
 
     def append_file_message(
         self, *, filename: str, mime_type: str, data: bytes
     ) -> dict:
-        m = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_file",
-                    "filename": filename,
-                    "file_data": f"data:{mime_type or 'text/plain'};base64,{base64.b64encode(data).decode()}",
-                }
-            ],
-        }
-        self.messages.append(m)
-        return m
+        del filename
+        del mime_type
+        del data
+        raise RoomException("this chat context does not support file inputs")
 
     def append_rules(self, rules: list[str]):
         system_message = None
@@ -188,7 +180,7 @@ class AgentChatContext:
         return m
 
     def copy(self) -> "AgentChatContext":
-        return AgentChatContext(
+        return self.__class__(
             messages=deepcopy(self.messages), system_role=self._system_role
         )
 

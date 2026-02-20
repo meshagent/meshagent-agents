@@ -67,6 +67,52 @@ thread_schema = MeshSchema(
             ],
         ),
         ElementType(
+            tag_name="image",
+            description="an image attachment stored in the images database",
+            properties=[
+                ValueProperty(
+                    name="status",
+                    description="the image generation status (for example generating/completed/failed)",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="status_detail",
+                    description="optional human-readable status text for image generation",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="width",
+                    description="the pixel width of the generated image when known",
+                    type="number",
+                ),
+                ValueProperty(
+                    name="height",
+                    description="the pixel height of the generated image when known",
+                    type="number",
+                ),
+                ValueProperty(
+                    name="id",
+                    description="the image id in the room images table",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="mime_type",
+                    description="the image mime type",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the date that the image was generated in ISO format",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_by",
+                    description="the participant who generated the image",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
             tag_name="reasoning",
             description="a reasoning trace",
             properties=[
@@ -267,7 +313,7 @@ thread_schema = MeshSchema(
                 ),
                 ChildProperty(
                     name="attachments",
-                    child_tag_names=["file"],
+                    child_tag_names=["file", "image"],
                     description="a list of message attachments",
                 ),
             ],

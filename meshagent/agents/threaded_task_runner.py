@@ -11,6 +11,7 @@ from .adapter import LLMAdapter
 from .context import TaskContext
 from .task_runner import TaskRunner
 from .thread_adapter import ThreadAdapter
+from .responses_thread_adapter import ResponsesThreadAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class ThreadedTaskRunner(TaskRunner):
         thread_dir: str = ".threads",
         thread_name_rules: Optional[list[str]] = None,
         thread_name_adapter: Optional[LLMAdapter] = None,
-        thread_adapter_type: type[ThreadAdapter] = ThreadAdapter,
+        thread_adapter_type: type[ThreadAdapter] = ResponsesThreadAdapter,
     ):
         resolved_threading_mode = self.resolve_threading_mode(
             threading_mode=threading_mode,
