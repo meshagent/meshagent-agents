@@ -274,6 +274,7 @@ def _kind_from_item_type(*, item_type: str) -> Optional[str]:
         "customtoolcall",
         "hostedtoolcall",
         "toolcall",
+        "computercall",
     ):
         return "tool"
     if normalized in ("websearchcall",):
@@ -282,7 +283,7 @@ def _kind_from_item_type(*, item_type: str) -> Optional[str]:
         return "search"
     if normalized in ("applypatchcall",):
         return "diff"
-    if normalized in ("codeinterpretercall", "computercall", "shellcall"):
+    if normalized in ("codeinterpretercall", "shellcall"):
         return "exec"
     if normalized in ("imagegenerationcall",):
         return "image"
@@ -332,6 +333,7 @@ def _normalize_kind_from_response_type(*, event_type: str) -> str:
         or ".mcp_list_tools." in lower
         or ".function_call." in lower
         or ".function_call_arguments." in lower
+        or ".computer_call." in lower
     ):
         return "tool"
     if ".apply_patch_call." in lower:
@@ -393,7 +395,110 @@ def _response_base_name(*, event_type: str) -> str:
     return event_type
 
 
-def _headline_for_response_event(*, kind: str, state: str) -> str:
+def _computer_action_payload(*, event: dict) -> Optional[dict]:
+    item = event.get("item")
+    if isinstance(item, dict):
+        action = item.get("action")
+        if isinstance(action, dict):
+            return action
+
+    action = event.get("action")
+    if isinstance(action, dict):
+        return action
+
+    return None
+
+
+def _computer_action_type(*, event: dict) -> str:
+    action = _computer_action_payload(event=event)
+    if not isinstance(action, dict):
+        return ""
+
+    action_type = action.get("type")
+    if not isinstance(action_type, str):
+        return ""
+
+    normalized = action_type.strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized
+
+
+def _is_computer_call_event(*, event: dict) -> bool:
+    item = event.get("item")
+    if isinstance(item, dict):
+        item_type = item.get("type")
+        if isinstance(item_type, str) and _normalize_name(item_type) == "computercall":
+            return True
+
+    event_type = event.get("type")
+    if isinstance(event_type, str) and ".computer_call." in event_type.lower():
+        return True
+
+    return False
+
+
+def _computer_headline_for_state(*, event: dict, state: str) -> str:
+    action_type = _computer_action_type(event=event)
+    active_headlines = {
+        "click": "Clicking on page",
+        "double_click": "Double-clicking on page",
+        "scroll": "Scrolling page",
+        "type": "Typing text",
+        "keypress": "Pressing keys",
+        "move": "Moving cursor",
+        "drag": "Dragging on page",
+        "wait": "Waiting",
+        "goto": "Opening page",
+        "back": "Navigating back",
+        "forward": "Navigating forward",
+        "screenshot": "Capturing screenshot",
+    }
+    completed_headlines = {
+        "click": "Clicked on page",
+        "double_click": "Double-clicked on page",
+        "scroll": "Scrolled page",
+        "type": "Typed text",
+        "keypress": "Pressed keys",
+        "move": "Moved cursor",
+        "drag": "Dragged on page",
+        "wait": "Wait complete",
+        "goto": "Opened page",
+        "back": "Went back",
+        "forward": "Went forward",
+        "screenshot": "Captured screenshot",
+    }
+
+    if state in _ACTIVE_STATES:
+        return active_headlines.get(action_type, "Using computer")
+    if state == "completed":
+        return completed_headlines.get(action_type, "Computer action complete")
+    if state == "failed":
+        return "Computer action failed"
+    if state == "cancelled":
+        return "Computer action cancelled"
+    return "Computer action"
+
+
+def _computer_scroll_direction_detail(*, action_payload: dict) -> Optional[str]:
+    raw_scroll_x = action_payload.get("scroll_x")
+    raw_scroll_y = action_payload.get("scroll_y")
+
+    scroll_x = int(raw_scroll_x) if isinstance(raw_scroll_x, (int, float)) else 0
+    scroll_y = int(raw_scroll_y) if isinstance(raw_scroll_y, (int, float)) else 0
+    if scroll_x == 0 and scroll_y == 0:
+        return None
+
+    directions: list[str] = []
+    if scroll_y != 0:
+        directions.append("down" if scroll_y > 0 else "up")
+    if scroll_x != 0:
+        directions.append("right" if scroll_x > 0 else "left")
+
+    if len(directions) == 1:
+        return f"Direction: {directions[0]}"
+    return f"Direction: {', '.join(directions)}"
+
+
+def _headline_for_response_event(*, event: dict, kind: str, state: str) -> str:
     if kind == "turn":
         if state in _ACTIVE_STATES:
             return "Thinking"
@@ -428,6 +533,9 @@ def _headline_for_response_event(*, kind: str, state: str) -> str:
         return "File Search"
 
     if kind == "tool":
+        if _is_computer_call_event(event=event):
+            return _computer_headline_for_state(event=event, state=state)
+
         if state in _ACTIVE_STATES:
             return "Calling Tool"
         if state == "completed":
@@ -488,6 +596,9 @@ def _details_for_response_event(*, event: dict, kind: str) -> list[str]:
     if isinstance(item, dict):
         payload = item
 
+    action_payload = _computer_action_payload(event=event)
+    action_type = _computer_action_type(event=event)
+
     if kind == "exec":
         command = _first_nested_text(
             value=payload,
@@ -502,12 +613,25 @@ def _details_for_response_event(*, event: dict, kind: str) -> list[str]:
             append_detail(query)
 
     if kind == "tool":
-        tool_name = _first_nested_text(
-            value=payload,
-            keys=("tool_name", "name", "server_label", "server", "tool"),
-        )
-        if tool_name != "":
-            append_detail(f"Tool: {tool_name}")
+        if _is_computer_call_event(event=event):
+            if isinstance(action_payload, dict):
+                if action_type == "scroll":
+                    direction = _computer_scroll_direction_detail(
+                        action_payload=action_payload
+                    )
+                    if isinstance(direction, str):
+                        append_detail(direction)
+
+                url = action_payload.get("url")
+                if isinstance(url, str) and url.strip() != "":
+                    append_detail(f"Opening: {url.strip()}")
+        else:
+            tool_name = _first_nested_text(
+                value=payload,
+                keys=("tool_name", "name", "server_label", "server", "tool"),
+            )
+            if tool_name != "":
+                append_detail(f"Tool: {tool_name}")
 
     if kind == "diff":
         path = _first_nested_text(value=payload, keys=("path", "file", "filename"))
@@ -692,7 +816,7 @@ def response_event_to_agent_event(event: dict) -> Optional[dict]:
     )
 
     details = _details_for_response_event(event=event, kind=kind)
-    headline = _headline_for_response_event(kind=kind, state=state)
+    headline = _headline_for_response_event(event=event, kind=kind, state=state)
     headline = _headline_with_primary_detail(
         headline=headline,
         kind=kind,
@@ -1354,16 +1478,8 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 created_by=saved_image.created_by,
                 width=width,
                 height=height,
-                status=(
-                    _image_status_from_state(state="in_progress")
-                    if incoming_stage == _IMAGE_STAGE_PARTIAL
-                    else _image_status_from_state(state="completed")
-                ),
-                status_detail=(
-                    "Image preview updated"
-                    if incoming_stage == _IMAGE_STAGE_PARTIAL
-                    else "Image saved"
-                ),
+                status=_image_status_from_state(state="completed"),
+                status_detail="Image saved",
             )
         except Exception as ex:
             logger.error("failed to attach saved image to thread", exc_info=ex)
@@ -1382,8 +1498,8 @@ class ResponsesThreadAdapter(ThreadAdapter):
             await self._emit_image_status_event(
                 messages=messages,
                 item_id=item_id,
-                state="in_progress",
-                headline="Image preview updated",
+                state="completed",
+                headline="Image saved",
                 width=width,
                 height=height,
             )

@@ -3,6 +3,7 @@ import pytest
 from meshagent.agents.responses_thread_adapter import (
     ResponsesThreadAdapter,
     _extract_image_dimensions,
+    response_event_to_agent_event,
 )
 
 
@@ -75,3 +76,66 @@ async def test_emit_image_status_event_updates_image_element_state():
     assert writes[0]["status_detail"] == "Generating image"
     assert writes[0]["width"] == 1024
     assert writes[0]["height"] == 768
+
+
+def test_computer_call_events_are_not_classified_as_exec():
+    event = {
+        "type": "response.output_item.added",
+        "item_id": "item_123",
+        "item": {
+            "id": "item_123",
+            "type": "computer_call",
+            "status": "in_progress",
+        },
+    }
+
+    normalized = response_event_to_agent_event(event)
+    assert isinstance(normalized, dict)
+    assert normalized["kind"] == "tool"
+    assert normalized["headline"] == "Using computer"
+
+
+def test_computer_call_click_event_headline_is_friendly_without_coordinates():
+    event = {
+        "type": "response.output_item.added",
+        "item_id": "item_456",
+        "item": {
+            "id": "item_456",
+            "type": "computer_call",
+            "status": "in_progress",
+            "action": {
+                "type": "click",
+                "x": 140,
+                "y": 320,
+            },
+        },
+    }
+
+    normalized = response_event_to_agent_event(event)
+    assert isinstance(normalized, dict)
+    assert normalized["kind"] == "tool"
+    assert normalized["headline"] == "Clicking on page"
+    assert normalized["details"] == []
+
+
+def test_computer_call_scroll_event_uses_human_friendly_direction():
+    event = {
+        "type": "response.output_item.done",
+        "item_id": "item_789",
+        "item": {
+            "id": "item_789",
+            "type": "computer_call",
+            "status": "completed",
+            "action": {
+                "type": "scroll",
+                "scroll_x": 0,
+                "scroll_y": -640,
+            },
+        },
+    }
+
+    normalized = response_event_to_agent_event(event)
+    assert isinstance(normalized, dict)
+    assert normalized["kind"] == "tool"
+    assert normalized["headline"] == "Scrolled page"
+    assert normalized["details"] == ["Direction: up"]
