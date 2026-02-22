@@ -4,7 +4,7 @@ import pytest
 
 from meshagent.agents.agent import RoomTool
 from meshagent.api import RoomException
-from meshagent.api.messaging import TextChunk
+from meshagent.api.messaging import TextContent
 from meshagent.tools import ToolContext
 
 
@@ -92,7 +92,7 @@ async def test_room_tool_raises_if_remote_tool_returns_iterable() -> None:
 
 @pytest.mark.asyncio
 async def test_room_tool_uses_non_stream_call_without_event_handler() -> None:
-    response = TextChunk(text="ok")
+    response = TextContent(text="ok")
     fake_agents = _FakeAgentsClient(response=response)
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")

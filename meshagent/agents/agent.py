@@ -67,7 +67,7 @@ class RoomTool(Tool):
             tool=self.name,
             participant_id=self._participant_id,
             on_behalf_of_id=self._on_behalf_of_id,
-            arguments=kwargs,
+            input=kwargs,
             caller_context=context.caller_context,
         )
 

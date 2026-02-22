@@ -504,7 +504,7 @@ class SiteIndexer(TaskRunner):
             await context.room.agents.invoke_tool(
                 toolkit="meshagent.firecrawl",
                 tool="firecrawl_queue",
-                arguments={"url": url, "queue": queue, "limit": 100},
+                input={"url": url, "queue": queue, "limit": 100},
             )
 
             logger.info(f"done with crawl: {url}")
