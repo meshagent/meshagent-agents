@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from .agent import AgentChatContext
 from jsonschema import validate
-from meshagent.tools import Response, Toolkit, ToolkitBuilder, ToolkitConfig
+from meshagent.tools import Chunk, Toolkit, ToolkitBuilder, ToolkitConfig
 from meshagent.api import RoomClient, RoomException, RemoteParticipant
 from typing import Any, Optional, Callable, TypeVar, Generic, Literal
 
@@ -13,7 +13,7 @@ class ToolResponseAdapter(ABC):
         pass
 
     @abstractmethod
-    async def to_plain_text(self, *, room: RoomClient, response: Response):
+    async def to_plain_text(self, *, room: RoomClient, response: Chunk):
         pass
 
     @abstractmethod
@@ -23,7 +23,7 @@ class ToolResponseAdapter(ABC):
         context: AgentChatContext,
         tool_call: Any,
         room: RoomClient,
-        response: Response,
+        response: Chunk,
     ) -> list:
         pass
 

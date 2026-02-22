@@ -1,5 +1,5 @@
 from meshagent.agents.worker import Worker
-from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit, FileResponse
+from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit, FileChunk
 from meshagent.tools.storage import StorageToolkit
 from meshagent.api.room_server_client import TextDataType, RoomException
 from email import message_from_bytes
@@ -106,7 +106,7 @@ class NewEmailThreadWithAttachments(Tool):
         body: str,
         attachments: list[str],
     ):
-        attachment_data = list[FileResponse]()
+        attachment_data = list[FileChunk]()
 
         for attachment in attachments:
             try:
@@ -806,7 +806,7 @@ class MailBot(Worker):
         subject: str,
         body: str,
         from_address: Optional[str] = None,
-        attachments: Optional[list[FileResponse]] = None,
+        attachments: Optional[list[FileChunk]] = None,
     ):
         msg = self.create_email_message(
             to_address=to_address,
@@ -944,7 +944,7 @@ class MailBot(Worker):
         *,
         message: dict,
         reply: str,
-        attachments: Optional[list[FileResponse]] = None,
+        attachments: Optional[list[FileChunk]] = None,
     ):
         msg = self.create_reply_email_message(
             message=message,

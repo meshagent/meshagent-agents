@@ -3,8 +3,8 @@ from typing import Any
 import pytest
 
 from meshagent.agents.agent import RoomTool
-from meshagent.api.messaging import TextResponse
-from meshagent.api.room_server_client import ToolCallStreamItem
+from meshagent.api import RoomException
+from meshagent.api.messaging import TextChunk
 from meshagent.tools import ToolContext
 
 
@@ -19,16 +19,12 @@ class _FakeParticipant:
         return None
 
 
-class _FakeToolCallStream:
-    def __init__(self, *, items: list[ToolCallStreamItem]):
-        self._items = items
-
+class _FakeIterableResult:
     def __aiter__(self):
-        return self._run()
+        return self
 
-    async def _run(self):
-        for item in self._items:
-            yield item
+    async def __anext__(self):
+        raise StopAsyncIteration
 
 
 class _FakeAgentsClient:
@@ -46,8 +42,6 @@ class _FakeAgentsClient:
         on_behalf_of_id: str | None = None,
         caller_context: dict | None = None,
         attachment: bytes | None = None,
-        stream: bool = False,
-        tool_call_id: str | None = None,
     ) -> Any:
         self.calls.append(
             {
@@ -58,8 +52,6 @@ class _FakeAgentsClient:
                 "on_behalf_of_id": on_behalf_of_id,
                 "caller_context": caller_context,
                 "attachment": attachment,
-                "stream": stream,
-                "tool_call_id": tool_call_id,
             }
         )
         return self._response
@@ -71,36 +63,14 @@ class _FakeRoom:
 
 
 @pytest.mark.asyncio
-async def test_room_tool_streams_events_when_context_has_event_handler() -> None:
-    response = TextResponse(text="ok")
-    stream = _FakeToolCallStream(
-        items=[
-            ToolCallStreamItem(
-                type="event",
-                tool_call_id="ignored",
-                toolkit="remote_tools",
-                tool="computer_call",
-                event={
-                    "headline": "Starting Playwright container",
-                    "state": "in_progress",
-                },
-            ),
-            ToolCallStreamItem(
-                type="result",
-                tool_call_id="ignored",
-                result=response,
-            ),
-        ]
-    )
-    fake_agents = _FakeAgentsClient(response=stream)
+async def test_room_tool_raises_if_remote_tool_returns_iterable() -> None:
+    fake_agents = _FakeAgentsClient(response=_FakeIterableResult())
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
-    emitted: list[dict[str, Any]] = []
     context = ToolContext(
         room=room,
         caller=caller,
         caller_context={"chat": {"id": "chat-1"}},
-        event_handler=lambda event: emitted.append(event),
     )
     tool = RoomTool(
         toolkit_name="remote_tools",
@@ -113,25 +83,16 @@ async def test_room_tool_streams_events_when_context_has_event_handler() -> None
         },
     )
 
-    result = await tool.execute(context=context)
+    with pytest.raises(RoomException, match="returned an iterable stream"):
+        await tool.execute(context=context)
 
-    assert result == response
     assert len(fake_agents.calls) == 1
-    assert fake_agents.calls[0]["stream"] is True
     assert fake_agents.calls[0]["caller_context"] == {"chat": {"id": "chat-1"}}
-    assert isinstance(fake_agents.calls[0]["tool_call_id"], str)
-    assert fake_agents.calls[0]["tool_call_id"] != ""
-    assert len(emitted) == 1
-    assert emitted[0]["type"] == "agent.event"
-    assert emitted[0]["kind"] == "tool"
-    assert emitted[0]["state"] == "in_progress"
-    assert emitted[0]["headline"] == "Starting Playwright container"
-    assert emitted[0]["correlation_key"].startswith("tool_call:")
 
 
 @pytest.mark.asyncio
 async def test_room_tool_uses_non_stream_call_without_event_handler() -> None:
-    response = TextResponse(text="ok")
+    response = TextChunk(text="ok")
     fake_agents = _FakeAgentsClient(response=response)
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
@@ -151,5 +112,3 @@ async def test_room_tool_uses_non_stream_call_without_event_handler() -> None:
 
     assert result == response
     assert len(fake_agents.calls) == 1
-    assert fake_agents.calls[0]["stream"] is False
-    assert fake_agents.calls[0]["tool_call_id"] is None

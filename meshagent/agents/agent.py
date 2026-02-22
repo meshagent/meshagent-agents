@@ -1,13 +1,12 @@
-from typing import Any, Optional
+from collections.abc import AsyncIterable
+from typing import Optional
 import json
-import uuid
 from meshagent.api.room_server_client import (
     RoomException,
     RequiredToolkit,
     Requirement,
     RequiredSchema,
     RequiredTable,
-    ToolCallStreamItem,
 )
 from meshagent.api import (
     ToolDescription,
@@ -62,96 +61,7 @@ class RoomTool(Tool):
             defs=defs,
         )
 
-    def _normalize_stream_state(self, *, value: Any) -> str:
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in (
-                "queued",
-                "in_progress",
-                "running",
-                "pending",
-                "searching",
-                "completed",
-                "failed",
-                "cancelled",
-            ):
-                return normalized
-        return "in_progress"
-
-    def _normalize_stream_event(
-        self, *, tool_call_id: str, event_payload: Any
-    ) -> dict[str, Any]:
-        if isinstance(event_payload, dict):
-            event_type = event_payload.get("type")
-            if event_type in ("agent.event", "codex.event"):
-                return event_payload
-
-            state = self._normalize_stream_state(
-                value=event_payload.get("state", event_payload.get("status"))
-            )
-            headline = event_payload.get("headline")
-            if not isinstance(headline, str) or headline.strip() == "":
-                headline = event_payload.get("summary")
-            if not isinstance(headline, str) or headline.strip() == "":
-                headline = event_payload.get("message")
-            if not isinstance(headline, str) or headline.strip() == "":
-                headline = f"Running {self._toolkit_name}.{self.name}"
-
-            kind = event_payload.get("kind")
-            if not isinstance(kind, str) or kind.strip() == "":
-                kind = "tool"
-            normalized_kind = kind.strip().lower()
-            if normalized_kind not in (
-                "exec",
-                "tool",
-                "web",
-                "search",
-                "diff",
-                "image",
-                "approval",
-                "collab",
-                "plan",
-            ):
-                normalized_kind = "tool"
-
-            details: list[str] = []
-            if isinstance(event_payload.get("details"), list):
-                for detail in event_payload["details"]:
-                    if isinstance(detail, str) and detail.strip() != "":
-                        details.append(detail.strip())
-
-            return {
-                "type": "agent.event",
-                "source": "tool",
-                "name": f"{self._toolkit_name}.{self.name}",
-                "kind": normalized_kind,
-                "state": state,
-                "method": f"{self._toolkit_name}.{self.name}",
-                "correlation_key": f"tool_call:{tool_call_id}",
-                "summary": headline.strip(),
-                "headline": headline.strip(),
-                "details": details,
-                "data": json.dumps(event_payload, ensure_ascii=False, default=str),
-            }
-
-        headline = str(event_payload)
-        return {
-            "type": "agent.event",
-            "source": "tool",
-            "name": f"{self._toolkit_name}.{self.name}",
-            "kind": "tool",
-            "state": "in_progress",
-            "method": f"{self._toolkit_name}.{self.name}",
-            "correlation_key": f"tool_call:{tool_call_id}",
-            "summary": headline,
-            "headline": headline,
-            "details": [],
-            "data": json.dumps(event_payload, ensure_ascii=False, default=str),
-        }
-
     async def execute(self, context: ToolContext, **kwargs):
-        should_stream = context.event_handler is not None
-        tool_call_id = uuid.uuid4().hex if should_stream else None
         result = await context.room.agents.invoke_tool(
             toolkit=self._toolkit_name,
             tool=self.name,
@@ -159,35 +69,14 @@ class RoomTool(Tool):
             on_behalf_of_id=self._on_behalf_of_id,
             arguments=kwargs,
             caller_context=context.caller_context,
-            stream=should_stream,
-            tool_call_id=tool_call_id,
         )
 
-        if not should_stream:
-            return result
+        if isinstance(result, AsyncIterable):
+            raise RoomException(
+                f"tool '{self._toolkit_name}.{self.name}' returned an iterable stream, which is not supported by RoomTool"
+            )
 
-        if not isinstance(tool_call_id, str):
-            raise RoomException("tool call id was not generated for streamed call")
-
-        final_result = None
-        async for stream_item in result:
-            if not isinstance(stream_item, ToolCallStreamItem):
-                continue
-
-            if stream_item.type == "event":
-                context.emit(
-                    self._normalize_stream_event(
-                        tool_call_id=tool_call_id,
-                        event_payload=stream_item.event,
-                    )
-                )
-            elif stream_item.type == "result":
-                final_result = stream_item.result
-
-        if final_result is None:
-            raise RoomException("tool call stream ended without a final result")
-
-        return final_result
+        return result
 
 
 class Agent:

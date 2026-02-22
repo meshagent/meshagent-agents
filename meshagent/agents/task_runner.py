@@ -14,7 +14,7 @@ from .context import TaskContext
 from .thread_adapter import ThreadAdapter
 from meshagent.api.schema_util import no_arguments_schema
 import logging
-from meshagent.tools import Response
+from meshagent.tools import Chunk
 
 from meshagent.agents.agent import SingleRoomAgent
 
@@ -33,7 +33,7 @@ class RunTaskTool(Tool):
 
     async def execute(
         self, context: ToolContext, *, attachment: Optional[bytes] = None, **kwargs
-    ) -> Response | dict | str | None:
+    ) -> Chunk | dict | str | None:
         chat_context = await self.agent.init_chat_context()
         call_context = TaskContext(
             chat=chat_context,
@@ -105,7 +105,7 @@ class TaskRunner(SingleRoomAgent):
         context: TaskContext,
         arguments: dict,
         attachment: Optional[bytes] = None,
-    ) -> Response | dict | str | None:
+    ) -> Chunk | dict | str | None:
         raise Exception("Not implemented")
 
     def create_thread_adapter(
@@ -159,7 +159,7 @@ class TaskRunner(SingleRoomAgent):
         arguments: dict,
         attachment: Optional[bytes] = None,
         caller: Optional[Participant] = None,
-    ) -> Response:
+    ) -> Chunk:
         await super().start(room=room)
         try:
             runner = RunTaskTool(agent=self)
