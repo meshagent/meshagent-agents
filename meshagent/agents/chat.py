@@ -35,7 +35,7 @@ from meshagent.agents.responses_thread_adapter import (
 import uuid
 from datetime import datetime, timezone
 import asyncio
-from typing import Any, Optional, Callable, AsyncIterator, Awaitable
+from typing import Any, Optional, Callable, AsyncIterator, Awaitable, Literal
 import logging
 from asyncio import CancelledError
 from meshagent.api import RoomException
@@ -51,6 +51,8 @@ from meshagent.agents.skills import to_prompt
 tracer = trace.get_tracer("meshagent.chatbot")
 
 logger = logging.getLogger("chat")
+
+ThreadStatusMode = Literal["busy", "steerable"]
 
 
 class ChatBotReasoningTool(ReasoningTool):
@@ -287,6 +289,7 @@ class ChatBotClient:
         text: str,
         tools: Optional[list[ToolkitConfig]] = None,
         attachments: Optional[list[dict]] = None,
+        steer: bool = False,
     ) -> None:
         if self._participant is None or self._doc is None:
             raise RoomException("chat client not started")
@@ -311,7 +314,7 @@ class ChatBotClient:
         tool_payload = [tool.model_dump(mode="json") for tool in tools or []]
         await self.room.messaging.send_message(
             to=self._participant,
-            type="chat",
+            type="steer" if steer else "chat",
             message={
                 "text": text,
                 "path": self.thread_path,
@@ -397,11 +400,18 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
         self._skill_dirs = skill_dirs
         self._thread_status_values: dict[str, str] = {}
+        self._thread_status_mode_values: dict[str, ThreadStatusMode] = {}
         self._thread_status_keys: dict[str, str] = {}
         self._thread_status_locks: dict[str, asyncio.Lock] = {}
 
     def _thread_status_attribute_name(self, *, path: str) -> str:
         return f"thread.status.{path}"
+
+    def _thread_status_text_attribute_name(self, *, path: str) -> str:
+        return f"thread.status.text.{path}"
+
+    def _thread_status_mode_attribute_name(self, *, path: str) -> str:
+        return f"thread.status.mode.{path}"
 
     def _status_lock(self, *, path: str) -> asyncio.Lock:
         lock = self._thread_status_locks.get(path)
@@ -410,7 +420,34 @@ class ChatBotBase(SingleRoomAgent, ABC):
             self._thread_status_locks[path] = lock
         return lock
 
-    async def set_thread_status(self, *, path: str, status: Optional[str]) -> None:
+    def _normalize_thread_status_mode(
+        self, *, mode: Optional[str]
+    ) -> Optional[ThreadStatusMode]:
+        if mode is None:
+            return None
+        normalized = mode.strip().lower()
+        if normalized == "":
+            return None
+        if normalized not in ("busy", "steerable"):
+            raise RoomException(f"unsupported thread status mode '{mode}'")
+        if normalized == "busy":
+            return "busy"
+        return "steerable"
+
+    def processing_thread_status_mode(
+        self, *, path: str, thread_context: Optional["ChatThreadContext"]
+    ) -> ThreadStatusMode:
+        del path
+        del thread_context
+        return "busy"
+
+    async def set_thread_status(
+        self,
+        *,
+        path: str,
+        status: Optional[str],
+        mode: Optional[str] = None,
+    ) -> None:
         if self._room is None or self._room.local_participant is None:
             return
 
@@ -426,22 +463,40 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 )
 
         attribute_name = self._thread_status_attribute_name(path=path)
+        text_attribute_name = self._thread_status_text_attribute_name(path=path)
+        mode_attribute_name = self._thread_status_mode_attribute_name(path=path)
         if status is None:
             self._thread_status_values.pop(path, None)
+            self._thread_status_mode_values.pop(path, None)
             await set_local_attribute(attribute_name, None)
+            await set_local_attribute(text_attribute_name, None)
+            await set_local_attribute(mode_attribute_name, None)
             return
 
         normalized = status.strip()
         if normalized == "":
             self._thread_status_values.pop(path, None)
+            self._thread_status_mode_values.pop(path, None)
             await set_local_attribute(attribute_name, None)
+            await set_local_attribute(text_attribute_name, None)
+            await set_local_attribute(mode_attribute_name, None)
             return
 
-        if self._thread_status_values.get(path) == normalized:
+        normalized_mode = self._normalize_thread_status_mode(mode=mode)
+        if normalized_mode is None:
+            normalized_mode = self._thread_status_mode_values.get(path, "busy")
+
+        if (
+            self._thread_status_values.get(path) == normalized
+            and self._thread_status_mode_values.get(path) == normalized_mode
+        ):
             return
 
         self._thread_status_values[path] = normalized
+        self._thread_status_mode_values[path] = normalized_mode
         await set_local_attribute(attribute_name, normalized)
+        await set_local_attribute(text_attribute_name, normalized)
+        await set_local_attribute(mode_attribute_name, normalized_mode)
 
     async def _apply_thread_status(self, *, path: str, status: Optional[str]) -> None:
         lock = self._status_lock(path=path)
@@ -475,12 +530,14 @@ class ChatBotBase(SingleRoomAgent, ABC):
     async def _clear_all_thread_statuses(self) -> None:
         paths = {
             *self._thread_status_values.keys(),
+            *self._thread_status_mode_values.keys(),
             *self._thread_status_keys.keys(),
         }
         for path in paths:
             await self.set_thread_status(path=path, status=None)
         self._thread_status_keys.clear()
         self._thread_status_values.clear()
+        self._thread_status_mode_values.clear()
         self._thread_status_locks.clear()
 
     async def _send_and_save_chat(
@@ -676,6 +733,24 @@ class ChatBotBase(SingleRoomAgent, ABC):
         message: dict,
     ):
         pass
+
+    async def on_thread_steer(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        from_participant: RemoteParticipant,
+        message: dict,
+    ) -> None:
+        del thread_context
+        del from_participant
+        del message
+
+    async def cancel_thread_task(
+        self, *, path: str, thread_context: Optional[ChatThreadContext]
+    ) -> None:
+        del thread_context
+        if path in self._thread_tasks:
+            self._thread_tasks[path].cancel()
 
     async def _safe_invoke_thread_event(
         self,
@@ -969,7 +1044,14 @@ class ChatBotBase(SingleRoomAgent, ABC):
                                     room=self.room, thread=thread
                                 )
 
-                            await self.set_thread_status(path=path, status="Thinking")
+                            await self.set_thread_status(
+                                path=path,
+                                status="Thinking",
+                                mode=self.processing_thread_status_mode(
+                                    path=path,
+                                    thread_context=thread_context,
+                                ),
+                            )
 
                             result = await self.on_chat_received(
                                 thread_context=thread_context,
@@ -1167,6 +1249,52 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
             return msg
 
+        elif message.type == "steer":
+            path = message.message["path"]
+
+            if from_participant is None:
+                for participant in self._room.messaging.get_participants():
+                    if participant.id == message.from_participant_id:
+                        from_participant = participant
+                        break
+
+                if from_participant is None:
+                    logger.warning(
+                        "participant does not have messaging enabled, skipping message"
+                    )
+                    return
+
+            async def handle_steer():
+                thread_context = self._thread_contexts.get(path)
+                if thread_context is None:
+                    logger.warning(
+                        f"unable to process steer message for thread {path}: thread is not open"
+                    )
+                    return
+
+                await self._safe_invoke_chat_event(
+                    event_name="steer",
+                    thread_context=thread_context,
+                    from_participant=from_participant,
+                    message=message.message,
+                    handler=self.on_thread_steer,
+                )
+
+            task = asyncio.create_task(handle_steer())
+
+            def on_done(task: asyncio.Task):
+                try:
+                    task.result()
+                except CancelledError:
+                    pass
+                except Exception as ex:
+                    logger.error(
+                        f"unable to process steer message for thread {path}",
+                        exc_info=ex,
+                    )
+
+            task.add_done_callback(on_done)
+
         elif message.type == "approved" or message.type == "rejected":
             path = message.message["path"]
 
@@ -1234,8 +1362,10 @@ class ChatBotBase(SingleRoomAgent, ABC):
                         handler=self.on_thread_cancel,
                     )
 
-                if path in self._thread_tasks:
-                    self._thread_tasks[path].cancel()
+                await self.cancel_thread_task(
+                    path=path,
+                    thread_context=thread_context,
+                )
 
             task = asyncio.create_task(handle_cancel())
 
