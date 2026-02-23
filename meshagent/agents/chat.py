@@ -396,19 +396,92 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_contexts: dict[str, ChatThreadContext] = {}
 
         self._skill_dirs = skill_dirs
+        self._thread_status_values: dict[str, str] = {}
+        self._thread_status_keys: dict[str, str] = {}
+        self._thread_status_locks: dict[str, asyncio.Lock] = {}
 
-    async def _clear_thread_status(self, *, path: str) -> None:
-        del path
+    def _thread_status_attribute_name(self, *, path: str) -> str:
+        return f"thread.status.{path}"
+
+    def _status_lock(self, *, path: str) -> asyncio.Lock:
+        lock = self._thread_status_locks.get(path)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._thread_status_locks[path] = lock
+        return lock
+
+    async def set_thread_status(self, *, path: str, status: Optional[str]) -> None:
+        if self._room is None or self._room.local_participant is None:
+            return
+
+        async def set_local_attribute(
+            attribute_name: str, value: Optional[str]
+        ) -> None:
+            try:
+                await self._room.local_participant.set_attribute(attribute_name, value)
+            except ChanClosed:
+                logger.debug(
+                    "room channel closed while setting thread status '%s'",
+                    attribute_name,
+                )
+
+        attribute_name = self._thread_status_attribute_name(path=path)
+        if status is None:
+            self._thread_status_values.pop(path, None)
+            await set_local_attribute(attribute_name, None)
+            return
+
+        normalized = status.strip()
+        if normalized == "":
+            self._thread_status_values.pop(path, None)
+            await set_local_attribute(attribute_name, None)
+            return
+
+        if self._thread_status_values.get(path) == normalized:
+            return
+
+        self._thread_status_values[path] = normalized
+        await set_local_attribute(attribute_name, normalized)
+
+    async def _apply_thread_status(self, *, path: str, status: Optional[str]) -> None:
+        lock = self._status_lock(path=path)
+        async with lock:
+            await self.set_thread_status(path=path, status=status)
+
+    def _set_thread_status_nowait(self, *, path: str, status: Optional[str]) -> None:
+        async def run() -> None:
+            try:
+                await self._apply_thread_status(path=path, status=status)
+            except Exception as ex:
+                logger.error(
+                    f"unable to set thread status for {path}",
+                    exc_info=ex,
+                )
+
+        asyncio.create_task(run())
+
+    async def clear_thread_status(self, *, path: str) -> None:
+        self._thread_status_keys.pop(path, None)
+        await self._apply_thread_status(path=path, status=None)
 
     def _clear_thread_status_nowait(self, *, path: str) -> None:
-        del path
+        self._thread_status_keys.pop(path, None)
+        self._set_thread_status_nowait(path=path, status=None)
 
     def _update_thread_status_from_event(self, *, path: str, event: dict) -> None:
         del path
         del event
 
     async def _clear_all_thread_statuses(self) -> None:
-        pass
+        paths = {
+            *self._thread_status_values.keys(),
+            *self._thread_status_keys.keys(),
+        }
+        for path in paths:
+            await self.set_thread_status(path=path, status=None)
+        self._thread_status_keys.clear()
+        self._thread_status_values.clear()
+        self._thread_status_locks.clear()
 
     async def _send_and_save_chat(
         self,
@@ -896,14 +969,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                                     room=self.room, thread=thread
                                 )
 
-                            for participant in get_online_participants(
-                                room=self._room, thread=thread
-                            ):
-                                self._room.messaging.send_message_nowait(
-                                    to=participant,
-                                    type="thinking",
-                                    message={"thinking": True, "path": path},
-                                )
+                            await self.set_thread_status(path=path, status="Thinking")
 
                             result = await self.on_chat_received(
                                 thread_context=thread_context,
@@ -928,18 +994,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             received.result.set_result(text)
 
                         finally:
-
-                            async def cleanup():
-                                for participant in get_online_participants(
-                                    room=self._room, thread=thread
-                                ):
-                                    self._room.messaging.send_message_nowait(
-                                        to=participant,
-                                        type="thinking",
-                                        message={"thinking": False, "path": path},
-                                    )
-
-                            asyncio.shield(cleanup())
+                            await self.clear_thread_status(path=path)
 
         finally:
 
@@ -1271,9 +1326,6 @@ class ChatBot(ChatBotBase):
         self._decision_model = (
             "gpt-4.1-mini" if decision_model is None else decision_model
         )
-        self._thread_status_values: dict[str, str] = {}
-        self._thread_status_keys: dict[str, str] = {}
-        self._thread_status_locks: dict[str, asyncio.Lock] = {}
 
         super().__init__(
             name=name,
@@ -1292,55 +1344,6 @@ class ChatBot(ChatBotBase):
 
     def default_model(self) -> str:
         return self._llm_adapter.default_model()
-
-    def _thread_status_attribute_name(self, *, path: str) -> str:
-        return f"thread.status.{path}"
-
-    def _status_lock(self, *, path: str) -> asyncio.Lock:
-        lock = self._thread_status_locks.get(path)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._thread_status_locks[path] = lock
-        return lock
-
-    async def _set_thread_status(self, *, path: str, status: Optional[str]) -> None:
-        if self._room is None or self._room.local_participant is None:
-            return
-
-        attribute_name = self._thread_status_attribute_name(path=path)
-        if status is None:
-            self._thread_status_values.pop(path, None)
-            await self._room.local_participant.set_attribute(attribute_name, None)
-            return
-
-        normalized = status.strip()
-        if normalized == "":
-            self._thread_status_values.pop(path, None)
-            await self._room.local_participant.set_attribute(attribute_name, None)
-            return
-
-        if self._thread_status_values.get(path) == normalized:
-            return
-
-        self._thread_status_values[path] = normalized
-        await self._room.local_participant.set_attribute(attribute_name, normalized)
-
-    async def _apply_thread_status(self, *, path: str, status: Optional[str]) -> None:
-        lock = self._status_lock(path=path)
-        async with lock:
-            await self._set_thread_status(path=path, status=status)
-
-    def _set_thread_status_nowait(self, *, path: str, status: Optional[str]) -> None:
-        async def run() -> None:
-            try:
-                await self._apply_thread_status(path=path, status=status)
-            except Exception as ex:
-                logger.error(
-                    f"unable to set thread status for {path}",
-                    exc_info=ex,
-                )
-
-        asyncio.create_task(run())
 
     def _status_event_details(
         self, *, event: dict
@@ -1429,25 +1432,6 @@ class ChatBot(ChatBotBase):
 
         if state in ("completed", "failed", "cancelled"):
             self._clear_thread_status_nowait(path=path)
-
-    async def _clear_thread_status(self, *, path: str) -> None:
-        self._thread_status_keys.pop(path, None)
-        await self._apply_thread_status(path=path, status=None)
-
-    def _clear_thread_status_nowait(self, *, path: str) -> None:
-        self._thread_status_keys.pop(path, None)
-        self._set_thread_status_nowait(path=path, status=None)
-
-    async def _clear_all_thread_statuses(self) -> None:
-        paths = {
-            *self._thread_status_values.keys(),
-            *self._thread_status_keys.keys(),
-        }
-        for path in paths:
-            await self._set_thread_status(path=path, status=None)
-        self._thread_status_keys.clear()
-        self._thread_status_values.clear()
-        self._thread_status_locks.clear()
 
     async def create_thread_context(
         self,
@@ -1589,16 +1573,16 @@ class ChatBot(ChatBotBase):
         return response["expecting_assistant_reply"]
 
     async def on_thread_open(self, *, thread_context: ChatThreadContext):
-        await self._clear_thread_status(path=thread_context.path)
+        await self.clear_thread_status(path=thread_context.path)
 
     async def on_thread_clear(self, *, thread_context: ChatThreadContext):
-        await self._clear_thread_status(path=thread_context.path)
+        await self.clear_thread_status(path=thread_context.path)
 
     async def on_thread_cancel(self, *, thread_context: ChatThreadContext):
-        await self._clear_thread_status(path=thread_context.path)
+        await self.clear_thread_status(path=thread_context.path)
 
     async def on_thread_close(self, *, thread_context: ChatThreadContext):
-        await self._clear_thread_status(path=thread_context.path)
+        await self.clear_thread_status(path=thread_context.path)
 
     async def on_chat_received(
         self,
@@ -1705,16 +1689,12 @@ class ChatBot(ChatBotBase):
 
         self.prepare_chat_context(chat_context=thread_context.chat)
 
-        await self._clear_thread_status(path=thread_context.path)
-        try:
-            return await self._llm_adapter.next(
-                context=thread_context.chat,
-                room=self._room,
-                toolkits=message_toolkits,
-                tool_adapter=self._tool_adapter,
-                event_handler=thread_context.emit,
-                model=model,
-                on_behalf_of=from_participant,
-            )
-        finally:
-            await self._clear_thread_status(path=thread_context.path)
+        return await self._llm_adapter.next(
+            context=thread_context.chat,
+            room=self._room,
+            toolkits=message_toolkits,
+            tool_adapter=self._tool_adapter,
+            event_handler=thread_context.emit,
+            model=model,
+            on_behalf_of=from_participant,
+        )
