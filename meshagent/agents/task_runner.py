@@ -3,7 +3,7 @@ from meshagent.tools import RemoteToolkit
 
 from meshagent.tools import (
     Toolkit,
-    Tool,
+    FunctionTool,
     ToolContext,
 )
 from meshagent.api import Participant
@@ -21,7 +21,7 @@ from meshagent.agents.agent import SingleRoomAgent
 logger = logging.getLogger("agent")
 
 
-class RunTaskTool(Tool):
+class RunTaskTool(FunctionTool):
     def __init__(self, *, agent: "TaskRunner"):
         self.agent = agent
         super().__init__(

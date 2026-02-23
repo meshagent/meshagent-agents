@@ -1,5 +1,11 @@
 from meshagent.agents.worker import Worker
-from meshagent.tools import RemoteToolkit, ToolContext, Tool, Toolkit, FileContent
+from meshagent.tools import (
+    RemoteToolkit,
+    ToolContext,
+    FunctionTool,
+    Toolkit,
+    FileContent,
+)
 from meshagent.tools.storage import StorageToolkit
 from meshagent.api.room_server_client import TextDataType, RoomException
 from email import message_from_bytes
@@ -67,7 +73,7 @@ class SmtpConfiguration:
         self.hostname = hostname
 
 
-class NewEmailThreadWithAttachments(Tool):
+class NewEmailThreadWithAttachments(FunctionTool):
     def __init__(self, *, agent: "MailBot"):
         self.agent = agent
         super().__init__(
@@ -125,7 +131,7 @@ class NewEmailThreadWithAttachments(Tool):
         return {}
 
 
-class NewEmailThread(Tool):
+class NewEmailThread(FunctionTool):
     def __init__(self, *, agent: "MailBot"):
         self.agent = agent
         super().__init__(
@@ -697,7 +703,7 @@ class MailBot(Worker):
         try:
             if self._enable_attachments:
 
-                class AttachTool(Tool):
+                class AttachTool(FunctionTool):
                     def __init__(self):
                         super().__init__(
                             name="attach file",

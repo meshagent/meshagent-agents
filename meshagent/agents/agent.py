@@ -9,13 +9,14 @@ from meshagent.api.room_server_client import (
     RequiredTable,
 )
 from meshagent.api import (
+    ToolContentSpec,
     ToolDescription,
     ToolkitDescription,
     StorageEntry,
 )
 from meshagent.tools import (
     Toolkit,
-    Tool,
+    FunctionTool,
     ToolContext,
     RemoteToolkit,
 )
@@ -32,17 +33,20 @@ class AgentException(RoomException):
     pass
 
 
-class RoomTool(Tool):
+class RoomTool(FunctionTool):
     def __init__(
         self,
         *,
         toolkit_name: str,
         name,
         input_schema,
+        output_spec: Optional[ToolContentSpec] = None,
+        output_schema: Optional[dict] = None,
         title=None,
         description=None,
         rules=None,
         thumbnail_url=None,
+        pricing: Optional[str] = None,
         participant_id: Optional[str] = None,
         on_behalf_of_id: Optional[str] = None,
         defs: Optional[dict] = None,
@@ -50,14 +54,23 @@ class RoomTool(Tool):
         self._toolkit_name = toolkit_name
         self._participant_id = participant_id
         self._on_behalf_of_id = on_behalf_of_id
+        if input_schema is None:
+            input_schema = {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {},
+            }
 
         super().__init__(
             name=name,
             input_schema=input_schema,
+            output_spec=output_spec,
+            output_schema=output_schema,
             title=title,
             description=description,
             rules=rules,
             thumbnail_url=thumbnail_url,
+            pricing=pricing,
             defs=defs,
         )
 
@@ -443,10 +456,13 @@ class SingleRoomAgent(Agent):
                             name=tool_description.name,
                             description=tool_description.description,
                             input_schema=tool_description.input_schema,
+                            output_spec=tool_description.output_spec,
+                            output_schema=tool_description.output_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
                             participant_id=tool_target.id,
                             defs=tool_description.defs,
+                            pricing=tool_description.pricing,
                         )
                         room_tools.append(tool)
 
@@ -468,10 +484,13 @@ class SingleRoomAgent(Agent):
                             name=tool_description.name,
                             description=tool_description.description,
                             input_schema=tool_description.input_schema,
+                            output_spec=tool_description.output_spec,
+                            output_schema=tool_description.output_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
                             participant_id=tool_description.participant_id,
                             defs=tool_description.defs,
+                            pricing=tool_description.pricing,
                         )
                         room_tools.append(tool)
 

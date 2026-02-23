@@ -1,5 +1,5 @@
 from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
-from meshagent.tools import Toolkit, Tool, ToolContext
+from meshagent.tools import Toolkit, FunctionTool, ToolContext
 from meshagent.openai.proxy import get_client
 from meshagent.api.room_server_client import (
     TextDataType,
@@ -122,7 +122,7 @@ class OpenAIEmbedder(Embedder):
         )
 
 
-class RagTool(Tool):
+class RagTool(FunctionTool):
     def __init__(
         self,
         *,

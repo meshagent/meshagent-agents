@@ -23,7 +23,7 @@ class SkillProperties:
         description: What the skill does and when the model should use it (required)
         license: License for the skill (optional)
         compatibility: Compatibility information for the skill (optional)
-        allowed_tools: Tool patterns the skill requires (optional, experimental)
+        allowed_tools: FunctionTool patterns the skill requires (optional, experimental)
         metadata: Key-value pairs for client-specific properties (defaults to
             empty dict; omitted from to_dict() output when empty)
     """

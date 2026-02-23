@@ -2,7 +2,13 @@ from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomClient
 from meshagent.agents import AgentChatContext
-from meshagent.tools import RemoteToolkit, Tool, Toolkit, make_toolkits, ToolkitBuilder
+from meshagent.tools import (
+    RemoteToolkit,
+    FunctionTool,
+    Toolkit,
+    make_toolkits,
+    ToolkitBuilder,
+)
 from .adapter import LLMAdapter, ToolResponseAdapter
 import asyncio
 import contextlib
@@ -43,7 +49,7 @@ def _summarize_worker_message(*, message: object) -> str:
     return ", ".join(summary)
 
 
-class SubmitWork(Tool):
+class SubmitWork(FunctionTool):
     def __init__(self, *, agent: "Worker", queue: str):
         self.queue = queue
         self.agent = agent

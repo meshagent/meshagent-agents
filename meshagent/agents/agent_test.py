@@ -37,21 +37,19 @@ class _FakeAgentsClient:
         *,
         toolkit: str,
         tool: str,
-        arguments: dict,
+        input: Any,
         participant_id: str | None = None,
         on_behalf_of_id: str | None = None,
         caller_context: dict | None = None,
-        attachment: bytes | None = None,
     ) -> Any:
         self.calls.append(
             {
                 "toolkit": toolkit,
                 "tool": tool,
-                "arguments": arguments,
+                "input": input,
                 "participant_id": participant_id,
                 "on_behalf_of_id": on_behalf_of_id,
                 "caller_context": caller_context,
-                "attachment": attachment,
             }
         )
         return self._response
