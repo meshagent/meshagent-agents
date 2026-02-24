@@ -202,13 +202,13 @@ class LLMTaskRunner(ThreadedTaskRunner):
 
         if thread_adapter is not None:
             await thread_adapter.start()
-            thread_adapter.append_messages(context=context.chat)
+            thread_adapter.append_messages(context=context.session)
             thread_adapter.write_text_message(text=prompt, participant=context.caller)
 
         try:
-            context.chat.append_rules(await self.get_rules(context=context))
+            context.session.append_rules(await self.get_rules(context=context))
 
-            context.chat.append_user_message(prompt)
+            context.session.append_user_message(prompt)
 
             if attachment is not None:
                 buf = io.BytesIO(attachment)
@@ -227,19 +227,19 @@ class LLMTaskRunner(ThreadedTaskRunner):
                             )
                             if (
                                 normalized_mime_type.startswith("image/")
-                                and context.chat.supports_images
+                                and context.session.supports_images
                             ):
-                                context.chat.append_image_message(
+                                context.session.append_image_message(
                                     data=content, mime_type=normalized_mime_type
                                 )
-                            elif context.chat.supports_files:
-                                context.chat.append_file_message(
+                            elif context.session.supports_files:
+                                context.session.append_file_message(
                                     filename=member.name,
                                     data=content,
                                     mime_type=normalized_mime_type,
                                 )
                             else:
-                                context.chat.append_user_message(
+                                context.session.append_user_message(
                                     f"the user attached a file named '{member.name}' with mime type '{normalized_mime_type}'"
                                 )
 
@@ -265,7 +265,7 @@ class LLMTaskRunner(ThreadedTaskRunner):
                     thread_adapter.push(event=event)
 
             resp = await self._llm_adapter.next(
-                context=context.chat,
+                context=context.session,
                 room=context.room,
                 toolkits=combined_toolkits,
                 output_schema=self.output_schema,

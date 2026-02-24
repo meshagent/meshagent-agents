@@ -226,7 +226,7 @@ class TaskContext:
     def __init__(
         self,
         *,
-        chat: AgentSessionContext,
+        session: AgentSessionContext,
         room: RoomClient,
         toolkits: Optional[list[Toolkit]] = None,
         caller: Optional[Participant] = None,
@@ -236,17 +236,24 @@ class TaskContext:
         if toolkits is None:
             toolkits = list[Toolkit]()
         self._toolkits = toolkits
-        self._chat = chat
+        self._session = session
         self._caller = caller
         self._on_behalf_of = on_behalf_of
+
+    async def __aenter__(self) -> "TaskContext":
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self._session.__aexit__(exc_type, exc, tb)
 
     @property
     def toolkits(self):
         return self._toolkits
 
     @property
-    def chat(self):
-        return self._chat
+    def session(self):
+        return self._session
 
     @property
     def caller(self):

@@ -109,7 +109,7 @@ def _make_context() -> TaskContext:
     room = _FakeRoom()
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     return TaskContext(
-        chat=AgentSessionContext(system_role=None),
+        session=AgentSessionContext(system_role=None),
         room=room,
         caller=caller,
         on_behalf_of=None,

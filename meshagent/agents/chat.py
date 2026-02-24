@@ -155,7 +155,7 @@ class ChatThreadContext:
     def __init__(
         self,
         *,
-        chat: AgentSessionContext,
+        session: AgentSessionContext,
         thread: MeshDocument,
         path: str,
         participants: Optional[list[RemoteParticipant]] = None,
@@ -166,9 +166,16 @@ class ChatThreadContext:
             participants = []
 
         self.participants = participants
-        self.chat = chat
+        self.session = session
         self.path = path
         self._event_handler = event_handler
+
+    async def __aenter__(self) -> "ChatThreadContext":
+        await self.session.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.session.__aexit__(exc_type, exc, tb)
 
     def emit(self, event: dict):
         if self._event_handler is not None:
@@ -176,10 +183,10 @@ class ChatThreadContext:
 
     @property
     def context_id(self) -> str:
-        return self.chat.id
+        return self.session.id
 
     def to_caller_context(self) -> dict:
-        return {"chat": self.chat.to_json()}
+        return {"chat": self.session.to_json()}
 
 
 class ChatBotClient:
@@ -595,7 +602,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         thread_attributes: dict,
     ):
         if self._auto_greet_message is not None:
-            thread_context.chat.append_user_message(self._auto_greet_message)
+            thread_context.session.append_user_message(self._auto_greet_message)
             await self._send_and_save_chat(
                 id=str(uuid.uuid4()),
                 to=RemoteParticipant(id=participant.id),
@@ -894,13 +901,13 @@ class ChatBotBase(SingleRoomAgent, ABC):
             thread_adapter.push(event=evt)
             self._update_thread_status_from_event(path=path, event=evt)
 
-        async def _close_thread_context_chat(
+        async def _close_thread_context_session(
             context: ChatThreadContext | None,
         ) -> None:
             if context is None:
                 return
             try:
-                await context.chat.__aexit__(None, None, None)
+                await context.__aexit__(None, None, None)
             except Exception as ex:
                 logger.warning(
                     "unable to close chat session context for thread %s",
@@ -913,14 +920,14 @@ class ChatBotBase(SingleRoomAgent, ABC):
         ) -> None:
             nonlocal thread_context
 
-            await context.chat.__aenter__()
+            await context.__aenter__()
 
             previous = self._thread_contexts.get(path)
             self._thread_contexts[path] = context
             thread_context = context
 
             if previous is not None and previous is not context:
-                await _close_thread_context_chat(previous)
+                await _close_thread_context_session(previous)
 
         try:
             received = None
@@ -974,7 +981,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                         await _activate_thread_context(thread_context)
 
                         thread_adapter.append_messages(
-                            context=thread_context.chat,
+                            context=thread_context.session,
                         )
 
                 if received.type == "opened":
@@ -1122,7 +1129,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             thread_context=thread_context,
                             handler=self.on_thread_close,
                         )
-                        await _close_thread_context_chat(thread_context)
+                        await _close_thread_context_session(thread_context)
 
                     await self.close_thread(path=path)
 
@@ -1605,7 +1612,7 @@ class ChatBot(ChatBotBase):
             thread=thread,
             participants=participants,
             event_handler=event_handler,
-            chat=await self.init_session(),
+            session=await self.init_session(),
         )
 
     def _create_default_session(self) -> AgentSessionContext:
@@ -1713,7 +1720,7 @@ class ChatBot(ChatBotBase):
 
         print(toolkits_json)
 
-        cloned_context = context.chat.copy()
+        cloned_context = context.session.copy()
         async with cloned_context:
             cloned_context.replace_rules(
                 rules=[
@@ -1780,17 +1787,17 @@ class ChatBot(ChatBotBase):
             thread_context=thread_context,
             participant=from_participant,
         )
-        thread_context.chat.replace_rules(rules)
+        thread_context.session.replace_rules(rules)
 
         attachments = message.get("attachments", [])
         for attachment in attachments:
-            thread_context.chat.append_assistant_message(
+            thread_context.session.append_assistant_message(
                 message=f"the user attached a file at the path '{attachment['path']}'"
             )
 
         text = message["text"]
         iso_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        thread_context.chat.append_user_message(
+        thread_context.session.append_user_message(
             message=self.format_message(
                 user_name=from_participant.get_attribute("name"),
                 message=text,
@@ -1850,7 +1857,7 @@ class ChatBot(ChatBotBase):
                 has_more_than_one_other_user = True
                 break
 
-        thread_context.chat.metadata["thread_participants"] = thread_participants
+        thread_context.session.metadata["thread_participants"] = thread_participants
 
         reply = await self.should_reply(
             has_more_than_one_other_user=has_more_than_one_other_user,
@@ -1872,10 +1879,10 @@ class ChatBot(ChatBotBase):
         if not reply:
             return None
 
-        self.prepare_chat_context(chat_context=thread_context.chat)
+        self.prepare_chat_context(chat_context=thread_context.session)
 
         return await self._llm_adapter.next(
-            context=thread_context.chat,
+            context=thread_context.session,
             room=self._room,
             toolkits=message_toolkits,
             event_handler=thread_context.emit,

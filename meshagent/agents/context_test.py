@@ -2,7 +2,8 @@ import pytest
 
 from meshagent.api import RoomException
 
-from meshagent.agents.context import AgentSessionContext
+from meshagent.agents.chat import ChatThreadContext
+from meshagent.agents.context import AgentSessionContext, TaskContext
 from meshagent.agents.agent import Agent
 
 
@@ -65,3 +66,41 @@ async def test_agent_init_session_uses_legacy_init_chat_context_override() -> No
     context = await agent.init_session()
 
     assert context.metadata["source"] == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_task_context_async_manager_calls_session_start_and_close() -> None:
+    session = _LifecycleContext()
+    context = TaskContext(
+        session=session,
+        room=object(),  # type: ignore[arg-type]
+        caller=None,
+        on_behalf_of=None,
+        toolkits=[],
+    )
+
+    async with context:
+        assert session.started == 1
+        assert session.closed == 0
+
+    assert session.started == 1
+    assert session.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_context_async_manager_disposes_session() -> None:
+    session = _LifecycleContext()
+    context = ChatThreadContext(
+        session=session,
+        thread=object(),  # type: ignore[arg-type]
+        path="/threads/test",
+        participants=[],
+        event_handler=None,
+    )
+
+    async with context:
+        assert session.started == 1
+        assert session.closed == 0
+
+    assert session.started == 1
+    assert session.closed == 1

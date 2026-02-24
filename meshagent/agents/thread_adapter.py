@@ -50,6 +50,10 @@ class ThreadAdapter(ABC):
         )
         self._processor_task = asyncio.create_task(self._process_llm_events())
 
+    async def __aenter__(self) -> "ThreadAdapter":
+        await self.start()
+        return self
+
     @property
     def thread(self) -> Optional[MeshDocument]:
         return self._thread
@@ -65,6 +69,12 @@ class ThreadAdapter(ABC):
             await asyncio.sleep(3)
             await self._room.sync.close(path=self._thread_path)
             self._thread = None
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type
+        del exc
+        del tb
+        await self.stop()
 
     def push(self, *, event: dict) -> None:
         self._llm_messages.put_nowait(event)

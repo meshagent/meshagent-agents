@@ -59,13 +59,13 @@ class SingleShotWriter(Writer):
 
         prompt = arguments["prompt"]
 
-        writer_context.call_context.chat.append_user_message(message=prompt)
+        writer_context.call_context.session.append_user_message(message=prompt)
 
         toolkits = [*self._toolkits, *writer_context.call_context.toolkits]
 
         try:
             response = await self._llm_adapter.next(
-                context=writer_context.call_context.chat,
+                context=writer_context.call_context.session,
                 room=writer_context.room,
                 toolkits=toolkits,
                 output_schema=writer_context.document.schema.to_json(),

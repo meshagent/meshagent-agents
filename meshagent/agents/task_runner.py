@@ -35,14 +35,14 @@ class RunTaskTool(FunctionTool):
         self, context: ToolContext, *, attachment: Optional[bytes] = None, **kwargs
     ) -> Content | dict | str | None:
         session_context = await self.agent.init_session()
-        async with session_context:
-            call_context = TaskContext(
-                chat=session_context,
-                room=context.room,
-                caller=context.caller,
-                on_behalf_of=context.on_behalf_of,
-                toolkits=[],
-            )
+        call_context = TaskContext(
+            session=session_context,
+            room=context.room,
+            caller=context.caller,
+            on_behalf_of=context.on_behalf_of,
+            toolkits=[],
+        )
+        async with call_context:
             return await self.agent.ask(
                 context=call_context,
                 arguments=kwargs,

@@ -130,7 +130,7 @@ class ThreadedTaskRunner(TaskRunner):
                 "auto threading mode requires a configured llm adapter for thread naming"
             )
 
-        cloned_context = context.chat.copy()
+        cloned_context = context.session.copy()
         generated_name = self._fallback_thread_name(prompt=prompt)
         async with cloned_context:
             cloned_context.replace_rules(rules=self.thread_name_rules)
