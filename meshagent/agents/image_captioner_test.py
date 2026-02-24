@@ -3,11 +3,11 @@ import pytest
 from meshagent.api import RoomException
 
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.context import AgentChatContext
+from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.image_captioner import LLMImageCaptioner
 
 
-class _ImageCapableContext(AgentChatContext):
+class _ImageCapableContext(AgentSessionContext):
     @property
     def supports_images(self) -> bool:
         return True
@@ -35,15 +35,15 @@ class _FakeAdapter(LLMAdapter):
     def __init__(self, *, response: object, image_supported: bool = True):
         self._response = response
         self._image_supported = image_supported
-        self.last_context: AgentChatContext | None = None
+        self.last_context: AgentSessionContext | None = None
 
     def default_model(self) -> str:
         return "test-model"
 
-    def create_chat_context(self) -> AgentChatContext:
+    def create_session(self) -> AgentSessionContext:
         if self._image_supported:
             return _ImageCapableContext(system_role=None)
-        return AgentChatContext(system_role=None)
+        return AgentSessionContext(system_role=None)
 
     async def next(
         self,
@@ -51,7 +51,6 @@ class _FakeAdapter(LLMAdapter):
         context,
         room,
         toolkits,
-        tool_adapter=None,
         output_schema=None,
         event_handler=None,
         model=None,
@@ -59,7 +58,6 @@ class _FakeAdapter(LLMAdapter):
     ):
         del room
         del toolkits
-        del tool_adapter
         del output_schema
         del event_handler
         del model

@@ -1,7 +1,7 @@
 from meshagent.api.schema import ValueProperty, ChildProperty
 from meshagent.tools import Toolkit
 from meshagent.agents.writer import Writer, WriterContext
-from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.adapter import LLMAdapter
 from meshagent.api.schema_util import prompt_schema, merge
 from typing import Optional
 from meshagent.api import Requirement
@@ -16,7 +16,6 @@ class SingleShotWriter(Writer):
         self,
         name: str,
         llm_adapter: LLMAdapter,
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         description: Optional[str] = None,
         title: Optional[str] = None,
         rules: Optional[list[str]] = None,
@@ -45,13 +44,12 @@ class SingleShotWriter(Writer):
         )
         self._rules = rules
         self._llm_adapter = llm_adapter
-        self._tool_adapter = tool_adapter
         if toolkits is None:
             toolkits = []
         self._toolkits = toolkits
 
-    async def init_chat_context(self):
-        context = self._llm_adapter.create_chat_context()
+    async def init_session(self):
+        context = self._llm_adapter.create_session()
         context.append_rules(self._rules)
         return context
 
@@ -70,7 +68,6 @@ class SingleShotWriter(Writer):
                 context=writer_context.call_context.chat,
                 room=writer_context.room,
                 toolkits=toolkits,
-                tool_adapter=self._tool_adapter,
                 output_schema=writer_context.document.schema.to_json(),
             )
 

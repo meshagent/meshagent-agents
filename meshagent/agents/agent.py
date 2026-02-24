@@ -22,7 +22,7 @@ from meshagent.tools import (
 )
 
 from meshagent.api.room_server_client import RoomClient
-from .context import AgentChatContext
+from .context import AgentSessionContext
 import logging
 import asyncio
 
@@ -145,8 +145,15 @@ class Agent:
     def annotations(self):
         return self._annotations
 
-    async def init_chat_context(self) -> AgentChatContext:
-        return AgentChatContext()
+    async def init_session(self) -> AgentSessionContext:
+        legacy_initializer = type(self).init_chat_context
+        if legacy_initializer is not Agent.init_chat_context:
+            return await legacy_initializer(self)
+        return AgentSessionContext()
+
+    # Backwards compatibility for existing subclasses overriding init_chat_context.
+    async def init_chat_context(self) -> AgentSessionContext:
+        return AgentSessionContext()
 
     def to_json(self) -> dict:
         return {

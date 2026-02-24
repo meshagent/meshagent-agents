@@ -131,37 +131,38 @@ class ThreadedTaskRunner(TaskRunner):
             )
 
         cloned_context = context.chat.copy()
-        cloned_context.replace_rules(rules=self.thread_name_rules)
-        cloned_context.append_user_message(prompt)
-
         generated_name = self._fallback_thread_name(prompt=prompt)
-        try:
-            response = await self._thread_name_adapter.next(
-                context=cloned_context,
-                room=context.room,
-                model=model,
-                on_behalf_of=context.on_behalf_of,
-                toolkits=[],
-                output_schema={
-                    "type": "object",
-                    "required": ["thread_name"],
-                    "additionalProperties": False,
-                    "properties": {
-                        "thread_name": {
-                            "type": "string",
-                            "description": "2-6 word topic name for the task thread",
+        async with cloned_context:
+            cloned_context.replace_rules(rules=self.thread_name_rules)
+            cloned_context.append_user_message(prompt)
+
+            try:
+                response = await self._thread_name_adapter.next(
+                    context=cloned_context,
+                    room=context.room,
+                    model=model,
+                    on_behalf_of=context.on_behalf_of,
+                    toolkits=[],
+                    output_schema={
+                        "type": "object",
+                        "required": ["thread_name"],
+                        "additionalProperties": False,
+                        "properties": {
+                            "thread_name": {
+                                "type": "string",
+                                "description": "2-6 word topic name for the task thread",
+                            },
                         },
                     },
-                },
-            )
-            if isinstance(response, dict):
-                thread_name = response.get("thread_name")
-                if isinstance(thread_name, str):
-                    generated_name = self._sanitize_thread_name(value=thread_name)
-        except Exception as ex:
-            logger.warning(
-                "unable to auto-generate thread name, using fallback", exc_info=ex
-            )
+                )
+                if isinstance(response, dict):
+                    thread_name = response.get("thread_name")
+                    if isinstance(thread_name, str):
+                        generated_name = self._sanitize_thread_name(value=thread_name)
+            except Exception as ex:
+                logger.warning(
+                    "unable to auto-generate thread name, using fallback", exc_info=ex
+                )
 
         return self._thread_path_for_name(thread_name=generated_name)
 

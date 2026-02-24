@@ -4,7 +4,7 @@ from jsonschema import validate, ValidationError
 from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
 from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
-from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.completions_thread_adapter import CompletionsThreadAdapter
 from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.responses_thread_adapter import ResponsesThreadAdapter
@@ -30,7 +30,6 @@ class LLMTaskRunner(ThreadedTaskRunner):
         llm_adapter: LLMAdapter,
         title: Optional[str] = None,
         description: Optional[str] = None,
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         requires: Optional[list[Requirement]] = None,
         supports_tools: bool = True,
@@ -139,12 +138,11 @@ class LLMTaskRunner(ThreadedTaskRunner):
 
         self._extra_rules = rules or []
         self._llm_adapter = llm_adapter
-        self._tool_adapter = tool_adapter
         self.toolkits = static_toolkits
         self._client_rules = client_rules
 
-    async def init_chat_context(self):
-        chat = self._llm_adapter.create_chat_context()
+    async def init_session(self):
+        chat = self._llm_adapter.create_session()
         return chat
 
     def get_toolkit_builders(self) -> list[ToolkitBuilder]:
@@ -270,7 +268,6 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 context=context.chat,
                 room=context.room,
                 toolkits=combined_toolkits,
-                tool_adapter=self._tool_adapter,
                 output_schema=self.output_schema,
                 event_handler=push,
             )

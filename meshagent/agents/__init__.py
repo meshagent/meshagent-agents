@@ -1,6 +1,6 @@
 from .agent import (
     Agent,
-    AgentChatContext,
+    AgentSessionContext,
     RequiredToolkit,
     SingleRoomAgent,
 )
@@ -19,7 +19,7 @@ from .version import __version__
 __all__ = [
     Agent,
     TaskContext,
-    AgentChatContext,
+    AgentSessionContext,
     RequiredToolkit,
     TaskRunner,
     ThreadedTaskRunner,

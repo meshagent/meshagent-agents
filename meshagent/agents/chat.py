@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from meshagent.agents.agent import SingleRoomAgent, AgentChatContext
+from meshagent.agents.agent import SingleRoomAgent, AgentSessionContext
 from meshagent.api.chan import Chan
 from meshagent.api import (
     RoomMessage,
@@ -19,7 +19,7 @@ from meshagent.tools import (
     ToolkitConfig,
     RemoteToolkit,
 )
-from meshagent.agents.adapter import LLMAdapter, ToolResponseAdapter
+from meshagent.agents.adapter import LLMAdapter
 from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
     OpenAIResponsesAdapter,
@@ -153,7 +153,7 @@ class ChatThreadContext:
     def __init__(
         self,
         *,
-        chat: AgentChatContext,
+        chat: AgentSessionContext,
         thread: MeshDocument,
         path: str,
         participants: Optional[list[RemoteParticipant]] = None,
@@ -892,6 +892,34 @@ class ChatBotBase(SingleRoomAgent, ABC):
             thread_adapter.push(event=evt)
             self._update_thread_status_from_event(path=path, event=evt)
 
+        async def _close_thread_context_chat(
+            context: ChatThreadContext | None,
+        ) -> None:
+            if context is None:
+                return
+            try:
+                await context.chat.__aexit__(None, None, None)
+            except Exception as ex:
+                logger.warning(
+                    "unable to close chat session context for thread %s",
+                    path,
+                    exc_info=ex,
+                )
+
+        async def _activate_thread_context(
+            context: ChatThreadContext,
+        ) -> None:
+            nonlocal thread_context
+
+            await context.chat.__aenter__()
+
+            previous = self._thread_contexts.get(path)
+            self._thread_contexts[path] = context
+            thread_context = context
+
+            if previous is not None and previous is not context:
+                await _close_thread_context_chat(previous)
+
         try:
             received = None
 
@@ -941,7 +969,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                                 evt, chat_with_participant
                             ),
                         )
-                        self._thread_contexts[path] = thread_context
+                        await _activate_thread_context(thread_context)
 
                         thread_adapter.append_messages(
                             context=thread_context.chat,
@@ -976,7 +1004,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             evt, chat_with_participant
                         ),
                     )
-                    self._thread_contexts[path] = thread_context
+                    await _activate_thread_context(thread_context)
                     messages_element: Element = thread.root.get_children_by_tag_name(
                         "messages"
                     )[0]
@@ -1038,7 +1066,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                                         evt, chat_with_participant
                                     ),
                                 )
-                                self._thread_contexts[path] = thread_context
+                                await _activate_thread_context(thread_context)
                             else:
                                 thread_context.participants = get_online_participants(
                                     room=self.room, thread=thread
@@ -1092,6 +1120,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             thread_context=thread_context,
                             handler=self.on_thread_close,
                         )
+                        await _close_thread_context_chat(thread_context)
 
                     await self.close_thread(path=path)
 
@@ -1440,7 +1469,6 @@ class ChatBot(ChatBotBase):
         description=None,
         requires: Optional[list[Requirement]] = None,
         llm_adapter: LLMAdapter,
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
         client_rules: Optional[dict[str, list[str]]] = None,
@@ -1452,7 +1480,6 @@ class ChatBot(ChatBotBase):
         skill_dirs: Optional[list[str]] = None,
     ):
         self._llm_adapter = llm_adapter
-        self._tool_adapter = tool_adapter
         self._decision_model = (
             "gpt-4.1-mini" if decision_model is None else decision_model
         )
@@ -1576,14 +1603,23 @@ class ChatBot(ChatBotBase):
             thread=thread,
             participants=participants,
             event_handler=event_handler,
-            chat=await self.init_chat_context(),
+            chat=await self.init_session(),
         )
 
-    # Backwards compatibility for existing subclasses overriding init_chat_context.
-    async def init_chat_context(self) -> AgentChatContext:
-        context = self._llm_adapter.create_chat_context()
+    def _create_default_session(self) -> AgentSessionContext:
+        context = self._llm_adapter.create_session()
         context.append_rules(self._rules)
         return context
+
+    async def init_session(self) -> AgentSessionContext:
+        legacy_initializer = type(self).init_chat_context
+        if legacy_initializer is not ChatBot.init_chat_context:
+            return await legacy_initializer(self)
+        return self._create_default_session()
+
+    # Backwards compatibility for existing subclasses overriding init_chat_context.
+    async def init_chat_context(self) -> AgentSessionContext:
+        return self._create_default_session()
 
     async def prepare_llm_context(self, *, thread_context: ChatThreadContext):
         """
@@ -1591,7 +1627,7 @@ class ChatBot(ChatBotBase):
         """
         pass
 
-    def prepare_chat_context(self, *, chat_context: AgentChatContext):
+    def prepare_chat_context(self, *, chat_context: AgentSessionContext):
         pass
 
     async def get_thread_toolkits(
@@ -1660,43 +1696,44 @@ class ChatBot(ChatBotBase):
         print(toolkits_json)
 
         cloned_context = context.chat.copy()
-        cloned_context.replace_rules(
-            rules=[
-                "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
-                f'your name (the assistant) is "{self.room.local_participant.get_attribute("name")}"',
-                "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
-                "if the user poses a question to everyone, they are talking to you",
-                "to help identify the different users in the conversation, every message in the thread will start with '{user_name} said at {time}'",
-                f"members of thread are currently {all_members}",
-                f"users online currently are {online_members}",
-                "if in doubt, reply to the user",
-                f"if the user is asking for something that these toolkits can do, they want an answer from you: {toolkits_json}",
-                "if the user they appear to be talking to is offline, then they probably are talking to you",
-            ]
-        )
-        response = await self._llm_adapter.next(
-            context=cloned_context,
-            room=self._room,
-            model=self._decision_model or self._llm_adapter.default_model(),
-            on_behalf_of=from_user,
-            toolkits=[],
-            output_schema={
-                "type": "object",
-                "required": ["reasoning", "expecting_assistant_reply", "next_user"],
-                "additionalProperties": False,
-                "properties": {
-                    "reasoning": {
-                        "type": "string",
-                        "description": "explain why you think the user was or was not expecting you to reply",
+        async with cloned_context:
+            cloned_context.replace_rules(
+                rules=[
+                    "examine the conversation so far and return whether the user is expecting a reply from you or another user as the next message in the conversation",
+                    f'your name (the assistant) is "{self.room.local_participant.get_attribute("name")}"',
+                    "if the user mentions a person with another name, they aren't talking to you unless they also mention you",
+                    "if the user poses a question to everyone, they are talking to you",
+                    "to help identify the different users in the conversation, every message in the thread will start with '{user_name} said at {time}'",
+                    f"members of thread are currently {all_members}",
+                    f"users online currently are {online_members}",
+                    "if in doubt, reply to the user",
+                    f"if the user is asking for something that these toolkits can do, they want an answer from you: {toolkits_json}",
+                    "if the user they appear to be talking to is offline, then they probably are talking to you",
+                ]
+            )
+            response = await self._llm_adapter.next(
+                context=cloned_context,
+                room=self._room,
+                model=self._decision_model or self._llm_adapter.default_model(),
+                on_behalf_of=from_user,
+                toolkits=[],
+                output_schema={
+                    "type": "object",
+                    "required": ["reasoning", "expecting_assistant_reply", "next_user"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "reasoning": {
+                            "type": "string",
+                            "description": "explain why you think the user was or was not expecting you to reply",
+                        },
+                        "next_user": {
+                            "type": "string",
+                            "description": "who would be expected to send the next message in the conversation",
+                        },
+                        "expecting_assistant_reply": {"type": "boolean"},
                     },
-                    "next_user": {
-                        "type": "string",
-                        "description": "who would be expected to send the next message in the conversation",
-                    },
-                    "expecting_assistant_reply": {"type": "boolean"},
                 },
-            },
-        )
+            )
 
         logger.info(f"should reply check returned {response}")
 
@@ -1823,7 +1860,6 @@ class ChatBot(ChatBotBase):
             context=thread_context.chat,
             room=self._room,
             toolkits=message_toolkits,
-            tool_adapter=self._tool_adapter,
             event_handler=thread_context.emit,
             model=model,
             on_behalf_of=from_participant,

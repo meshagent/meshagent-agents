@@ -1,7 +1,7 @@
 from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomClient
-from meshagent.agents import AgentChatContext
+from meshagent.agents import AgentSessionContext
 from meshagent.tools import (
     RemoteToolkit,
     FunctionTool,
@@ -9,7 +9,7 @@ from meshagent.tools import (
     make_toolkits,
     ToolkitBuilder,
 )
-from .adapter import LLMAdapter, ToolResponseAdapter
+from .adapter import LLMAdapter
 import asyncio
 import contextlib
 from typing import Optional
@@ -90,7 +90,6 @@ class Worker(SingleRoomAgent):
         description=None,
         requires=None,
         llm_adapter: LLMAdapter,
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         toolkits: Optional[list[Toolkit]] = None,
         rules: Optional[list[str]] = None,
         toolkit_name: Optional[str] = None,
@@ -114,7 +113,6 @@ class Worker(SingleRoomAgent):
             toolkits = []
 
         self._llm_adapter = llm_adapter
-        self._tool_adapter = tool_adapter
 
         self._message_channel = Chan[RoomMessage]()
 
@@ -206,12 +204,12 @@ class Worker(SingleRoomAgent):
         return prompt
 
     async def append_message_context(
-        self, *, message: dict, chat_context: AgentChatContext
+        self, *, message: dict, chat_context: AgentSessionContext
     ):
         if self.supports_context:
             caller_context_json = message.get("caller_context")
             if caller_context_json is not None:
-                caller_context = AgentChatContext.from_json(caller_context_json)
+                caller_context = AgentSessionContext.from_json(caller_context_json)
 
                 chat_context.messages.extend(caller_context.messages)
                 chat_context.previous_response_id = caller_context.previous_response_id
@@ -223,7 +221,7 @@ class Worker(SingleRoomAgent):
     async def process_message(
         self,
         *,
-        chat_context: AgentChatContext,
+        chat_context: AgentSessionContext,
         message: dict,
         toolkits: list[Toolkit],
     ):
@@ -233,7 +231,6 @@ class Worker(SingleRoomAgent):
             context=chat_context,
             room=self.room,
             toolkits=toolkits,
-            tool_adapter=self._tool_adapter,
         )
 
     def get_toolkit_builders(self) -> list[ToolkitBuilder]:
@@ -265,7 +262,7 @@ class Worker(SingleRoomAgent):
             )
         return [*self._toolkits, *toolkits]
 
-    def prepare_chat_context(self, *, chat_context: AgentChatContext):
+    def prepare_chat_context(self, *, chat_context: AgentSessionContext):
         pass
 
     async def run(self, *, room: RoomClient):
@@ -280,23 +277,23 @@ class Worker(SingleRoomAgent):
                 if message is not None:
                     logger.info("received message on worker queue")
                     try:
-                        chat_context = await self.init_chat_context()
+                        session_context = await self.init_session()
+                        async with session_context:
+                            session_context.replace_rules(
+                                rules=[
+                                    *await self.get_rules(),
+                                ]
+                            )
 
-                        chat_context.replace_rules(
-                            rules=[
-                                *await self.get_rules(),
-                            ]
-                        )
+                            toolkits = await self.get_message_toolkits(message=message)
 
-                        toolkits = await self.get_message_toolkits(message=message)
+                            self.prepare_chat_context(chat_context=session_context)
 
-                        self.prepare_chat_context(chat_context=chat_context)
-
-                        await self.process_message(
-                            chat_context=chat_context,
-                            message=message,
-                            toolkits=toolkits,
-                        )
+                            await self.process_message(
+                                chat_context=session_context,
+                                message=message,
+                                toolkits=toolkits,
+                            )
 
                     except Exception as e:
                         logger.error(

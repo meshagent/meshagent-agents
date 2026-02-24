@@ -4,7 +4,7 @@ import pytest
 
 import meshagent.agents.llmrunner as llmrunner_module
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.context import AgentChatContext
+from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.llmrunner import LLMTaskRunner
 from meshagent.agents.task_runner import TaskContext
 
@@ -47,7 +47,7 @@ class _FakeThreadAdapter:
     async def stop(self) -> None:
         self.stopped = True
 
-    def append_messages(self, *, context: AgentChatContext) -> None:
+    def append_messages(self, *, context: AgentSessionContext) -> None:
         del context
         self.appended = True
 
@@ -77,7 +77,6 @@ class _FakeLLMAdapter(LLMAdapter):
         context,
         room,
         toolkits,
-        tool_adapter=None,
         output_schema=None,
         event_handler=None,
         model=None,
@@ -88,7 +87,6 @@ class _FakeLLMAdapter(LLMAdapter):
                 "context": context,
                 "room": room,
                 "toolkits": toolkits,
-                "tool_adapter": tool_adapter,
                 "output_schema": output_schema,
                 "model": model,
                 "on_behalf_of": on_behalf_of,
@@ -111,7 +109,7 @@ def _make_context() -> TaskContext:
     room = _FakeRoom()
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     return TaskContext(
-        chat=AgentChatContext(system_role=None),
+        chat=AgentSessionContext(system_role=None),
         room=room,
         caller=caller,
         on_behalf_of=None,

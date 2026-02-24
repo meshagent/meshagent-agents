@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from .agent import AgentChatContext
+from .agent import AgentSessionContext
 from jsonschema import validate
 from meshagent.tools import Content, Toolkit, ToolkitBuilder, ToolkitConfig
 from meshagent.api import RoomClient, RoomException, RemoteParticipant
@@ -20,7 +20,7 @@ class ToolResponseAdapter(ABC):
     async def create_messages(
         self,
         *,
-        context: AgentChatContext,
+        context: AgentSessionContext,
         tool_call: Any,
         room: RoomClient,
         response: Content,
@@ -34,19 +34,19 @@ class LLMAdapter(Generic[TEvent]):
     @abstractmethod
     def default_model(self) -> str: ...
 
-    def create_chat_context(self) -> AgentChatContext:
-        return AgentChatContext()
+    def create_session(self) -> AgentSessionContext:
+        return AgentSessionContext()
 
     def context_window_size(self, model: str) -> float:
         return float("inf")
 
-    def needs_compaction(self, *, context: AgentChatContext) -> bool:
+    def needs_compaction(self, *, context: AgentSessionContext) -> bool:
         return False
 
     async def compact(
         self,
         *,
-        context: AgentChatContext,
+        context: AgentSessionContext,
         room: RoomClient,
         model: Optional[str] = None,
     ) -> None:
@@ -55,7 +55,7 @@ class LLMAdapter(Generic[TEvent]):
     async def get_input_tokens(
         self,
         *,
-        context: AgentChatContext,
+        context: AgentSessionContext,
         model: str,
         room: Optional[RoomClient] = None,
         toolkits: Optional[list] = None,
@@ -64,7 +64,7 @@ class LLMAdapter(Generic[TEvent]):
         return 0
 
     async def check_for_termination(
-        self, *, context: AgentChatContext, room: RoomClient
+        self, *, context: AgentSessionContext, room: RoomClient
     ):
         return True
 
@@ -87,10 +87,9 @@ class LLMAdapter(Generic[TEvent]):
     async def next(
         self,
         *,
-        context: AgentChatContext,
+        context: AgentSessionContext,
         room: RoomClient,
         toolkits: list[Toolkit],
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[TEvent], None]] = None,
         model: Optional[str] = None,
@@ -112,21 +111,20 @@ class MessageStreamLLMAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "toolkit"
 
-    def create_chat_context(self) -> AgentChatContext:
-        return AgentChatContext()
+    def create_session(self) -> AgentSessionContext:
+        return AgentSessionContext()
 
     async def check_for_termination(
-        self, *, context: AgentChatContext, room: RoomClient
+        self, *, context: AgentSessionContext, room: RoomClient
     ):
         return True
 
     async def next(
         self,
         *,
-        context: AgentChatContext,
+        context: AgentSessionContext,
         room: RoomClient,
         toolkits: list[Toolkit],
-        tool_adapter: Optional[ToolResponseAdapter] = None,
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[TEvent], None]] = None,
         model: Optional[str] = None,

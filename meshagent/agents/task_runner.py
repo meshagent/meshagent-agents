@@ -34,19 +34,20 @@ class RunTaskTool(FunctionTool):
     async def execute(
         self, context: ToolContext, *, attachment: Optional[bytes] = None, **kwargs
     ) -> Content | dict | str | None:
-        chat_context = await self.agent.init_chat_context()
-        call_context = TaskContext(
-            chat=chat_context,
-            room=context.room,
-            caller=context.caller,
-            on_behalf_of=context.on_behalf_of,
-            toolkits=[],
-        )
-        return await self.agent.ask(
-            context=call_context,
-            arguments=kwargs,
-            attachment=attachment,
-        )
+        session_context = await self.agent.init_session()
+        async with session_context:
+            call_context = TaskContext(
+                chat=session_context,
+                room=context.room,
+                caller=context.caller,
+                on_behalf_of=context.on_behalf_of,
+                toolkits=[],
+            )
+            return await self.agent.ask(
+                context=call_context,
+                arguments=kwargs,
+                attachment=attachment,
+            )
 
 
 class TaskRunner(SingleRoomAgent):

@@ -14,7 +14,7 @@ from meshagent.api import RoomClient
 from meshagent.api import RequiredTable
 from email.policy import default
 import email.utils
-from meshagent.agents import AgentChatContext
+from meshagent.agents import AgentSessionContext
 from datetime import datetime, timezone
 import base64
 import secrets
@@ -41,7 +41,7 @@ type MessageRole = Literal["user", "agent"]
 
 
 class MailThreadContext:
-    def __init__(self, *, chat: AgentChatContext, message: dict, thread: list[dict]):
+    def __init__(self, *, chat: AgentSessionContext, message: dict, thread: list[dict]):
         self.chat = chat
         self.message = message
         self.thread = thread
@@ -372,7 +372,6 @@ class MailBot(Worker):
         description=None,
         requires=None,
         llm_adapter,
-        tool_adapter=None,
         toolkits=None,
         rules=None,
         email_address: str,
@@ -403,7 +402,6 @@ class MailBot(Worker):
             description=description,
             requires=requires,
             llm_adapter=llm_adapter,
-            tool_adapter=tool_adapter,
             toolkits=toolkits,
             annotations=annotations,
             rules=rules
@@ -601,7 +599,7 @@ class MailBot(Worker):
         self,
         *,
         message: dict,
-        chat_context: AgentChatContext,
+        chat_context: AgentSessionContext,
         thread: list[dict],
     ):
         for msg in thread:
@@ -666,7 +664,7 @@ class MailBot(Worker):
     async def process_message(
         self,
         *,
-        chat_context: AgentChatContext,
+        chat_context: AgentSessionContext,
         message: dict,
         toolkits: list[Toolkit],
     ):
@@ -752,7 +750,6 @@ class MailBot(Worker):
                 context=chat_context,
                 room=self.room,
                 toolkits=toolkits,
-                tool_adapter=self._tool_adapter,
             )
         except Exception as ex:
             logger.error(f"error while processing message {ex}", exc_info=ex)

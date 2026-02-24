@@ -8,7 +8,7 @@ from meshagent.api.participant import Participant
 import uuid
 
 
-class AgentChatContext:
+class AgentSessionContext:
     def __init__(
         self,
         *,
@@ -34,6 +34,22 @@ class AgentChatContext:
         self._metadata = metadata or {}
 
         self.instructions = instructions
+
+    async def start(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def __aenter__(self) -> "AgentSessionContext":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type
+        del exc
+        del tb
+        await self.close()
 
     @property
     def metadata(self):
@@ -179,7 +195,7 @@ class AgentChatContext:
         self.messages.append(m)
         return m
 
-    def copy(self) -> "AgentChatContext":
+    def copy(self) -> "AgentSessionContext":
         return self.__class__(
             messages=deepcopy(self.messages), system_role=self._system_role
         )
@@ -194,7 +210,7 @@ class AgentChatContext:
 
     @staticmethod
     def from_json(json: dict):
-        return AgentChatContext(
+        return AgentSessionContext(
             messages=json["messages"],
             system_role=json.get("system_role", None),
             previous_messages=json.get("previous_messages", None),
@@ -202,11 +218,15 @@ class AgentChatContext:
         )
 
 
+# Backwards compatibility for code still importing AgentChatContext.
+AgentChatContext = AgentSessionContext
+
+
 class TaskContext:
     def __init__(
         self,
         *,
-        chat: AgentChatContext,
+        chat: AgentSessionContext,
         room: RoomClient,
         toolkits: Optional[list[Toolkit]] = None,
         caller: Optional[Participant] = None,

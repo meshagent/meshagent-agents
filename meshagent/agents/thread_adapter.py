@@ -16,7 +16,7 @@ from meshagent.api import (
 )
 from meshagent.tools import Toolkit, tool
 
-from meshagent.agents.agent import AgentChatContext
+from meshagent.agents.agent import AgentSessionContext
 from meshagent.agents.thread_schema import thread_schema
 
 tracer = trace.get_tracer("meshagent.thread_adapter")
@@ -185,7 +185,7 @@ class ThreadAdapter(ABC):
 
         return response
 
-    def append_messages(self, *, context: AgentChatContext) -> None:
+    def append_messages(self, *, context: AgentSessionContext) -> None:
         doc_messages = None
 
         for prop in self._thread.root.get_children():
