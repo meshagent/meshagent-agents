@@ -25,8 +25,10 @@ from meshagent.api.room_server_client import RoomClient
 from .context import AgentSessionContext
 import logging
 import asyncio
+import warnings
 
 logger = logging.getLogger("agent")
+_legacy_init_chat_context_warned: set[type] = set()
 
 
 class AgentException(RoomException):
@@ -148,11 +150,27 @@ class Agent:
     async def init_session(self) -> AgentSessionContext:
         legacy_initializer = type(self).init_chat_context
         if legacy_initializer is not Agent.init_chat_context:
+            cls = type(self)
+            if cls not in _legacy_init_chat_context_warned:
+                warnings.warn(
+                    (
+                        f"{cls.__name__}.init_chat_context() is deprecated and will be removed in a future release. "
+                        "Override init_session() instead."
+                    ),
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                _legacy_init_chat_context_warned.add(cls)
             return await legacy_initializer(self)
         return AgentSessionContext()
 
     # Backwards compatibility for existing subclasses overriding init_chat_context.
     async def init_chat_context(self) -> AgentSessionContext:
+        warnings.warn(
+            "init_chat_context() is deprecated and will be removed in a future release. Use init_session() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return AgentSessionContext()
 
     def to_json(self) -> dict:

@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 import asyncio
 from typing import Any, Optional, Callable, AsyncIterator, Awaitable, Literal
 import logging
+import warnings
 from asyncio import CancelledError
 from meshagent.api import RoomException
 from meshagent.api.chan import ChanClosed
@@ -51,6 +52,7 @@ from meshagent.agents.skills import to_prompt
 tracer = trace.get_tracer("meshagent.chatbot")
 
 logger = logging.getLogger("chat")
+_legacy_chatbot_init_chat_context_warned: set[type] = set()
 
 ThreadStatusMode = Literal["busy", "steerable"]
 
@@ -1614,11 +1616,27 @@ class ChatBot(ChatBotBase):
     async def init_session(self) -> AgentSessionContext:
         legacy_initializer = type(self).init_chat_context
         if legacy_initializer is not ChatBot.init_chat_context:
+            cls = type(self)
+            if cls not in _legacy_chatbot_init_chat_context_warned:
+                warnings.warn(
+                    (
+                        f"{cls.__name__}.init_chat_context() is deprecated and will be removed in a future release. "
+                        "Override init_session() instead."
+                    ),
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                _legacy_chatbot_init_chat_context_warned.add(cls)
             return await legacy_initializer(self)
         return self._create_default_session()
 
     # Backwards compatibility for existing subclasses overriding init_chat_context.
     async def init_chat_context(self) -> AgentSessionContext:
+        warnings.warn(
+            "init_chat_context() is deprecated and will be removed in a future release. Use init_session() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self._create_default_session()
 
     async def prepare_llm_context(self, *, thread_context: ChatThreadContext):
