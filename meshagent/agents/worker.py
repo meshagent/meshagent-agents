@@ -265,6 +265,11 @@ class Worker(SingleRoomAgent):
     def prepare_chat_context(self, *, chat_context: AgentSessionContext):
         pass
 
+    async def init_session(self) -> AgentSessionContext:
+        context = self._llm_adapter.create_session()
+        context.append_rules(self._rules)
+        return context
+
     async def run(self, *, room: RoomClient):
         backoff = 0
         while not self._done:
