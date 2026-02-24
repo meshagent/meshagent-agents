@@ -1,7 +1,7 @@
 import re
 
 import pytest
-
+from typing import Optional
 import meshagent.agents.llmrunner as llmrunner_module
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.context import AgentSessionContext
@@ -81,6 +81,7 @@ class _FakeLLMAdapter(LLMAdapter):
         event_handler=None,
         model=None,
         on_behalf_of=None,
+        options: Optional[dict] = None,
     ):
         self.calls.append(
             {

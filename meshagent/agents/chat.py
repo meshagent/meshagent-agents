@@ -1485,13 +1485,17 @@ class ChatBot(ChatBotBase):
         empty_state_title: Optional[str] = None,
         annotations: Optional[list[str]] = None,
         decision_model: Optional[str] = None,
+        decision_options: Optional[dict] = None,
         always_reply: Optional[bool] = None,
         skill_dirs: Optional[list[str]] = None,
     ):
         self._llm_adapter = llm_adapter
-        self._decision_model = (
-            "gpt-4.1-mini" if decision_model is None else decision_model
-        )
+        if decision_model is None:
+            decision_model = "gpt-5.2"
+            decision_options = {"reasoning": {"effort": "none"}}
+
+        self._decision_model = decision_model
+        self._decision_options = decision_options
 
         super().__init__(
             name=name,
@@ -1718,8 +1722,6 @@ class ChatBot(ChatBotBase):
                     toolkits_json + f"\n - {t.name} ({t.title}): {t.description}"
                 )
 
-        print(toolkits_json)
-
         cloned_context = context.session.copy()
         async with cloned_context:
             cloned_context.replace_rules(
@@ -1740,6 +1742,7 @@ class ChatBot(ChatBotBase):
                 context=cloned_context,
                 room=self._room,
                 model=self._decision_model or self._llm_adapter.default_model(),
+                options=self._decision_options,
                 on_behalf_of=from_user,
                 toolkits=[],
                 output_schema={

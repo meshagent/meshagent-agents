@@ -1,7 +1,7 @@
 import pytest
 
 from meshagent.api import RoomException
-
+from typing import Optional
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.image_captioner import LLMImageCaptioner
@@ -55,6 +55,7 @@ class _FakeAdapter(LLMAdapter):
         event_handler=None,
         model=None,
         on_behalf_of=None,
+        options: Optional[dict] = None,
     ):
         del room
         del toolkits

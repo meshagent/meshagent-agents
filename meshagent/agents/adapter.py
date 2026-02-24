@@ -94,6 +94,7 @@ class LLMAdapter(Generic[TEvent]):
         event_handler: Optional[Callable[[TEvent], None]] = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[RemoteParticipant] = None,
+        options: Optional[dict] = None,
     ) -> Any:
         pass
 
@@ -129,6 +130,7 @@ class MessageStreamLLMAdapter(LLMAdapter):
         event_handler: Optional[Callable[[TEvent], None]] = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[RemoteParticipant] = None,
+        options: Optional[dict] = None,
     ) -> Any:
         participant = room.messaging.get_participant_by_name(self.participant_name)
         if participant is None:
