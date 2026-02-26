@@ -1597,11 +1597,12 @@ class ChatBot(ChatBotBase):
         if key is not None:
             tracked = self._thread_status_keys.get(path)
             if tracked is not None and tracked == key:
-                self._clear_thread_status_nowait(path=path)
+                self._thread_status_keys.pop(path, None)
+                self._set_thread_status_nowait(path=path, status="Thinking")
             return
 
         if state in ("completed", "failed", "cancelled"):
-            self._clear_thread_status_nowait(path=path)
+            self._set_thread_status_nowait(path=path, status="Thinking")
 
     async def create_thread_context(
         self,
