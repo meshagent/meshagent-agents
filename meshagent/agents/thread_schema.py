@@ -33,6 +33,11 @@ thread_schema = MeshSchema(
             tag_name="messages",
             description="the messages of this thread",
             properties=[
+                ValueProperty(
+                    name="external_thread_id",
+                    description="optional external backend thread id used for resume",
+                    type="string",
+                ),
                 ChildProperty(
                     name="items",
                     child_tag_names=[
@@ -43,7 +48,7 @@ thread_schema = MeshSchema(
                         "event",
                     ],
                     description="the messages in this thread",
-                )
+                ),
             ],
         ),
         ElementType(
