@@ -412,6 +412,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_status_mode_values: dict[str, ThreadStatusMode] = {}
         self._thread_status_keys: dict[str, str] = {}
         self._thread_status_locks: dict[str, asyncio.Lock] = {}
+        self._thread_status_generations: dict[str, int] = {}
 
     def _thread_status_attribute_name(self, *, path: str) -> str:
         return f"thread.status.{path}"
@@ -428,6 +429,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
             lock = asyncio.Lock()
             self._thread_status_locks[path] = lock
         return lock
+
+    def _next_thread_status_generation(self, *, path: str) -> int:
+        generation = self._thread_status_generations.get(path, 0) + 1
+        self._thread_status_generations[path] = generation
+        return generation
 
     def _normalize_thread_status_mode(
         self, *, mode: Optional[str]
@@ -507,15 +513,31 @@ class ChatBotBase(SingleRoomAgent, ABC):
         await set_local_attribute(text_attribute_name, normalized)
         await set_local_attribute(mode_attribute_name, normalized_mode)
 
-    async def _apply_thread_status(self, *, path: str, status: Optional[str]) -> None:
+    async def _apply_thread_status(
+        self,
+        *,
+        path: str,
+        status: Optional[str],
+        generation: Optional[int] = None,
+    ) -> None:
         lock = self._status_lock(path=path)
         async with lock:
+            if generation is not None:
+                current_generation = self._thread_status_generations.get(path, 0)
+                if generation != current_generation:
+                    return
             await self.set_thread_status(path=path, status=status)
 
     def _set_thread_status_nowait(self, *, path: str, status: Optional[str]) -> None:
+        generation = self._next_thread_status_generation(path=path)
+
         async def run() -> None:
             try:
-                await self._apply_thread_status(path=path, status=status)
+                await self._apply_thread_status(
+                    path=path,
+                    status=status,
+                    generation=generation,
+                )
             except Exception as ex:
                 logger.error(
                     f"unable to set thread status for {path}",
@@ -526,7 +548,12 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
     async def clear_thread_status(self, *, path: str) -> None:
         self._thread_status_keys.pop(path, None)
-        await self._apply_thread_status(path=path, status=None)
+        generation = self._next_thread_status_generation(path=path)
+        await self._apply_thread_status(
+            path=path,
+            status=None,
+            generation=generation,
+        )
 
     def _clear_thread_status_nowait(self, *, path: str) -> None:
         self._thread_status_keys.pop(path, None)
@@ -548,6 +575,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_status_values.clear()
         self._thread_status_mode_values.clear()
         self._thread_status_locks.clear()
+        self._thread_status_generations.clear()
 
     async def _send_and_save_chat(
         self,
