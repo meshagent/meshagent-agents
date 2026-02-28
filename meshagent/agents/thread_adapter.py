@@ -1,7 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 import uuid
 
 from opentelemetry import trace
@@ -246,12 +246,13 @@ class ThreadAdapter(ABC):
         *,
         text: str,
         participant: RemoteParticipant | str,
+        attachments: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         doc_messages: Element = self._thread.root.get_children_by_tag_name("messages")[
             0
         ]
 
-        doc_messages.append_child(
+        message = doc_messages.append_child(
             tag_name="message",
             attributes={
                 "text": text,
@@ -263,6 +264,23 @@ class ThreadAdapter(ABC):
                 else participant,
             },
         )
+
+        if attachments is None:
+            return
+
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            path = attachment.get("path")
+            if not isinstance(path, str):
+                continue
+            normalized_path = path.strip()
+            if normalized_path == "":
+                continue
+            message.append_child(
+                tag_name="file",
+                attributes={"path": normalized_path},
+            )
 
     def write_image(
         self,

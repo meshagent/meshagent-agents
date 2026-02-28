@@ -9,6 +9,7 @@ from meshagent.agents.completions_thread_adapter import CompletionsThreadAdapter
 from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.responses_thread_adapter import ResponsesThreadAdapter
 from meshagent.agents.threaded_task_runner import ThreadedTaskRunner, ThreadingMode
+from meshagent.agents.toolkit_schema import build_tools_property_schema
 from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
 
 import tarfile
@@ -70,41 +71,23 @@ class LLMTaskRunner(ThreadedTaskRunner):
                     threading_mode=resolved_threading_mode,
                 )
 
-                toolkit_builders = self.get_toolkit_builders()
-                if len(toolkit_builders) > 0:
-                    toolkit_config_schemas = []
-
-                    defs = None
-
-                    for builder in toolkit_builders:
-                        schema = builder.type.model_json_schema()
-                        if schema.get("$defs") is not None:
-                            if defs is None:
-                                defs = {}
-
-                            for k, v in schema["$defs"].items():
-                                defs[k] = v
-
-                        toolkit_config_schemas.append(schema)
-
+                tools_schema, defs = build_tools_property_schema(
+                    toolkit_builders=self.get_toolkit_builders()
+                )
+                if tools_schema is not None:
                     input_schema = merge(
                         schema=input_schema,
                         additional_properties={
-                            "tools": {
-                                "type": "array",
-                                "items": {
-                                    "anyOf": toolkit_config_schemas,
-                                },
-                            },
+                            "tools": tools_schema,
                         },
                     )
 
-                    if defs is not None:
+                    if len(defs) > 0:
                         if input_schema.get("$defs") is None:
                             input_schema["$defs"] = {}
 
-                        for k, v in defs.items():
-                            input_schema["$defs"][k] = v
+                        for key, value in defs.items():
+                            input_schema["$defs"][key] = value
 
             else:
                 input_schema = {

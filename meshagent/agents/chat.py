@@ -11,6 +11,7 @@ from meshagent.api import (
     Element,
     MeshDocument,
 )
+from meshagent.api.messaging import JsonContent
 from meshagent.tools import (
     Toolkit,
     ToolContext,
@@ -18,6 +19,7 @@ from meshagent.tools import (
     ToolkitBuilder,
     ToolkitConfig,
     RemoteToolkit,
+    FunctionTool,
 )
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.openai.tools.responses_adapter import (
@@ -33,6 +35,9 @@ from meshagent.agents.responses_thread_adapter import (
 )
 
 import uuid
+import posixpath
+import re
+from copy import deepcopy
 from datetime import datetime, timezone
 import asyncio
 from typing import Any, Optional, Callable, AsyncIterator, Awaitable, Literal
@@ -47,14 +52,31 @@ from pydantic import BaseModel
 from meshagent.tools import tool
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
+from meshagent.agents.toolkit_schema import build_tools_property_schema
 
 
 tracer = trace.get_tracer("meshagent.chatbot")
 
 logger = logging.getLogger("chat")
 _legacy_chatbot_init_chat_context_warned: set[type] = set()
+_DEFAULT_NEW_THREAD_NAME_RULES = [
+    "generate a concise topic name for storing this chat in a thread",
+    "return only a thread_name value suitable for a file name",
+    "thread_name should be 2-6 words, lowercase, and topic-focused",
+    "do not include slashes or a .thread extension",
+]
 
 ThreadStatusMode = Literal["busy", "steerable"]
+
+
+class ChatAttachment(BaseModel):
+    path: str
+
+
+class ChatMessageInput(BaseModel):
+    text: str
+    attachments: Optional[list[ChatAttachment]] = None
+    tools: Optional[list[Any]] = None
 
 
 class ChatBotReasoningTool(ReasoningTool):
@@ -304,7 +326,7 @@ class ChatBotClient:
             raise RoomException("chat client not started")
 
         messages = self._doc.root.get_elements_by_tag_name("messages")[0]
-        messages.append_child(
+        message = messages.append_child(
             tag_name="message",
             attributes={
                 "id": str(uuid.uuid4()),
@@ -318,9 +340,33 @@ class ChatBotClient:
 
         if attachments is not None:
             for attachment in attachments:
-                messages.append_child(tag_name="file", attributes=attachment)
+                if not isinstance(attachment, dict):
+                    continue
+                path = attachment.get("path")
+                if not isinstance(path, str):
+                    continue
+                normalized_path = path.strip()
+                if normalized_path == "":
+                    continue
+                message.append_child(
+                    tag_name="file",
+                    attributes={"path": normalized_path},
+                )
 
         tool_payload = [tool.model_dump(mode="json") for tool in tools or []]
+        attachment_payload: list[dict[str, str]] = []
+        if attachments is not None:
+            for attachment in attachments:
+                if not isinstance(attachment, dict):
+                    continue
+                path = attachment.get("path")
+                if not isinstance(path, str):
+                    continue
+                normalized_path = path.strip()
+                if normalized_path == "":
+                    continue
+                attachment_payload.append({"path": normalized_path})
+
         await self.room.messaging.send_message(
             to=self._participant,
             type="steer" if steer else "chat",
@@ -328,6 +374,7 @@ class ChatBotClient:
                 "text": text,
                 "path": self.thread_path,
                 "tools": tool_payload,
+                "attachments": attachment_payload,
             },
             attachment=None,
         )
@@ -369,6 +416,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
         annotations: Optional[list[str]] = None,
         always_reply: Optional[bool] = None,
         skill_dirs: Optional[list[str]] = None,
+        thread_dir: Optional[str] = None,
+        threading_mode: Optional[str] = None,
+        thread_name_rules: Optional[list[str]] = None,
     ):
         super().__init__(
             name=name,
@@ -413,6 +463,156 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_status_keys: dict[str, str] = {}
         self._thread_status_locks: dict[str, asyncio.Lock] = {}
         self._thread_status_generations: dict[str, int] = {}
+        self._threading_mode = (
+            threading_mode.strip()
+            if isinstance(threading_mode, str) and threading_mode.strip() != ""
+            else None
+        )
+        self._thread_dir = (
+            self._normalize_thread_dir(thread_dir=thread_dir)
+            if thread_dir is not None
+            else None
+        )
+        if thread_name_rules is not None and len(thread_name_rules) > 0:
+            self._thread_name_rules = [*thread_name_rules]
+        else:
+            self._thread_name_rules = [*_DEFAULT_NEW_THREAD_NAME_RULES]
+
+    def thread_name_adapter(self) -> Optional[LLMAdapter]:
+        return None
+
+    def _normalize_thread_dir(self, *, thread_dir: str) -> str:
+        normalized = thread_dir.strip().rstrip("/")
+        if normalized == "":
+            raise RoomException("thread_dir must not be empty")
+        return normalized
+
+    def _default_thread_dir(self) -> str:
+        local_name = "chat"
+        if self._room is not None and self._room.local_participant is not None:
+            participant_name = self._room.local_participant.get_attribute("name")
+            if isinstance(participant_name, str) and participant_name.strip() != "":
+                local_name = participant_name.strip()
+
+        return self._normalize_thread_dir(
+            thread_dir=posixpath.join(".threads", local_name)
+        )
+
+    def _get_thread_dir(self) -> str:
+        if self._thread_dir is not None:
+            return self._thread_dir
+        return self._default_thread_dir()
+
+    def _sanitize_thread_name(self, *, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized.endswith(".thread"):
+            normalized = normalized[: -len(".thread")]
+
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+        if normalized == "":
+            normalized = "thread"
+        return normalized[:64].strip("-") or "thread"
+
+    def _fallback_thread_name(self, *, text: str) -> str:
+        del text
+        return f"thread-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+    def _thread_path_for_name(self, *, thread_name: str, thread_dir: str) -> str:
+        return posixpath.join(thread_dir, f"{thread_name}.thread")
+
+    async def _next_available_thread_path(self, *, base_path: str) -> str:
+        if self._room is None:
+            return base_path
+
+        try:
+            exists = await self._room.storage.exists(path=base_path)
+        except Exception:
+            return base_path
+
+        if not exists:
+            return base_path
+
+        thread_dir, filename = posixpath.split(base_path)
+        if filename.endswith(".thread"):
+            base_name = filename[: -len(".thread")]
+        else:
+            base_name = filename
+
+        for index in range(2, 1000):
+            candidate = posixpath.join(thread_dir, f"{base_name} {index}.thread")
+            try:
+                if not await self._room.storage.exists(path=candidate):
+                    return candidate
+            except Exception:
+                return candidate
+
+        return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}.thread")
+
+    async def _generate_new_thread_path(
+        self,
+        *,
+        context: ToolContext,
+        text: str,
+    ) -> str:
+        generated_name = self._fallback_thread_name(text=text)
+        adapter = self.thread_name_adapter()
+        if adapter is not None:
+            caller_context_json = context.caller_context
+            chat_context_json = None
+            if isinstance(caller_context_json, dict):
+                candidate = caller_context_json.get("chat")
+                if isinstance(candidate, dict):
+                    chat_context_json = candidate
+
+            session = adapter.create_session()
+            if chat_context_json is not None:
+                caller_context = AgentSessionContext.from_json(chat_context_json)
+                session.messages.extend(deepcopy(caller_context.messages))
+                session.previous_messages.extend(
+                    deepcopy(caller_context.previous_messages)
+                )
+                session.previous_response_id = caller_context.previous_response_id
+            cloned_context = session.copy()
+            async with cloned_context:
+                cloned_context.replace_rules(rules=self._thread_name_rules)
+                cloned_context.append_user_message(text)
+                try:
+                    response = await adapter.next(
+                        context=cloned_context,
+                        room=context.room,
+                        model=self.default_model(),
+                        on_behalf_of=context.on_behalf_of or context.caller,
+                        toolkits=[],
+                        output_schema={
+                            "type": "object",
+                            "required": ["thread_name"],
+                            "additionalProperties": False,
+                            "properties": {
+                                "thread_name": {
+                                    "type": "string",
+                                    "description": "2-6 word topic name for the task thread",
+                                }
+                            },
+                        },
+                    )
+                    if isinstance(response, dict):
+                        thread_name = response.get("thread_name")
+                        if isinstance(thread_name, str):
+                            generated_name = self._sanitize_thread_name(
+                                value=thread_name
+                            )
+                except Exception as ex:
+                    logger.warning(
+                        "unable to auto-generate chat thread name, using fallback",
+                        exc_info=ex,
+                    )
+
+        path = self._thread_path_for_name(
+            thread_name=generated_name,
+            thread_dir=self._get_thread_dir(),
+        )
+        return await self._next_available_thread_path(base_path=path)
 
     def _thread_status_attribute_name(self, *, path: str) -> str:
         return f"thread.status.{path}"
@@ -1207,6 +1407,56 @@ class ChatBotBase(SingleRoomAgent, ABC):
             },
         )
 
+    async def _queue_chat_message(
+        self,
+        *,
+        context: ToolContext,
+        path: str,
+        message: dict[str, Any],
+        wait_for_result: bool,
+    ) -> Optional[str]:
+        text_value = message.get("text")
+        text = text_value if isinstance(text_value, str) else ""
+        attachments: list[dict[str, str]] = []
+        raw_attachments = message.get("attachments")
+        if isinstance(raw_attachments, list):
+            for attachment in raw_attachments:
+                if not isinstance(attachment, dict):
+                    continue
+                path_value = attachment.get("path")
+                if not isinstance(path_value, str):
+                    continue
+                normalized_path = path_value.strip()
+                if normalized_path == "":
+                    continue
+                attachments.append({"path": normalized_path})
+
+        payload = {
+            **message,
+            "path": path,
+            "text": text,
+            "attachments": attachments,
+        }
+        qm = _QueuedChatMessage(
+            type="chat",
+            message=payload,
+            from_participant=context.on_behalf_of or context.caller,
+        )
+
+        thread = await self.open_thread(path=path)
+        thread.write_text_message(
+            text=text,
+            participant=context.on_behalf_of or context.caller,
+            attachments=attachments,
+        )
+
+        messages = self._ensure_thread(path=path)
+        messages.send_nowait(qm)
+
+        if wait_for_result:
+            return await qm.result
+        return None
+
     async def get_exposed_toolkits(self) -> list[RemoteToolkit]:
         exposed_toolkits = await super().get_exposed_toolkits()
 
@@ -1214,31 +1464,107 @@ class ChatBotBase(SingleRoomAgent, ABC):
             description=f"sends a chat to {self.room.local_participant.get_attribute('name')} and gets the response"
         )
         async def ask(context: ToolContext, *, path: str, text: str) -> str:
-            qm = _QueuedChatMessage(
-                type="chat",
-                message={
-                    "text": text,
-                    "path": path,
-                },
-                from_participant=context.on_behalf_of or context.caller,
+            response = await self._queue_chat_message(
+                context=context,
+                path=path,
+                message={"text": text},
+                wait_for_result=True,
             )
+            if response is None:
+                raise RoomException("chat response was empty")
+            return response
 
-            thread = await self.open_thread(path=path)
+        tools_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["message"],
+            "properties": {
+                "message": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["text"],
+                    "properties": {
+                        "text": {"type": "string"},
+                        "attachments": {
+                            "anyOf": [
+                                {
+                                    "type": "array",
+                                    "items": {"$ref": "#/$defs/ChatAttachment"},
+                                },
+                                {"type": "null"},
+                            ]
+                        },
+                    },
+                }
+            },
+            "$defs": {
+                "ChatAttachment": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["path"],
+                    "properties": {
+                        "path": {"type": "string"},
+                    },
+                }
+            },
+        }
 
-            thread.write_text_message(
-                text=text, participant=context.on_behalf_of or context.caller
+        message_tools_schema, defs = build_tools_property_schema(
+            toolkit_builders=self.get_toolkit_builders()
+        )
+        if message_tools_schema is not None:
+            tools_schema["properties"]["message"]["properties"]["tools"] = (
+                message_tools_schema
             )
+        else:
+            # Backward compatibility: some clients always send `tools: []`.
+            tools_schema["properties"]["message"]["properties"]["tools"] = {
+                "type": "array",
+                "maxItems": 0,
+            }
 
-            messages = self._ensure_thread(path=path)
-            messages.send_nowait(qm)
+        if len(defs) > 0:
+            for key, value in defs.items():
+                tools_schema["$defs"][key] = value
 
-            return await qm.result
+        outer = self
+
+        class NewThreadTool(FunctionTool):
+            def __init__(self):
+                super().__init__(
+                    name="new_thread",
+                    description=f"creates a new thread for {outer.room.local_participant.get_attribute('name')} and sends the first chat message",
+                    input_schema=tools_schema,
+                    supports_context=True,
+                )
+
+            async def execute(
+                self,
+                context: ToolContext,
+                *,
+                message: dict[str, Any],
+            ) -> JsonContent:
+                text_value = message.get("text")
+                text = text_value if isinstance(text_value, str) else ""
+                payload = {**message, "text": text}
+
+                path = await outer._generate_new_thread_path(
+                    context=context,
+                    text=text,
+                )
+                await outer._queue_chat_message(
+                    context=context,
+                    path=path,
+                    message=payload,
+                    wait_for_result=False,
+                )
+                return JsonContent(json={"path": path})
 
         chatbot_toolkit = RemoteToolkit(
-            name=f"{self.name}",
+            name="chat",
             description=f"tools for interacting with {self.name}",
             public=False,
-            tools=[ask],
+            tools=[ask, NewThreadTool()],
         )
 
         exposed_toolkits.append(chatbot_toolkit)
@@ -1479,6 +1805,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
         logger.debug("Starting chatbot")
 
+        if self._threading_mode is not None:
+            await self.room.local_participant.set_attribute(
+                "meshagent.chatbot.threading", self._threading_mode
+            )
+
         await self.room.local_participant.set_attribute(
             "empty_state_title", self._empty_state_title
         )
@@ -1516,6 +1847,9 @@ class ChatBot(ChatBotBase):
         decision_options: Optional[dict] = None,
         always_reply: Optional[bool] = None,
         skill_dirs: Optional[list[str]] = None,
+        thread_dir: Optional[str] = None,
+        threading_mode: Optional[str] = None,
+        thread_name_rules: Optional[list[str]] = None,
     ):
         self._llm_adapter = llm_adapter
         if decision_model is None:
@@ -1538,10 +1872,16 @@ class ChatBot(ChatBotBase):
             annotations=annotations,
             always_reply=always_reply,
             skill_dirs=skill_dirs,
+            thread_dir=thread_dir,
+            threading_mode=threading_mode,
+            thread_name_rules=thread_name_rules,
         )
 
     def default_model(self) -> str:
         return self._llm_adapter.default_model()
+
+    def thread_name_adapter(self) -> Optional[LLMAdapter]:
+        return self._llm_adapter
 
     def _status_event_details(
         self, *, event: dict
