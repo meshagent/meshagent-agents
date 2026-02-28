@@ -2174,6 +2174,10 @@ class ChatBot(ChatBotBase):
             participant=from_participant,
         )
         thread_context.session.replace_rules(rules)
+        self._append_current_file_context(
+            thread_context=thread_context,
+            participant=from_participant,
+        )
 
         attachments = message.get("attachments", [])
         for attachment in attachments:
@@ -2275,3 +2279,56 @@ class ChatBot(ChatBotBase):
             model=model,
             on_behalf_of=from_participant,
         )
+
+    def _normalize_current_file(self, *, value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        trimmed = value.strip()
+        if trimmed == "":
+            return None
+        return trimmed
+
+    def _participant_name_for_context(self, *, participant: Participant) -> str:
+        name = participant.get_attribute("name")
+        if isinstance(name, str) and name.strip() != "":
+            return name
+        return "the user"
+
+    def _append_current_file_context(
+        self,
+        *,
+        thread_context: ChatThreadContext,
+        participant: Participant,
+    ) -> None:
+        metadata = thread_context.session.metadata
+        state = metadata.get("current_file_by_participant")
+        if not isinstance(state, dict):
+            state = {}
+            metadata["current_file_by_participant"] = state
+
+        current_file = self._normalize_current_file(
+            value=participant.get_attribute("current_file")
+        )
+        participant_key = participant.id
+        had_previous = participant_key in state
+        previous_file = state.get(participant_key)
+
+        if had_previous and previous_file == current_file:
+            return
+        if not had_previous and current_file is None:
+            return
+
+        participant_name = self._participant_name_for_context(participant=participant)
+        if current_file is None:
+            thread_context.session.append_assistant_message(
+                message=f"{participant_name} is not currently viewing any files."
+            )
+        else:
+            thread_context.session.append_assistant_message(
+                message=(
+                    f"{participant_name} is currently viewing the file at "
+                    f"the path: {current_file}"
+                )
+            )
+
+        state[participant_key] = current_file

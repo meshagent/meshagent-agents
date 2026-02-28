@@ -1,10 +1,11 @@
 from typing import Optional, Literal
+from unittest import mock
 
 import pytest
 from pydantic import BaseModel
 
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.chat import ChatBot
+from meshagent.agents.chat import ChatBot, ChatThreadContext
 from meshagent.agents.context import AgentSessionContext
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
@@ -19,6 +20,17 @@ class _FakeStorage:
         return path in self._existing_paths
 
 
+class _FakeMessaging:
+    def __init__(self):
+        self.sent_messages: list[dict] = []
+
+    def get_participants(self):
+        return []
+
+    def send_message_nowait(self, *, to, type, message):
+        self.sent_messages.append({"to": to, "type": type, "message": message})
+
+
 class _FakeRoom:
     def __init__(self, *, existing_paths: Optional[set[str]] = None):
         self.local_participant = Participant(
@@ -26,6 +38,7 @@ class _FakeRoom:
             attributes={"name": "assistant"},
         )
         self.storage = _FakeStorage(existing_paths=existing_paths)
+        self.messaging = _FakeMessaging()
 
 
 class _FakeQueue:
@@ -108,6 +121,36 @@ class _SessionRequiredThreadNameAdapter(LLMAdapter):
         return {"thread_name": self.generated_thread_name}
 
 
+class _CaptureChatAdapter(LLMAdapter):
+    def __init__(self):
+        self.last_messages: list[dict] = []
+
+    def default_model(self) -> str:
+        return "chat-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        output_schema=None,
+        event_handler=None,
+        model=None,
+        on_behalf_of=None,
+        options: Optional[dict] = None,
+    ):
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
+        del model
+        del on_behalf_of
+        del options
+        self.last_messages = [*context.messages]
+        return "ok"
+
+
 class _ExampleToolkitConfig(BaseModel):
     name: Literal["example"] = "example"
     enabled: bool = False
@@ -127,6 +170,31 @@ class _ExampleToolkitBuilder(ToolkitBuilder):
 class _ChatBotWithToolBuilders(ChatBot):
     def get_toolkit_builders(self) -> list[ToolkitBuilder]:
         return [_ExampleToolkitBuilder()]
+
+
+class _ChatBotAlwaysReplies(ChatBot):
+    async def should_reply(
+        self,
+        *,
+        has_more_than_one_other_user: bool,
+        online: list[Participant],
+        context: ChatThreadContext,
+        toolkits: list[Toolkit],
+        from_user: Participant,
+    ) -> bool:
+        del has_more_than_one_other_user
+        del online
+        del context
+        del toolkits
+        del from_user
+        return True
+
+    async def get_thread_toolkits(
+        self, *, thread_context: ChatThreadContext, participant: Participant
+    ) -> list[Toolkit]:
+        del thread_context
+        del participant
+        return []
 
 
 async def _new_thread_tool(bot: ChatBot):
@@ -331,3 +399,83 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
         "prior context",
         "Name this from adapter context",
     ]
+
+
+@pytest.mark.asyncio
+async def test_on_chat_received_adds_current_file_context_message() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = _ChatBotAlwaysReplies(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+
+    thread = mock.Mock()
+    thread.root = mock.Mock()
+    thread.root.get_children.return_value = []
+
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=".threads/main.thread",
+    )
+    from_participant = Participant(
+        id="caller-id",
+        attributes={"name": "alice", "current_file": "docs/plan.md"},
+    )
+
+    result = await bot.on_chat_received(
+        thread_context=thread_context,
+        from_participant=from_participant,
+        message={"text": "Summarize this"},
+    )
+
+    assert result == "ok"
+    assert any(
+        message.get("role") == "assistant"
+        and message.get("content")
+        == "alice is currently viewing the file at the path: docs/plan.md"
+        for message in adapter.last_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_chat_received_adds_not_viewing_message_when_file_is_closed() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = _ChatBotAlwaysReplies(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+
+    thread = mock.Mock()
+    thread.root = mock.Mock()
+    thread.root.get_children.return_value = []
+
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=".threads/main.thread",
+    )
+
+    first_participant = Participant(
+        id="caller-id",
+        attributes={"name": "alice", "current_file": "docs/plan.md"},
+    )
+    second_participant = Participant(
+        id="caller-id",
+        attributes={"name": "alice"},
+    )
+
+    await bot.on_chat_received(
+        thread_context=thread_context,
+        from_participant=first_participant,
+        message={"text": "First"},
+    )
+    await bot.on_chat_received(
+        thread_context=thread_context,
+        from_participant=second_participant,
+        message={"text": "Second"},
+    )
+
+    assert any(
+        message.get("role") == "assistant"
+        and message.get("content") == "alice is not currently viewing any files."
+        for message in adapter.last_messages
+    )
