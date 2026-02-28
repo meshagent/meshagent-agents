@@ -28,33 +28,6 @@ class _FakeRoom:
         self.storage = _FakeStorage(existing_paths=existing_paths)
 
 
-class _FakeThreadAdapter:
-    def __init__(self):
-        self.writes: list[tuple[str, str, list[dict[str, str]]]] = []
-        self.paths: list[str] = []
-
-    def write_text_message(
-        self,
-        *,
-        text: str,
-        participant: Participant | str,
-        attachments: Optional[list[dict]] = None,
-    ) -> None:
-        if isinstance(participant, str):
-            participant_name = participant
-        else:
-            participant_name = participant.get_attribute("name") or ""
-        normalized_attachments: list[dict[str, str]] = []
-        if attachments is not None:
-            for attachment in attachments:
-                if not isinstance(attachment, dict):
-                    continue
-                path = attachment.get("path")
-                if isinstance(path, str) and path.strip() != "":
-                    normalized_attachments.append({"path": path.strip()})
-        self.writes.append((text, participant_name, normalized_attachments))
-
-
 class _FakeQueue:
     def __init__(self):
         self.items = []
@@ -173,18 +146,12 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     room = _FakeRoom()
     bot._room = room
 
-    fake_thread = _FakeThreadAdapter()
     queue = _FakeQueue()
-
-    async def _open_thread(*, path: str):
-        fake_thread.paths.append(path)
-        return fake_thread
 
     def _ensure_thread(*, path: str):
         del path
         return queue
 
-    bot.open_thread = _open_thread  # type: ignore[method-assign]
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
@@ -202,14 +169,6 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
 
     assert isinstance(result, JsonContent)
     assert result.json == {"path": ".threads/assistant/release-planning-q1.thread"}
-    assert fake_thread.paths == [".threads/assistant/release-planning-q1.thread"]
-    assert fake_thread.writes == [
-        (
-            "Plan the Q1 release milestones",
-            "alice",
-            [{"path": "uploads/plan.md"}],
-        )
-    ]
 
     assert len(queue.items) == 1
     queued = queue.items[0]
@@ -217,6 +176,7 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     assert queued.message["path"] == ".threads/assistant/release-planning-q1.thread"
     assert queued.message["text"] == "Plan the Q1 release milestones"
     assert queued.message["attachments"] == [{"path": "uploads/plan.md"}]
+    assert queued.message["store"] is True
     assert not queued.result.done()
 
     assert len(adapter.calls) == 1
@@ -230,18 +190,12 @@ async def test_new_thread_tool_uses_thread_dir_and_suffixes_existing_path() -> N
     room = _FakeRoom(existing_paths={"custom/release-planning.thread"})
     bot._room = room
 
-    fake_thread = _FakeThreadAdapter()
     queue = _FakeQueue()
-
-    async def _open_thread(*, path: str):
-        fake_thread.paths.append(path)
-        return fake_thread
 
     def _ensure_thread(*, path: str):
         del path
         return queue
 
-    bot.open_thread = _open_thread  # type: ignore[method-assign]
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
@@ -256,8 +210,12 @@ async def test_new_thread_tool_uses_thread_dir_and_suffixes_existing_path() -> N
 
     assert isinstance(result, JsonContent)
     assert result.json == {"path": "custom/release-planning 2.thread"}
-    assert fake_thread.paths == ["custom/release-planning 2.thread"]
-    assert fake_thread.writes == [("Plan the release", "alice", [])]
+    assert len(queue.items) == 1
+    queued = queue.items[0]
+    assert queued.message["path"] == "custom/release-planning 2.thread"
+    assert queued.message["text"] == "Plan the release"
+    assert queued.message["attachments"] == []
+    assert queued.message["store"] is True
 
 
 @pytest.mark.asyncio
@@ -267,18 +225,12 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     room = _FakeRoom()
     bot._room = room
 
-    fake_thread = _FakeThreadAdapter()
     queue = _FakeQueue()
-
-    async def _open_thread(*, path: str):
-        fake_thread.paths.append(path)
-        return fake_thread
 
     def _ensure_thread(*, path: str):
         del path
         return queue
 
-    bot.open_thread = _open_thread  # type: ignore[method-assign]
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
@@ -300,6 +252,7 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == []
+    assert queued.message["store"] is True
 
 
 @pytest.mark.asyncio
@@ -309,18 +262,12 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     room = _FakeRoom()
     bot._room = room
 
-    fake_thread = _FakeThreadAdapter()
     queue = _FakeQueue()
-
-    async def _open_thread(*, path: str):
-        fake_thread.paths.append(path)
-        return fake_thread
 
     def _ensure_thread(*, path: str):
         del path
         return queue
 
-    bot.open_thread = _open_thread  # type: ignore[method-assign]
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
@@ -341,6 +288,7 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == [{"name": "example", "enabled": True}]
+    assert queued.message["store"] is True
 
 
 @pytest.mark.asyncio
@@ -350,18 +298,12 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     room = _FakeRoom()
     bot._room = room
 
-    fake_thread = _FakeThreadAdapter()
     queue = _FakeQueue()
-
-    async def _open_thread(*, path: str):
-        fake_thread.paths.append(path)
-        return fake_thread
 
     def _ensure_thread(*, path: str):
         del path
         return queue
 
-    bot.open_thread = _open_thread  # type: ignore[method-assign]
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)

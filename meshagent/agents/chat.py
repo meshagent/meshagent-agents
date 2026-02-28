@@ -925,6 +925,10 @@ class ChatBotBase(SingleRoomAgent, ABC):
             format_message=self.format_message,
         )
 
+    def _should_store_received_chat_message(self, *, message: dict[str, Any]) -> bool:
+        store = message.get("store")
+        return isinstance(store, bool) and store
+
     async def open_thread(self, *, path: str) -> ThreadAdapter:
         logger.info(f"opening thread {path}")
         if path not in self._open_threads:
@@ -1285,11 +1289,26 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             chat_with_participant.get_attribute("name"),
                         )
 
-                        attachments = received.message.get("attachments", [])
+                        raw_attachments = received.message.get("attachments")
+                        attachments = (
+                            raw_attachments if isinstance(raw_attachments, list) else []
+                        )
                         span.set_attribute("attachments", json.dumps(attachments))
 
                         text = received.message["text"]
                         span.set_attributes({"text": text})
+
+                        if (
+                            thread_adapter is not None
+                            and self._should_store_received_chat_message(
+                                message=received.message
+                            )
+                        ):
+                            thread_adapter.write_text_message(
+                                text=text,
+                                participant=chat_with_participant,
+                                attachments=attachments,
+                            )
 
                         try:
                             if thread_context is None:
@@ -1414,6 +1433,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         path: str,
         message: dict[str, Any],
         wait_for_result: bool,
+        store: bool = True,
     ) -> Optional[str]:
         text_value = message.get("text")
         text = text_value if isinstance(text_value, str) else ""
@@ -1436,18 +1456,12 @@ class ChatBotBase(SingleRoomAgent, ABC):
             "path": path,
             "text": text,
             "attachments": attachments,
+            "store": store,
         }
         qm = _QueuedChatMessage(
             type="chat",
             message=payload,
             from_participant=context.on_behalf_of or context.caller,
-        )
-
-        thread = await self.open_thread(path=path)
-        thread.write_text_message(
-            text=text,
-            participant=context.on_behalf_of or context.caller,
-            attachments=attachments,
         )
 
         messages = self._ensure_thread(path=path)
