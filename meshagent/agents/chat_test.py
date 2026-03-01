@@ -1,5 +1,6 @@
 from typing import Optional, Literal
 from unittest import mock
+import uuid
 
 import pytest
 from pydantic import BaseModel
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.chat import ChatBot, ChatThreadContext
 from meshagent.agents.context import AgentSessionContext
+from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
 from meshagent.tools import ToolContext, ToolkitBuilder, Toolkit
@@ -19,26 +21,127 @@ class _FakeStorage:
     async def exists(self, *, path: str) -> bool:
         return path in self._existing_paths
 
+    async def list(self, *, path: str):
+        del path
+        return []
+
 
 class _FakeMessaging:
     def __init__(self):
         self.sent_messages: list[dict] = []
+        self.handlers: dict[str, object] = {}
+        self.enabled = False
 
     def get_participants(self):
         return []
+
+    def on(self, event: str, handler) -> None:
+        self.handlers[event] = handler
+
+    def off(self, event: str, handler) -> None:
+        existing = self.handlers.get(event)
+        if existing is handler:
+            self.handlers.pop(event, None)
+
+    async def enable(self) -> None:
+        self.enabled = True
 
     def send_message_nowait(self, *, to, type, message):
         self.sent_messages.append({"to": to, "type": type, "message": message})
 
 
-class _FakeRoom:
-    def __init__(self, *, existing_paths: Optional[set[str]] = None):
-        self.local_participant = Participant(
+class _FakeAgents:
+    async def list_toolkits(
+        self,
+        *,
+        participant_id: Optional[str] = None,
+        participant_name: Optional[str] = None,
+    ):
+        del participant_id
+        del participant_name
+        return []
+
+
+class _FakeThreadListElement:
+    def __init__(self, *, tag_name: str, attributes: dict[str, str]):
+        self.tag_name = tag_name
+        self._attributes = dict(attributes)
+
+    def get_attribute(self, name: str):
+        return self._attributes.get(name)
+
+    def set_attribute(self, name: str, value):
+        self._attributes[name] = value
+
+
+class _FakeThreadListRoot:
+    def __init__(self):
+        self._children: list[_FakeThreadListElement] = []
+
+    def get_children(self) -> list[_FakeThreadListElement]:
+        return [*self._children]
+
+    def append_child(
+        self, *, tag_name: str, attributes: dict[str, str]
+    ) -> _FakeThreadListElement:
+        element = _FakeThreadListElement(tag_name=tag_name, attributes=attributes)
+        self._children.append(element)
+        return element
+
+
+class _FakeThreadListDocument:
+    def __init__(self):
+        self.root = _FakeThreadListRoot()
+
+
+class _FakeSync:
+    def __init__(self, *, document: Optional[_FakeThreadListDocument] = None):
+        self.document = document or _FakeThreadListDocument()
+        self.open_calls: list[dict] = []
+        self.close_calls: list[str] = []
+
+    async def open(
+        self,
+        *,
+        path: str,
+        create: bool = True,
+        initial_json: Optional[dict] = None,
+        schema=None,
+    ):
+        del create
+        del initial_json
+        self.open_calls.append({"path": path, "schema": schema})
+        return self.document
+
+    async def close(self, *, path: str) -> None:
+        self.close_calls.append(path)
+
+
+class _FakeLocalParticipant(Participant):
+    def __init__(self):
+        super().__init__(
             id="assistant-id",
             attributes={"name": "assistant"},
         )
+        self.set_attribute_calls: list[tuple[str, object]] = []
+
+    async def set_attribute(self, name: str, value) -> None:
+        self._attributes[name] = value
+        self.set_attribute_calls.append((name, value))
+
+
+class _FakeRoom:
+    def __init__(
+        self,
+        *,
+        existing_paths: Optional[set[str]] = None,
+        sync: Optional[_FakeSync] = None,
+    ):
+        self.local_participant = _FakeLocalParticipant()
         self.storage = _FakeStorage(existing_paths=existing_paths)
         self.messaging = _FakeMessaging()
+        self.sync = sync or _FakeSync()
+        self.agents = _FakeAgents()
 
 
 class _FakeQueue:
@@ -47,6 +150,11 @@ class _FakeQueue:
 
     def send_nowait(self, item) -> None:
         self.items.append(item)
+
+
+class _FakeOpenThreadAdapter:
+    def make_toolkit(self) -> Toolkit:
+        return Toolkit(name="open thread", tools=[])
 
 
 class _FakeThreadNameAdapter(LLMAdapter):
@@ -207,6 +315,19 @@ async def _new_thread_tool(bot: ChatBot):
     return next(tool for tool in chatbot_toolkit.tools if tool.name == "new_thread")
 
 
+async def _chat_toolkit(bot: ChatBot):
+    toolkits = await bot.get_exposed_toolkits()
+    return next(toolkit for toolkit in toolkits if toolkit.name == "chat")
+
+
+def _assert_uuid_thread_path(*, path: str, prefix: str) -> None:
+    assert path.startswith(prefix)
+    assert path.endswith(".thread")
+    basename = path[len(prefix) : -len(".thread")]
+    parsed = uuid.UUID(basename)
+    assert str(parsed) == basename
+
+
 @pytest.mark.asyncio
 async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None:
     adapter = _FakeThreadNameAdapter(generated_thread_name="Release Planning / Q1")
@@ -236,12 +357,13 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     )
 
     assert isinstance(result, JsonContent)
-    assert result.json == {"path": ".threads/assistant/release-planning-q1.thread"}
+    result_path = result.json["path"]
+    _assert_uuid_thread_path(path=result_path, prefix=".threads/assistant/")
 
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.type == "chat"
-    assert queued.message["path"] == ".threads/assistant/release-planning-q1.thread"
+    assert queued.message["path"] == result_path
     assert queued.message["text"] == "Plan the Q1 release milestones"
     assert queued.message["attachments"] == [{"path": "uploads/plan.md"}]
     assert queued.message["store"] is True
@@ -252,10 +374,10 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
 
 
 @pytest.mark.asyncio
-async def test_new_thread_tool_uses_thread_dir_and_suffixes_existing_path() -> None:
+async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
     adapter = _FakeThreadNameAdapter(generated_thread_name="Release Planning")
     bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
-    room = _FakeRoom(existing_paths={"custom/release-planning.thread"})
+    room = _FakeRoom()
     bot._room = room
 
     queue = _FakeQueue()
@@ -277,10 +399,11 @@ async def test_new_thread_tool_uses_thread_dir_and_suffixes_existing_path() -> N
     )
 
     assert isinstance(result, JsonContent)
-    assert result.json == {"path": "custom/release-planning 2.thread"}
+    result_path = result.json["path"]
+    _assert_uuid_thread_path(path=result_path, prefix="custom/")
     assert len(queue.items) == 1
     queued = queue.items[0]
-    assert queued.message["path"] == "custom/release-planning 2.thread"
+    assert queued.message["path"] == result_path
     assert queued.message["text"] == "Plan the release"
     assert queued.message["attachments"] == []
     assert queued.message["store"] is True
@@ -316,7 +439,10 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     )
 
     assert isinstance(result, JsonContent)
-    assert result.json == {"path": ".threads/assistant/no-builder-tools.thread"}
+    _assert_uuid_thread_path(
+        path=result.json["path"],
+        prefix=".threads/assistant/",
+    )
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == []
@@ -352,7 +478,10 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     )
 
     assert isinstance(result, JsonContent)
-    assert result.json == {"path": ".threads/assistant/builder-thread.thread"}
+    _assert_uuid_thread_path(
+        path=result.json["path"],
+        prefix=".threads/assistant/",
+    )
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == [{"name": "example", "enabled": True}]
@@ -393,12 +522,238 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     )
 
     assert isinstance(result, JsonContent)
-    assert result.json == {"path": ".threads/assistant/adapter-context.thread"}
+    _assert_uuid_thread_path(
+        path=result.json["path"],
+        prefix=".threads/assistant/",
+    )
     assert adapter.last_context_type is _SessionRequiredContext
     assert [m.get("content") for m in adapter.last_messages] == [
         "prior context",
         "Name this from adapter context",
     ]
+
+
+@pytest.mark.asyncio
+async def test_new_thread_tool_records_friendly_name_in_thread_list() -> None:
+    adapter = _FakeThreadNameAdapter(generated_thread_name="Friendly Plan Name")
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    room = _FakeRoom()
+    bot._room = room
+
+    doc = _FakeThreadListDocument()
+    bot._thread_list_document = doc
+    bot._thread_list_path = "custom/index.threadl"
+
+    queue = _FakeQueue()
+
+    def _ensure_thread(*, path: str):
+        del path
+        return queue
+
+    bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
+
+    tool = await _new_thread_tool(bot)
+    context = ToolContext(
+        room=room,
+        caller=Participant(id="caller-id", attributes={"name": "alice"}),
+    )
+    result = await tool.execute(
+        context=context,
+        message={"text": "Plan this friendly thread"},
+    )
+
+    path = result.json["path"]
+    _assert_uuid_thread_path(path=path, prefix="custom/")
+    entries = doc.root.get_children()
+    assert len(entries) == 1
+    assert entries[0].get_attribute("name") == "Friendly Plan Name"
+    assert entries[0].get_attribute("path") == path
+
+
+@pytest.mark.asyncio
+async def test_thread_list_tools_only_present_when_thread_dir_is_set() -> None:
+    adapter = _CaptureChatAdapter()
+
+    bot_without_thread_dir = ChatBot(llm_adapter=adapter)
+    room_without_thread_dir = _FakeRoom()
+    bot_without_thread_dir._room = room_without_thread_dir
+    toolkit_without_thread_dir = await _chat_toolkit(bot_without_thread_dir)
+    names_without = {tool.name for tool in toolkit_without_thread_dir.tools}
+    assert "list_threads" not in names_without
+    assert "grep_thread_list" not in names_without
+
+    bot_with_thread_dir = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    room_with_thread_dir = _FakeRoom()
+    bot_with_thread_dir._room = room_with_thread_dir
+    toolkit_with_thread_dir = await _chat_toolkit(bot_with_thread_dir)
+    names_with = {tool.name for tool in toolkit_with_thread_dir.tools}
+    assert "list_threads" in names_with
+    assert "grep_thread_list" in names_with
+
+
+@pytest.mark.asyncio
+async def test_get_thread_toolkits_includes_thread_list_tools_only() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    room = _FakeRoom()
+    bot._room = room
+
+    path = "custom/main.thread"
+    bot._open_threads[path] = _FakeOpenThreadAdapter()
+
+    thread = mock.Mock()
+    thread.root = mock.Mock()
+    thread.root.get_elements_by_tag_name.return_value = [mock.Mock()]
+
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=path,
+    )
+    participant = Participant(id="caller-id", attributes={"name": "alice"})
+
+    toolkits = await bot.get_thread_toolkits(
+        thread_context=thread_context,
+        participant=participant,
+    )
+    tool_names = {tool.name for toolkit in toolkits for tool in toolkit.tools}
+
+    assert "list_threads" in tool_names
+    assert "grep_thread_list" in tool_names
+    assert "ask" not in tool_names
+    assert "new_thread" not in tool_names
+
+
+@pytest.mark.asyncio
+async def test_get_thread_toolkits_omits_thread_list_tools_without_thread_dir() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+
+    path = ".threads/assistant/main.thread"
+    bot._open_threads[path] = _FakeOpenThreadAdapter()
+
+    thread = mock.Mock()
+    thread.root = mock.Mock()
+    thread.root.get_elements_by_tag_name.return_value = [mock.Mock()]
+
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=path,
+    )
+    participant = Participant(id="caller-id", attributes={"name": "alice"})
+
+    toolkits = await bot.get_thread_toolkits(
+        thread_context=thread_context,
+        participant=participant,
+    )
+    tool_names = {tool.name for toolkit in toolkits for tool in toolkit.tools}
+
+    assert "list_threads" not in tool_names
+    assert "grep_thread_list" not in tool_names
+
+
+@pytest.mark.asyncio
+async def test_list_threads_sorts_by_modified_desc_and_supports_offset_limit() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    room = _FakeRoom()
+    bot._room = room
+
+    doc = _FakeThreadListDocument()
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "first",
+            "path": "custom/a.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "second",
+            "path": "custom/b.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2025-01-01T00:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "third",
+            "path": "custom/c.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2023-01-01T00:00:00Z",
+        },
+    )
+    bot._thread_list_document = doc
+
+    toolkit = await _chat_toolkit(bot)
+    list_tool = next(tool for tool in toolkit.tools if tool.name == "list_threads")
+    context = ToolContext(
+        room=room,
+        caller=Participant(id="caller-id", attributes={"name": "alice"}),
+    )
+
+    result = await list_tool.execute(context=context, limit=2, offset=1)
+    assert isinstance(result, JsonContent)
+    assert result.json["sort"] == "modified_at_desc"
+    assert result.json["total"] == 3
+    assert result.json["offset"] == 1
+    assert result.json["limit"] == 2
+    names = [entry["name"] for entry in result.json["threads"]]
+    assert names == ["first", "third"]
+    assert "Use read_file with a thread path" in result.json["read_file_hint"]
+
+
+@pytest.mark.asyncio
+async def test_grep_thread_list_finds_matches_and_mentions_read_file() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    room = _FakeRoom()
+    bot._room = room
+
+    doc = _FakeThreadListDocument()
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "Release Plan",
+            "path": "custom/release.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2025-01-01T00:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "Unrelated",
+            "path": "custom/other.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-02T00:00:00Z",
+        },
+    )
+    bot._thread_list_document = doc
+
+    toolkit = await _chat_toolkit(bot)
+    grep_tool = next(tool for tool in toolkit.tools if tool.name == "grep_thread_list")
+    context = ToolContext(
+        room=room,
+        caller=Participant(id="caller-id", attributes={"name": "alice"}),
+    )
+
+    result = await grep_tool.execute(
+        context=context, pattern="release", ignore_case=True
+    )
+    assert isinstance(result, JsonContent)
+    assert result.json["total_matches"] == 1
+    assert result.json["pattern"] == "release"
+    assert result.json["ignore_case"] is True
+    assert [entry["name"] for entry in result.json["threads"]] == ["Release Plan"]
+    assert "Use read_file with a thread path" in result.json["read_file_hint"]
 
 
 @pytest.mark.asyncio
@@ -479,3 +834,185 @@ async def test_on_chat_received_adds_not_viewing_message_when_file_is_closed() -
         and message.get("content") == "alice is not currently viewing any files."
         for message in adapter.last_messages
     )
+
+
+@pytest.mark.asyncio
+async def test_on_chat_received_updates_thread_index_modified_at() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = _ChatBotAlwaysReplies(llm_adapter=adapter, thread_dir="custom")
+    room = _FakeRoom()
+    bot._room = room
+
+    thread = mock.Mock()
+    thread.root = mock.Mock()
+    thread.root.get_children.return_value = []
+
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path="custom/main.thread",
+    )
+    from_participant = Participant(
+        id="caller-id",
+        attributes={"name": "alice"},
+    )
+
+    doc = _FakeThreadListDocument()
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "main",
+            "path": "custom/main.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
+        },
+    )
+    bot._thread_list_document = doc
+
+    result = await bot.on_chat_received(
+        thread_context=thread_context,
+        from_participant=from_participant,
+        message={"text": "hello"},
+    )
+
+    assert result == "ok"
+    entry = doc.root.get_children()[0]
+    assert entry.get_attribute("created_at") == "2024-01-01T00:00:00Z"
+    assert entry.get_attribute("modified_at") != "2024-01-01T00:00:00Z"
+
+
+def test_record_new_thread_in_index_adds_entry() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    doc = _FakeThreadListDocument()
+    bot._thread_list_document = doc
+
+    path = "custom/release-plan.thread"
+    bot._record_new_thread_in_index(path=path)
+
+    children = doc.root.get_children()
+    assert len(children) == 1
+    entry = children[0]
+    assert entry.tag_name == "thread"
+    assert entry.get_attribute("name") == "Release Plan"
+    assert entry.get_attribute("path") == path
+    created_at = entry.get_attribute("created_at")
+    modified_at = entry.get_attribute("modified_at")
+    assert isinstance(created_at, str)
+    assert isinstance(modified_at, str)
+    assert created_at.endswith("Z")
+    assert modified_at.endswith("Z")
+    assert created_at == modified_at
+
+
+def test_record_new_thread_in_index_uses_new_chat_for_guid_path() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    doc = _FakeThreadListDocument()
+    bot._thread_list_document = doc
+
+    path = "custom/123e4567-e89b-12d3-a456-426614174000.thread"
+    bot._record_new_thread_in_index(path=path)
+
+    entry = doc.root.get_children()[0]
+    assert entry.get_attribute("name") == "New Chat"
+
+
+def test_touch_thread_in_index_updates_modified_at() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    doc = _FakeThreadListDocument()
+    path = "custom/main.thread"
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "main",
+            "path": path,
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
+        },
+    )
+    bot._thread_list_document = doc
+
+    bot._touch_thread_in_index(path=path)
+
+    entry = doc.root.get_children()[0]
+    assert entry.get_attribute("name") == "main"
+    assert entry.get_attribute("created_at") == "2024-01-01T00:00:00Z"
+    assert entry.get_attribute("modified_at") != "2024-01-01T00:00:00Z"
+
+
+def test_record_new_thread_in_index_is_noop_without_explicit_thread_dir() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    doc = _FakeThreadListDocument()
+    bot._thread_list_document = doc
+
+    bot._record_new_thread_in_index(path=".threads/assistant/test.thread")
+
+    assert len(doc.root.get_children()) == 0
+
+
+@pytest.mark.asyncio
+async def test_thread_list_document_open_close_uses_thread_dir_index_path() -> None:
+    adapter = _CaptureChatAdapter()
+    sync = _FakeSync()
+    room = _FakeRoom(sync=sync)
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    bot._room = room
+
+    await bot._open_thread_list_document()
+
+    assert len(sync.open_calls) == 1
+    assert sync.open_calls[0]["path"] == "custom/index.threadl"
+    assert sync.open_calls[0]["schema"] is thread_list_schema
+    assert bot._thread_list_document is sync.document
+
+    await bot._close_thread_list_document(room=room)
+
+    assert sync.close_calls == ["custom/index.threadl"]
+    assert bot._thread_list_document is None
+    assert bot._thread_list_path is None
+
+
+@pytest.mark.asyncio
+async def test_chatbot_start_sets_thread_list_participant_attribute() -> None:
+    adapter = _CaptureChatAdapter()
+    sync = _FakeSync()
+    room = _FakeRoom(sync=sync)
+    bot = ChatBot(
+        llm_adapter=adapter,
+        thread_dir="custom",
+        threading_mode="default-new",
+    )
+
+    with mock.patch.object(
+        bot,
+        "get_exposed_toolkits",
+        new=mock.AsyncMock(return_value=[]),
+    ):
+        await bot.start(room=room)
+
+    assert (
+        room.local_participant.get_attribute("meshagent.chatbot.thread-list")
+        == "custom/index.threadl"
+    )
+    assert (
+        "meshagent.chatbot.thread-list",
+        "custom/index.threadl",
+    ) in room.local_participant.set_attribute_calls
+
+    await bot.stop()
+
+
+@pytest.mark.asyncio
+async def test_thread_list_document_not_opened_without_explicit_thread_dir() -> None:
+    adapter = _CaptureChatAdapter()
+    sync = _FakeSync()
+    room = _FakeRoom(sync=sync)
+    bot = ChatBot(llm_adapter=adapter)
+    bot._room = room
+
+    await bot._open_thread_list_document()
+
+    assert sync.open_calls == []

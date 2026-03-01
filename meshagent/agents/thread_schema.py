@@ -1,5 +1,49 @@
 from meshagent.api.schema import MeshSchema, ElementType, ChildProperty, ValueProperty
 
+
+thread_list_schema = MeshSchema(
+    root_tag_name="thread_list",
+    elements=[
+        ElementType(
+            tag_name="thread_list",
+            description="an index of chat threads",
+            properties=[
+                ChildProperty(
+                    name="threads",
+                    description="threads known to this chatbot",
+                    child_tag_names=["thread"],
+                )
+            ],
+        ),
+        ElementType(
+            tag_name="thread",
+            description="a thread entry in the index",
+            properties=[
+                ValueProperty(
+                    name="name",
+                    description="a readable name for the thread",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="path",
+                    description="the sync path to the thread document",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the date the thread was created in ISO format",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="modified_at",
+                    description="the date the thread was last modified in ISO format",
+                    type="string",
+                ),
+            ],
+        ),
+    ],
+)
+
 thread_schema = MeshSchema(
     root_tag_name="thread",
     elements=[

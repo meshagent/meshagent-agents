@@ -12,7 +12,7 @@ from .development import connect_development_agent
 from .listener import Listener, ListenerContext
 from .adapter import ToolResponseAdapter, LLMAdapter
 from .image_captioner import ImageCaptioner, LLMImageCaptioner
-from .thread_schema import thread_schema
+from .thread_schema import thread_schema, thread_list_schema
 from .version import __version__
 
 
@@ -33,5 +33,6 @@ __all__ = [
     ImageCaptioner,
     LLMImageCaptioner,
     thread_schema,
+    thread_list_schema,
     __version__,
 ]

@@ -53,6 +53,7 @@ from meshagent.tools import tool
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 from meshagent.agents.toolkit_schema import build_tools_property_schema
+from meshagent.agents.thread_schema import thread_list_schema
 
 
 tracer = trace.get_tracer("meshagent.chatbot")
@@ -60,10 +61,10 @@ tracer = trace.get_tracer("meshagent.chatbot")
 logger = logging.getLogger("chat")
 _legacy_chatbot_init_chat_context_warned: set[type] = set()
 _DEFAULT_NEW_THREAD_NAME_RULES = [
-    "generate a concise topic name for storing this chat in a thread",
-    "return only a thread_name value suitable for a file name",
-    "thread_name should be 2-6 words, lowercase, and topic-focused",
-    "do not include slashes or a .thread extension",
+    "generate a concise, friendly title for this chat thread",
+    "return only a thread_name value suitable for display in a thread list",
+    "thread_name should be 2-6 words and topic-focused",
+    "use normal capitalization and spaces, and do not include a .thread extension",
 ]
 
 ThreadStatusMode = Literal["busy", "steerable"]
@@ -456,6 +457,8 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_tasks = dict[str, asyncio.Task]()
         self._open_threads = {}
         self._thread_contexts: dict[str, ChatThreadContext] = {}
+        self._thread_list_document: Optional[MeshDocument] = None
+        self._thread_list_path: Optional[str] = None
 
         self._skill_dirs = skill_dirs
         self._thread_status_values: dict[str, str] = {}
@@ -504,22 +507,264 @@ class ChatBotBase(SingleRoomAgent, ABC):
         return self._default_thread_dir()
 
     def _sanitize_thread_name(self, *, value: str) -> str:
-        normalized = value.strip().lower()
+        normalized = value.strip()
         if normalized.endswith(".thread"):
             normalized = normalized[: -len(".thread")]
 
-        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
-        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+        normalized = re.sub(r"[-_/]+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
+        normalized = re.sub(r"[^A-Za-z0-9 .,!?':()&]+", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
         if normalized == "":
-            normalized = "thread"
-        return normalized[:64].strip("-") or "thread"
+            return "New Chat"
+        if normalized == normalized.lower() or normalized == normalized.upper():
+            normalized = normalized.title()
+        return normalized[:64].strip() or "New Chat"
 
     def _fallback_thread_name(self, *, text: str) -> str:
-        del text
-        return f"thread-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        normalized_text = text.strip()
+        if normalized_text != "":
+            return self._sanitize_thread_name(value=normalized_text)
+        return "New Chat"
 
     def _thread_path_for_name(self, *, thread_name: str, thread_dir: str) -> str:
         return posixpath.join(thread_dir, f"{thread_name}.thread")
+
+    def _utc_now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _thread_list_index_path(self) -> Optional[str]:
+        if self._thread_dir is None:
+            return None
+        return posixpath.join(self._thread_dir, "index.threadl")
+
+    def _thread_list_entry_name_for_path(self, *, path: str) -> str:
+        filename = posixpath.basename(path.strip())
+        if filename.endswith(".thread"):
+            filename = filename[: -len(".thread")]
+        raw_name = filename.strip()
+        if raw_name != "":
+            try:
+                parsed_uuid = uuid.UUID(raw_name)
+                if str(parsed_uuid) == raw_name.lower():
+                    return "New Chat"
+            except ValueError:
+                pass
+
+        normalized = self._sanitize_thread_name(value=filename)
+        return normalized
+
+    def _find_thread_list_entry(self, *, path: str) -> Optional[Element]:
+        if self._thread_dir is None:
+            return None
+
+        if self._thread_list_document is None:
+            return None
+
+        for child in self._thread_list_document.root.get_children():
+            if child.tag_name != "thread":
+                continue
+            if child.get_attribute("path") == path:
+                return child
+
+        return None
+
+    def _upsert_thread_list_entry(
+        self,
+        *,
+        path: str,
+        name: Optional[str] = None,
+        created_at: Optional[str] = None,
+        modified_at: Optional[str] = None,
+    ) -> None:
+        if self._thread_dir is None or self._thread_list_document is None:
+            return
+
+        now = self._utc_now_iso()
+        provided_name = name.strip() if isinstance(name, str) else ""
+
+        entry = self._find_thread_list_entry(path=path)
+        if entry is None:
+            resolved_name = (
+                provided_name
+                if provided_name != ""
+                else self._thread_list_entry_name_for_path(path=path)
+            )
+            created_value = (
+                created_at.strip()
+                if isinstance(created_at, str) and created_at.strip() != ""
+                else now
+            )
+            modified_value = (
+                modified_at.strip()
+                if isinstance(modified_at, str) and modified_at.strip() != ""
+                else created_value
+            )
+            self._thread_list_document.root.append_child(
+                tag_name="thread",
+                attributes={
+                    "name": resolved_name,
+                    "path": path,
+                    "created_at": created_value,
+                    "modified_at": modified_value,
+                },
+            )
+            return
+
+        if provided_name != "":
+            entry.set_attribute("name", provided_name)
+        else:
+            existing_name = entry.get_attribute("name")
+            if not isinstance(existing_name, str) or existing_name.strip() == "":
+                entry.set_attribute(
+                    "name",
+                    self._thread_list_entry_name_for_path(path=path),
+                )
+
+        entry.set_attribute("path", path)
+
+        existing_created_at = entry.get_attribute("created_at")
+        created_value = (
+            existing_created_at.strip()
+            if isinstance(existing_created_at, str)
+            and existing_created_at.strip() != ""
+            else (
+                created_at.strip()
+                if isinstance(created_at, str) and created_at.strip() != ""
+                else now
+            )
+        )
+        entry.set_attribute("created_at", created_value)
+
+        modified_value = (
+            modified_at.strip()
+            if isinstance(modified_at, str) and modified_at.strip() != ""
+            else now
+        )
+        entry.set_attribute("modified_at", modified_value)
+
+    def _record_new_thread_in_index(
+        self, *, path: str, name: Optional[str] = None
+    ) -> None:
+        now = self._utc_now_iso()
+        self._upsert_thread_list_entry(
+            path=path,
+            name=name,
+            created_at=now,
+            modified_at=now,
+        )
+
+    def _touch_thread_in_index(self, *, path: str) -> None:
+        self._upsert_thread_list_entry(
+            path=path,
+            modified_at=self._utc_now_iso(),
+        )
+
+    def _thread_list_entries(self) -> list[Element]:
+        if self._thread_dir is None or self._thread_list_document is None:
+            return []
+
+        return [
+            child
+            for child in self._thread_list_document.root.get_children()
+            if child.tag_name == "thread"
+        ]
+
+    def _parse_iso_datetime(self, *, value: Any) -> Optional[datetime]:
+        if not isinstance(value, str):
+            return None
+
+        raw = value.strip()
+        if raw == "":
+            return None
+
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _thread_sort_datetime(self, *, entry: Element) -> datetime:
+        modified_at = self._parse_iso_datetime(value=entry.get_attribute("modified_at"))
+        if modified_at is not None:
+            return modified_at
+        created_at = self._parse_iso_datetime(value=entry.get_attribute("created_at"))
+        if created_at is not None:
+            return created_at
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    def _sorted_thread_list_entries(self) -> list[Element]:
+        return sorted(
+            self._thread_list_entries(),
+            key=lambda entry: self._thread_sort_datetime(entry=entry),
+            reverse=True,
+        )
+
+    def _thread_list_slice(
+        self,
+        *,
+        entries: list[Element],
+        limit: int,
+        offset: int,
+    ) -> list[Element]:
+        normalized_offset = max(0, int(offset))
+        normalized_limit = max(1, min(200, int(limit)))
+        return entries[normalized_offset : normalized_offset + normalized_limit]
+
+    async def _open_thread_list_document(self) -> None:
+        index_path = self._thread_list_index_path()
+        if index_path is None or self._room is None:
+            return
+
+        if (
+            self._thread_list_document is not None
+            and self._thread_list_path == index_path
+        ):
+            return
+
+        self._thread_list_path = index_path
+        try:
+            self._thread_list_document = await self.room.sync.open(
+                path=index_path,
+                schema=thread_list_schema,
+            )
+        except Exception as ex:
+            logger.warning(
+                "unable to open thread list document at %s",
+                index_path,
+                exc_info=ex,
+            )
+            self._thread_list_document = None
+            self._thread_list_path = None
+
+    async def _close_thread_list_document(
+        self,
+        *,
+        room: Optional[RoomClient] = None,
+    ) -> None:
+        if self._thread_list_document is None or self._thread_list_path is None:
+            return
+
+        close_room = room if room is not None else self._room
+        close_path = self._thread_list_path
+        self._thread_list_document = None
+        self._thread_list_path = None
+
+        if close_room is None:
+            return
+
+        try:
+            await close_room.sync.close(path=close_path)
+        except Exception as ex:
+            logger.warning(
+                "unable to close thread list document at %s",
+                close_path,
+                exc_info=ex,
+            )
 
     async def _next_available_thread_path(self, *, base_path: str) -> str:
         if self._room is None:
@@ -549,7 +794,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
         return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}.thread")
 
-    async def _generate_new_thread_path(
+    async def _generate_thread_friendly_name(
         self,
         *,
         context: ToolContext,
@@ -607,12 +852,25 @@ class ChatBotBase(SingleRoomAgent, ABC):
                         "unable to auto-generate chat thread name, using fallback",
                         exc_info=ex,
                     )
+        return generated_name
 
+    async def _generate_new_thread_info(
+        self,
+        *,
+        context: ToolContext,
+        text: str,
+    ) -> tuple[str, str]:
+        friendly_name = await self._generate_thread_friendly_name(
+            context=context,
+            text=text,
+        )
+        guid_name = str(uuid.uuid4())
         path = self._thread_path_for_name(
-            thread_name=generated_name,
+            thread_name=guid_name,
             thread_dir=self._get_thread_dir(),
         )
-        return await self._next_available_thread_path(base_path=path)
+        path = await self._next_available_thread_path(base_path=path)
+        return path, friendly_name
 
     def _thread_status_attribute_name(self, *, path: str) -> str:
         return f"thread.status.{path}"
@@ -893,6 +1151,14 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 tools=[attach_file],
             )
         )
+        thread_list_tools = self._build_thread_list_tools()
+        if len(thread_list_tools) > 0:
+            toolkits.append(
+                Toolkit(
+                    name="chat thread list",
+                    tools=thread_list_tools,
+                )
+            )
 
         toolkit = self._open_threads[thread_context.path].make_toolkit()
 
@@ -1392,7 +1658,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
         return chan
 
     async def stop(self):
+        room = self._room
         await super().stop()
+        await self._close_thread_list_document(room=room)
 
         await self._clear_all_thread_statuses()
 
@@ -1470,6 +1738,164 @@ class ChatBotBase(SingleRoomAgent, ABC):
         if wait_for_result:
             return await qm.result
         return None
+
+    def _build_thread_list_tools(self) -> list[FunctionTool]:
+        if self._thread_dir is None:
+            return []
+
+        read_file_hint = (
+            "Use read_file with a thread path to read that thread's contents."
+        )
+        outer = self
+
+        def to_json_entry(entry: Element) -> dict[str, str]:
+            return {
+                "name": str(entry.get_attribute("name") or ""),
+                "path": str(entry.get_attribute("path") or ""),
+                "modified_at": str(entry.get_attribute("modified_at") or ""),
+                "created_at": str(entry.get_attribute("created_at") or ""),
+            }
+
+        @tool(
+            name="list_threads",
+            description="lists recent threads sorted by last modified date (newest first). Use read_file with a thread path to read that thread's contents.",
+        )
+        def list_threads(*, limit: int = 20, offset: int = 0) -> JsonContent:
+            normalized_offset = max(0, int(offset))
+            normalized_limit = max(1, min(200, int(limit)))
+            if outer._thread_dir is None:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total": 0,
+                        "offset": normalized_offset,
+                        "limit": normalized_limit,
+                        "message": "thread list is not enabled for this chatbot",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            entries = outer._sorted_thread_list_entries()
+            if len(entries) == 0:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total": 0,
+                        "offset": normalized_offset,
+                        "limit": normalized_limit,
+                        "message": "no threads were found in the thread list",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            selected = outer._thread_list_slice(
+                entries=entries,
+                limit=limit,
+                offset=offset,
+            )
+            if len(selected) == 0:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total": len(entries),
+                        "offset": normalized_offset,
+                        "limit": normalized_limit,
+                        "message": "no threads were found for the requested limit/offset",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            return JsonContent(
+                json={
+                    "threads": [to_json_entry(entry) for entry in selected],
+                    "total": len(entries),
+                    "offset": normalized_offset,
+                    "limit": normalized_limit,
+                    "sort": "modified_at_desc",
+                    "read_file_hint": read_file_hint,
+                }
+            )
+
+        @tool(
+            name="grep_thread_list",
+            description="searches the thread list for matching thread names and paths. Use read_file with a thread path to read that thread's contents.",
+        )
+        def grep_thread_list(*, pattern: str, ignore_case: bool = True) -> JsonContent:
+            if outer._thread_dir is None:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": pattern,
+                        "ignore_case": ignore_case,
+                        "message": "thread list is not enabled for this chatbot",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            needle = pattern.strip()
+            if needle == "":
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": needle,
+                        "ignore_case": ignore_case,
+                        "message": "pattern is required",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            flags = re.IGNORECASE if ignore_case else 0
+            try:
+                matcher = re.compile(needle, flags)
+            except re.error as ex:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": needle,
+                        "ignore_case": ignore_case,
+                        "error": "invalid_regex_pattern",
+                        "message": f"invalid regex pattern: {ex}",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            matches: list[dict[str, str]] = []
+            for entry in outer._sorted_thread_list_entries():
+                name = entry.get_attribute("name")
+                path = entry.get_attribute("path")
+                created_at = entry.get_attribute("created_at")
+                modified_at = entry.get_attribute("modified_at")
+                haystack = f"{name}\n{path}\n{created_at}\n{modified_at}"
+                if matcher.search(haystack) is None:
+                    continue
+                matches.append(to_json_entry(entry))
+
+            if len(matches) == 0:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": needle,
+                        "ignore_case": ignore_case,
+                        "message": "no matching threads were found",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            return JsonContent(
+                json={
+                    "threads": matches,
+                    "total_matches": len(matches),
+                    "pattern": needle,
+                    "ignore_case": ignore_case,
+                    "read_file_hint": read_file_hint,
+                }
+            )
+
+        return [list_threads, grep_thread_list]
 
     async def get_exposed_toolkits(self) -> list[RemoteToolkit]:
         exposed_toolkits = await super().get_exposed_toolkits()
@@ -1562,10 +1988,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 text = text_value if isinstance(text_value, str) else ""
                 payload = {**message, "text": text}
 
-                path = await outer._generate_new_thread_path(
+                path, friendly_name = await outer._generate_new_thread_info(
                     context=context,
                     text=text,
                 )
+                outer._record_new_thread_in_index(path=path, name=friendly_name)
                 await outer._queue_chat_message(
                     context=context,
                     path=path,
@@ -1574,11 +2001,17 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 )
                 return JsonContent(json={"path": path})
 
+        tools: list[FunctionTool] = [
+            ask,
+            NewThreadTool(),
+            *self._build_thread_list_tools(),
+        ]
+
         chatbot_toolkit = RemoteToolkit(
             name="chat",
             description=f"tools for interacting with {self.name}",
             public=False,
-            tools=[ask, NewThreadTool()],
+            tools=tools,
         )
 
         exposed_toolkits.append(chatbot_toolkit)
@@ -1824,9 +2257,17 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 "meshagent.chatbot.threading", self._threading_mode
             )
 
+        thread_list_path = self._thread_list_index_path()
+        if thread_list_path is not None:
+            await self.room.local_participant.set_attribute(
+                "meshagent.chatbot.thread-list", thread_list_path
+            )
+
         await self.room.local_participant.set_attribute(
             "empty_state_title", self._empty_state_title
         )
+
+        await self._open_thread_list_document()
 
         room.messaging.on("message", self.on_message)
 
@@ -2270,6 +2711,7 @@ class ChatBot(ChatBotBase):
             return None
 
         self.prepare_chat_context(chat_context=thread_context.session)
+        self._touch_thread_in_index(path=thread_context.path)
 
         return await self._llm_adapter.next(
             context=thread_context.session,
