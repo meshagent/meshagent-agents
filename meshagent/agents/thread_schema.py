@@ -292,6 +292,37 @@ thread_schema = MeshSchema(
             ],
         ),
         ElementType(
+            tag_name="reaction",
+            description="a unicode reaction from a user on a message or specific attachment",
+            properties=[
+                ValueProperty(
+                    name="user_name",
+                    description="the display name of the user who reacted",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="value",
+                    description="the reaction as a single unicode character",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="target",
+                    description="reaction target type (message or attachment)",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="attachment_ref",
+                    description="the attachment element id when target is attachment",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the date that the reaction was added in ISO format",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
             tag_name="message",
             description="a message sent in the conversation",
             properties=[
@@ -318,7 +349,7 @@ thread_schema = MeshSchema(
                 ),
                 ChildProperty(
                     name="attachments",
-                    child_tag_names=["file", "image"],
+                    child_tag_names=["file", "image", "reaction"],
                     description="a list of message attachments",
                 ),
             ],
