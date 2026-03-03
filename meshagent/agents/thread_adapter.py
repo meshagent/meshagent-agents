@@ -59,6 +59,17 @@ class ThreadAdapter(ABC):
         return self._thread
 
     async def stop(self) -> None:
+        if self._processor_task is not None and not self._processor_task.done():
+            # Give the processor a bounded window to consume pending events
+            # before we shut down the queue.
+            drain_deadline = asyncio.get_running_loop().time() + 2.0
+            while not self._llm_messages.empty():
+                if self._processor_task.done():
+                    break
+                if asyncio.get_running_loop().time() >= drain_deadline:
+                    break
+                await asyncio.sleep(0.01)
+
         self._llm_messages.shutdown()
         if self._processor_task is not None:
             await self._processor_task
