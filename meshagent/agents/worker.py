@@ -2,6 +2,7 @@ from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomClient
 from meshagent.agents import AgentSessionContext
+from meshagent.agents.context import TaskContext
 from meshagent.tools import (
     RemoteToolkit,
     FunctionTool,
@@ -19,6 +20,12 @@ import logging
 
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
+from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
+
+from .completions_thread_adapter import CompletionsThreadAdapter
+from .responses_thread_adapter import ResponsesThreadAdapter
+from .thread_adapter import ThreadAdapter
+from .threaded_task_runner import ThreadedTaskRunner, ThreadingMode
 
 logger = logging.getLogger("worker")
 
@@ -47,6 +54,31 @@ def _summarize_worker_message(*, message: object) -> str:
         summary.append(f"body_len={len(body_value)}")
 
     return ", ".join(summary)
+
+
+class _WorkerThreadingHelper(ThreadedTaskRunner):
+    def __init__(
+        self,
+        *,
+        threading_mode: Optional[ThreadingMode],
+        thread_dir: str,
+        thread_name_rules: Optional[list[str]],
+        thread_name_adapter: Optional[LLMAdapter],
+        thread_adapter_type: type[ThreadAdapter],
+    ):
+        super().__init__(
+            input_schema={
+                "type": "object",
+                "additionalProperties": True,
+                "required": [],
+                "properties": {},
+            },
+            threading_mode=threading_mode,
+            thread_dir=thread_dir,
+            thread_name_rules=thread_name_rules,
+            thread_name_adapter=thread_name_adapter,
+            thread_adapter_type=thread_adapter_type,
+        )
 
 
 class SubmitWork(FunctionTool):
@@ -96,6 +128,10 @@ class Worker(SingleRoomAgent):
         skill_dirs: Optional[list[str]] = None,
         supports_context: bool = True,
         annotations: Optional[list[str]] = None,
+        threading_mode: Optional[ThreadingMode] = None,
+        thread_dir: str = ".threads",
+        thread_name_rules: Optional[list[str]] = None,
+        thread_name_adapter: Optional[LLMAdapter] = None,
     ):
         super().__init__(
             name=name,
@@ -113,6 +149,19 @@ class Worker(SingleRoomAgent):
             toolkits = []
 
         self._llm_adapter = llm_adapter
+        resolved_thread_name_adapter = (
+            thread_name_adapter if thread_name_adapter is not None else llm_adapter
+        )
+        thread_adapter_type: type[ThreadAdapter] = ResponsesThreadAdapter
+        if isinstance(llm_adapter, OpenAICompletionsAdapter):
+            thread_adapter_type = CompletionsThreadAdapter
+        self._threading_helper = _WorkerThreadingHelper(
+            threading_mode=threading_mode,
+            thread_dir=thread_dir,
+            thread_name_rules=thread_name_rules,
+            thread_name_adapter=resolved_thread_name_adapter,
+            thread_adapter_type=thread_adapter_type,
+        )
 
         self._message_channel = Chan[RoomMessage]()
 
@@ -225,13 +274,71 @@ class Worker(SingleRoomAgent):
         message: dict,
         toolkits: list[Toolkit],
     ):
-        await self.append_message_context(message=message, chat_context=chat_context)
+        prompt = self.get_prompt_for_message(message=message)
+        model = message.get("model", self._llm_adapter.default_model())
+        if not isinstance(model, str) or model.strip() == "":
+            model = self._llm_adapter.default_model()
 
-        return await self._llm_adapter.next(
-            context=chat_context,
+        task_context = TaskContext(
+            session=chat_context,
             room=self.room,
-            toolkits=toolkits,
+            caller=None,
+            on_behalf_of=None,
+            toolkits=[],
         )
+
+        adapter_arguments = message
+        thread_path = await self._threading_helper.resolve_thread_path(
+            context=task_context,
+            arguments=message,
+            prompt=prompt,
+            model=model,
+        )
+        if thread_path is not None:
+            adapter_arguments = {
+                **message,
+                "path": thread_path,
+            }
+            await self._threading_helper.record_thread_in_index(
+                context=task_context,
+                path=thread_path,
+            )
+
+        thread_adapter = self._threading_helper.create_thread_adapter(
+            context=task_context,
+            arguments=adapter_arguments,
+            attachment=None,
+        )
+
+        if thread_adapter is not None:
+            await thread_adapter.start()
+            self._threading_helper.ensure_local_member_on_thread(
+                context=task_context,
+                thread_adapter=thread_adapter,
+            )
+            thread_adapter.append_messages(context=chat_context)
+            thread_adapter.write_text_message(text=prompt, participant="user")
+
+        def push(event: dict) -> None:
+            if thread_adapter is not None:
+                thread_adapter.push(event=event)
+
+        try:
+            await self.append_message_context(
+                message=message, chat_context=chat_context
+            )
+
+            return await self._llm_adapter.next(
+                context=chat_context,
+                room=self.room,
+                toolkits=toolkits,
+                event_handler=push if thread_adapter is not None else None,
+                model=model,
+            )
+        finally:
+            if thread_adapter is not None:
+                with contextlib.suppress(Exception):
+                    await thread_adapter.stop()
 
     def get_toolkit_builders(self) -> list[ToolkitBuilder]:
         return []

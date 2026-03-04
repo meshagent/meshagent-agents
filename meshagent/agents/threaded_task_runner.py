@@ -5,11 +5,13 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from meshagent.api.schema_util import merge
+from meshagent.api import Element, MeshDocument
 from meshagent.tools import Toolkit
 
 from .adapter import LLMAdapter
 from .context import TaskContext
 from .task_runner import TaskRunner
+from .thread_schema import thread_list_schema
 from .thread_adapter import ThreadAdapter
 from .responses_thread_adapter import ResponsesThreadAdapter
 
@@ -117,6 +119,193 @@ class ThreadedTaskRunner(TaskRunner):
 
     def _thread_path_for_name(self, *, thread_name: str) -> str:
         return posixpath.join(self.thread_dir, f"{thread_name}.thread")
+
+    def _utc_now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _thread_list_index_path(self) -> str:
+        return posixpath.join(self.thread_dir, "index.threadl")
+
+    def _thread_list_entry_name_for_path(self, *, path: str) -> str:
+        filename = posixpath.basename(path.strip())
+        if filename.endswith(".thread"):
+            filename = filename[: -len(".thread")]
+
+        normalized = re.sub(r"[-_/]+", " ", filename)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
+        if normalized == "":
+            return "Thread"
+        if normalized == normalized.lower() or normalized == normalized.upper():
+            normalized = normalized.title()
+        return normalized[:64].strip() or "Thread"
+
+    def _find_thread_list_entry(
+        self,
+        *,
+        document: MeshDocument,
+        path: str,
+    ) -> Optional[Element]:
+        for child in document.root.get_children():
+            if not isinstance(child, Element):
+                continue
+            if child.tag_name != "thread":
+                continue
+            if child.get_attribute("path") == path:
+                return child
+        return None
+
+    def _upsert_thread_list_entry(
+        self,
+        *,
+        document: MeshDocument,
+        path: str,
+        name: Optional[str] = None,
+        created_at: Optional[str] = None,
+        modified_at: Optional[str] = None,
+    ) -> None:
+        now = self._utc_now_iso()
+        provided_name = name.strip() if isinstance(name, str) else ""
+
+        entry = self._find_thread_list_entry(document=document, path=path)
+        if entry is None:
+            resolved_name = (
+                provided_name
+                if provided_name != ""
+                else self._thread_list_entry_name_for_path(path=path)
+            )
+            created_value = (
+                created_at.strip()
+                if isinstance(created_at, str) and created_at.strip() != ""
+                else now
+            )
+            modified_value = (
+                modified_at.strip()
+                if isinstance(modified_at, str) and modified_at.strip() != ""
+                else created_value
+            )
+            document.root.append_child(
+                tag_name="thread",
+                attributes={
+                    "name": resolved_name,
+                    "path": path,
+                    "created_at": created_value,
+                    "modified_at": modified_value,
+                },
+            )
+            return
+
+        if provided_name != "":
+            entry.set_attribute("name", provided_name)
+        else:
+            existing_name = entry.get_attribute("name")
+            if not isinstance(existing_name, str) or existing_name.strip() == "":
+                entry.set_attribute(
+                    "name",
+                    self._thread_list_entry_name_for_path(path=path),
+                )
+
+        entry.set_attribute("path", path)
+
+        existing_created_at = entry.get_attribute("created_at")
+        created_value = (
+            existing_created_at.strip()
+            if isinstance(existing_created_at, str)
+            and existing_created_at.strip() != ""
+            else (
+                created_at.strip()
+                if isinstance(created_at, str) and created_at.strip() != ""
+                else now
+            )
+        )
+        entry.set_attribute("created_at", created_value)
+
+        modified_value = (
+            modified_at.strip()
+            if isinstance(modified_at, str) and modified_at.strip() != ""
+            else now
+        )
+        entry.set_attribute("modified_at", modified_value)
+
+    async def record_thread_in_index(
+        self,
+        *,
+        context: TaskContext,
+        path: str,
+    ) -> None:
+        if self.threading_mode != "auto":
+            return
+
+        normalized_path = path.strip()
+        if normalized_path == "":
+            return
+
+        index_path = self._thread_list_index_path()
+        document = None
+        try:
+            document = await context.room.sync.open(
+                path=index_path,
+                schema=thread_list_schema,
+            )
+            now = self._utc_now_iso()
+            self._upsert_thread_list_entry(
+                document=document,
+                path=normalized_path,
+                created_at=now,
+                modified_at=now,
+            )
+        except Exception as ex:
+            logger.warning(
+                "unable to update thread list document at %s",
+                index_path,
+                exc_info=ex,
+            )
+        finally:
+            if document is not None:
+                try:
+                    await context.room.sync.close(path=index_path)
+                except Exception as ex:
+                    logger.warning(
+                        "unable to close thread list document at %s",
+                        index_path,
+                        exc_info=ex,
+                    )
+
+    def ensure_local_member_on_thread(
+        self,
+        *,
+        context: TaskContext,
+        thread_adapter: ThreadAdapter,
+    ) -> None:
+        thread = thread_adapter.thread
+        if thread is None:
+            return
+
+        members_elements = thread.root.get_children_by_tag_name("members")
+        if len(members_elements) == 0:
+            return
+
+        members = members_elements[0]
+        local_name = context.room.local_participant.get_attribute("name")
+        if not isinstance(local_name, str):
+            return
+
+        normalized_local_name = local_name.strip()
+        if normalized_local_name == "":
+            return
+
+        for child in members.get_children():
+            if not isinstance(child, Element):
+                continue
+            if child.tag_name != "member":
+                continue
+            member_name = child.get_attribute("name")
+            if isinstance(member_name, str) and member_name == normalized_local_name:
+                return
+
+        members.append_child(
+            tag_name="member",
+            attributes={"name": normalized_local_name},
+        )
 
     async def _generate_thread_path(
         self,

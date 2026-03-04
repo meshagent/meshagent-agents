@@ -152,7 +152,7 @@ class LLMTaskRunner(ThreadedTaskRunner):
         return rules
 
     async def is_done(self, *, context: TaskContext):
-        return context.turn_count > 0
+        return context.session.turn_count > 0
 
     async def ask(
         self,
@@ -183,6 +183,10 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 **arguments,
                 "path": thread_path,
             }
+            await self.record_thread_in_index(
+                context=context,
+                path=thread_path,
+            )
 
         thread_adapter = self.create_thread_adapter(
             context=context,
@@ -192,6 +196,10 @@ class LLMTaskRunner(ThreadedTaskRunner):
 
         if thread_adapter is not None:
             await thread_adapter.start()
+            self.ensure_local_member_on_thread(
+                context=context,
+                thread_adapter=thread_adapter,
+            )
             thread_adapter.append_messages(context=context.session)
             thread_adapter.write_text_message(text=prompt, participant=context.caller)
 
@@ -254,7 +262,8 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 if thread_adapter is not None:
                     thread_adapter.push(event=event)
 
-            while not self.is_done(context=context):
+            resp = None
+            while not await self.is_done(context=context):
                 try:
                     resp = await self._llm_adapter.next(
                         context=context.session,
@@ -266,6 +275,9 @@ class LLMTaskRunner(ThreadedTaskRunner):
 
                 except Exception as ex:
                     logger.error("unexpected error during task execution", exc_info=ex)
+
+            if resp is None:
+                raise RuntimeError("LLM adapter did not return a response")
 
             # Validate the LLM output against the declared output schema if one was provided
             if self.output_schema:
