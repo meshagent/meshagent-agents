@@ -1,6 +1,8 @@
+import base64
 import logging
 import posixpath
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
@@ -119,6 +121,36 @@ class ThreadedTaskRunner(TaskRunner):
 
     def _thread_path_for_name(self, *, thread_name: str) -> str:
         return posixpath.join(self.thread_dir, f"{thread_name}.thread")
+
+    async def _next_available_thread_path(
+        self,
+        *,
+        context: TaskContext,
+        base_path: str,
+    ) -> str:
+        try:
+            exists = await context.room.storage.exists(path=base_path)
+        except Exception:
+            return base_path
+
+        if not exists:
+            return base_path
+
+        thread_dir, filename = posixpath.split(base_path)
+        if filename.endswith(".thread"):
+            base_name = filename[: -len(".thread")]
+        else:
+            base_name = filename
+
+        for index in range(2, 1000):
+            candidate = posixpath.join(thread_dir, f"{base_name} {index}.thread")
+            try:
+                if not await context.room.storage.exists(path=candidate):
+                    return candidate
+            except Exception:
+                return candidate
+
+        return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}.thread")
 
     def _utc_now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -253,6 +285,12 @@ class ThreadedTaskRunner(TaskRunner):
                 created_at=now,
                 modified_at=now,
             )
+            state = document.get_state()
+            if isinstance(state, bytes) and len(state) > 0:
+                await context.room.sync.sync(
+                    path=index_path,
+                    data=base64.standard_b64encode(state),
+                )
         except Exception as ex:
             logger.warning(
                 "unable to update thread list document at %s",
@@ -353,7 +391,11 @@ class ThreadedTaskRunner(TaskRunner):
                     "unable to auto-generate thread name, using fallback", exc_info=ex
                 )
 
-        return self._thread_path_for_name(thread_name=generated_name)
+        base_path = self._thread_path_for_name(thread_name=generated_name)
+        return await self._next_available_thread_path(
+            context=context,
+            base_path=base_path,
+        )
 
     async def resolve_thread_path(
         self,

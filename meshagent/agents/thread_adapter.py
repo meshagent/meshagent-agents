@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -20,6 +22,7 @@ from meshagent.agents.agent import AgentSessionContext
 from meshagent.agents.thread_schema import thread_schema
 
 tracer = trace.get_tracer("meshagent.thread_adapter")
+logger = logging.getLogger("thread_adapter")
 
 
 def default_format_message(*, user_name: str, message: str, iso_timestamp: str) -> str:
@@ -76,6 +79,32 @@ class ThreadAdapter(ABC):
             self._processor_task = None
 
         if self._thread is not None:
+            final_state: bytes | None = None
+            try:
+                state = self._thread.get_state()
+                if isinstance(state, bytes) and len(state) > 0:
+                    final_state = state
+            except Exception as ex:
+                logger.warning(
+                    "unable to collect final thread state for %s",
+                    self._thread_path,
+                    exc_info=ex,
+                )
+
+            if final_state is not None:
+                try:
+                    encoded_state = base64.standard_b64encode(final_state)
+                    await self._room.sync.sync(
+                        path=self._thread_path,
+                        data=encoded_state,
+                    )
+                except Exception as ex:
+                    logger.warning(
+                        "unable to flush final thread state for %s",
+                        self._thread_path,
+                        exc_info=ex,
+                    )
+
             # TODO: Wait for pending changes to sync
             await asyncio.sleep(3)
             await self._room.sync.close(path=self._thread_path)

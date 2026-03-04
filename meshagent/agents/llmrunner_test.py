@@ -75,12 +75,16 @@ class _FakeThreadListDocument:
     def __init__(self):
         self.root = _FakeElement(tag_name="thread_list")
 
+    def get_state(self) -> bytes:
+        return b"thread-list-state"
+
 
 class _FakeSync:
     def __init__(self):
         self.document = _FakeThreadListDocument()
         self.open_calls: list[dict] = []
         self.close_calls: list[str] = []
+        self.sync_calls: list[dict] = []
 
     async def open(self, *, path: str, schema=None):
         self.open_calls.append({"path": path, "schema": schema})
@@ -89,14 +93,28 @@ class _FakeSync:
     async def close(self, *, path: str):
         self.close_calls.append(path)
 
+    async def sync(self, *, path: str, data: bytes):
+        self.sync_calls.append({"path": path, "data": data})
+
+
+class _FakeStorage:
+    def __init__(self, *, existing_paths: Optional[set[str]] = None):
+        self._existing_paths = set(existing_paths or set())
+        self.exists_calls: list[str] = []
+
+    async def exists(self, *, path: str) -> bool:
+        self.exists_calls.append(path)
+        return path in self._existing_paths
+
 
 class _FakeRoom:
-    def __init__(self):
+    def __init__(self, *, existing_paths: Optional[set[str]] = None):
         self.local_participant = _FakeParticipant(
             name="assistant",
             participant_id="assistant-id",
         )
         self.sync = _FakeSync()
+        self.storage = _FakeStorage(existing_paths=existing_paths)
 
 
 class _FakeThreadAdapter:
@@ -287,6 +305,8 @@ async def test_llm_task_runner_auto_threading_generates_path(monkeypatch) -> Non
     assert thread_adapter.thread.member_names == ["assistant"]
     assert thread_adapter.writes == [("Plan the Q1 release milestones", "caller")]
     assert context.room.sync.open_calls[0]["path"] == "/threads/index.threadl"
+    assert context.room.sync.sync_calls[0]["path"] == "/threads/index.threadl"
+    assert context.room.sync.sync_calls[0]["data"] == b"dGhyZWFkLWxpc3Qtc3RhdGU="
     assert context.room.sync.close_calls == ["/threads/index.threadl"]
     thread_entries = context.room.sync.document.root.get_children()
     assert len(thread_entries) == 1

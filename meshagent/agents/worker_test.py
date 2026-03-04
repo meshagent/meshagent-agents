@@ -73,12 +73,16 @@ class _FakeThreadListDocument:
     def __init__(self):
         self.root = _FakeElement(tag_name="thread_list")
 
+    def get_state(self) -> bytes:
+        return b"thread-list-state"
+
 
 class _FakeSync:
     def __init__(self):
         self.document = _FakeThreadListDocument()
         self.open_calls: list[dict] = []
         self.close_calls: list[str] = []
+        self.sync_calls: list[dict] = []
 
     async def open(self, *, path: str, schema=None):
         self.open_calls.append({"path": path, "schema": schema})
@@ -87,14 +91,28 @@ class _FakeSync:
     async def close(self, *, path: str):
         self.close_calls.append(path)
 
+    async def sync(self, *, path: str, data: bytes):
+        self.sync_calls.append({"path": path, "data": data})
+
+
+class _FakeStorage:
+    def __init__(self, *, existing_paths: Optional[set[str]] = None):
+        self._existing_paths = set(existing_paths or set())
+        self.exists_calls: list[str] = []
+
+    async def exists(self, *, path: str) -> bool:
+        self.exists_calls.append(path)
+        return path in self._existing_paths
+
 
 class _FakeRoom:
-    def __init__(self):
+    def __init__(self, *, existing_paths: Optional[set[str]] = None):
         self.local_participant = _FakeParticipant(
             name="assistant",
             participant_id="assistant-id",
         )
         self.sync = _FakeSync()
+        self.storage = _FakeStorage(existing_paths=existing_paths)
 
 
 class _FakeThreadAdapter:
@@ -206,10 +224,42 @@ async def test_worker_auto_threading_creates_thread_and_index_entry() -> None:
     ]
 
     assert room.sync.open_calls[0]["path"] == "/threads/index.threadl"
+    assert room.sync.sync_calls[0]["path"] == "/threads/index.threadl"
+    assert room.sync.sync_calls[0]["data"] == b"dGhyZWFkLWxpc3Qtc3RhdGU="
     assert room.sync.close_calls == ["/threads/index.threadl"]
     entries = room.sync.document.root.get_children()
     assert len(entries) == 1
     assert entries[0].get_attribute("path") == "/threads/release-planning.thread"
+
+
+@pytest.mark.asyncio
+async def test_worker_auto_threading_uses_next_available_path_when_base_exists():
+    _FakeThreadAdapter.instances.clear()
+    adapter = _FakeLLMAdapter(generated_thread_name="Release Planning")
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=adapter,
+        threading_mode="auto",
+        thread_dir="/threads",
+    )
+    room = _FakeRoom(existing_paths={"/threads/release-planning.thread"})
+    worker._room = room
+    worker._threading_helper._thread_adapter_type = _FakeThreadAdapter
+
+    result = await worker.process_message(
+        chat_context=AgentSessionContext(system_role=None),
+        message={"prompt": "Plan the release"},
+        toolkits=[],
+    )
+
+    assert result == "assistant response"
+    assert len(_FakeThreadAdapter.instances) == 1
+    thread_adapter = _FakeThreadAdapter.instances[0]
+    assert thread_adapter.path == "/threads/release-planning 2.thread"
+    assert room.sync.open_calls[0]["path"] == "/threads/index.threadl"
+    entries = room.sync.document.root.get_children()
+    assert len(entries) == 1
+    assert entries[0].get_attribute("path") == "/threads/release-planning 2.thread"
 
 
 @pytest.mark.asyncio

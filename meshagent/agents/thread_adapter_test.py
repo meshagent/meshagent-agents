@@ -1,5 +1,8 @@
 import pytest
+import base64
+from typing import Optional
 
+import meshagent.agents.thread_adapter as thread_adapter_module
 from meshagent.agents.thread_adapter import ThreadAdapter
 
 
@@ -33,3 +36,57 @@ async def test_thread_adapter_async_manager_calls_start_and_stop() -> None:
 
     assert adapter.started == 1
     assert adapter.stopped == 1
+
+
+class _FakeSync:
+    def __init__(self) -> None:
+        self.sync_calls: list[dict] = []
+        self.close_calls: list[str] = []
+
+    async def sync(self, *, path: str, data: bytes) -> None:
+        self.sync_calls.append({"path": path, "data": data})
+
+    async def close(self, *, path: str) -> None:
+        self.close_calls.append(path)
+
+
+class _FakeRoom:
+    def __init__(self) -> None:
+        self.sync = _FakeSync()
+
+
+class _FakeMeshDocument:
+    def __init__(self, *, state: Optional[bytes] = None) -> None:
+        self._state = state if state is not None else b""
+
+    def get_state(self, vector: bytes | None = None) -> bytes:
+        del vector
+        return self._state
+
+
+class _BaseStopThreadAdapter(ThreadAdapter):
+    async def handle_custom_event(self, *, messages, event) -> None:
+        del messages
+        del event
+
+    async def _process_llm_events(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_stop_flushes_state_before_close(monkeypatch) -> None:
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _FakeRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+    adapter._thread = _FakeMeshDocument(state=b"state")
+
+    await adapter.stop()
+
+    assert room.sync.sync_calls == [
+        {"path": "/threads/test", "data": base64.standard_b64encode(b"state")}
+    ]
+    assert room.sync.close_calls == ["/threads/test"]
