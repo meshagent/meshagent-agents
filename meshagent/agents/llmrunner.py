@@ -16,6 +16,10 @@ import tarfile
 import io
 import mimetypes
 
+import logging
+
+logger = logging.getLogger("llm-runner")
+
 ThreadAdapter = ResponsesThreadAdapter
 CompletionsAdapterThreadAdapter = CompletionsThreadAdapter
 
@@ -147,6 +151,9 @@ class LLMTaskRunner(ThreadedTaskRunner):
 
         return rules
 
+    async def is_done(self, *, context: TaskContext):
+        return context.turn_count > 0
+
     async def ask(
         self,
         *,
@@ -247,13 +254,18 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 if thread_adapter is not None:
                     thread_adapter.push(event=event)
 
-            resp = await self._llm_adapter.next(
-                context=context.session,
-                room=context.room,
-                toolkits=combined_toolkits,
-                output_schema=self.output_schema,
-                event_handler=push,
-            )
+            while not self.is_done(context=context):
+                try:
+                    resp = await self._llm_adapter.next(
+                        context=context.session,
+                        room=context.room,
+                        toolkits=combined_toolkits,
+                        output_schema=self.output_schema,
+                        event_handler=push,
+                    )
+
+                except Exception as ex:
+                    logger.error("unexpected error during task execution", exc_info=ex)
 
             # Validate the LLM output against the declared output schema if one was provided
             if self.output_schema:

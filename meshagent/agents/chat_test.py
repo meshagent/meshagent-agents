@@ -1,14 +1,20 @@
+import asyncio
 from typing import Optional, Literal
 from unittest import mock
 import uuid
 
+import aiohttp
 import pytest
+from aiohttp.client_reqrep import RequestInfo
+from multidict import CIMultiDict, CIMultiDictProxy
 from pydantic import BaseModel
+from yarl import URL
 
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.chat import ChatBot, ChatThreadContext
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.thread_schema import thread_list_schema
+from meshagent.api import RoomException
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
 from meshagent.tools import ToolContext, ToolkitBuilder, Toolkit
@@ -150,6 +156,45 @@ class _FakeQueue:
 
     def send_nowait(self, item) -> None:
         self.items.append(item)
+
+
+class _ExplodingMessageChannel:
+    def __init__(self, *, error: Exception):
+        self._error = error
+
+    async def recv(self):
+        raise self._error
+
+
+class _TrackedThreadContext:
+    def __init__(self, *, path: str):
+        self.path = path
+        self.closed = False
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type
+        del exc
+        del tb
+        self.closed = True
+
+
+def _make_ws_handshake_error(
+    *, status: int, headers: dict[str, str] | None = None
+) -> aiohttp.WSServerHandshakeError:
+    request_headers = CIMultiDictProxy(CIMultiDict())
+    url = URL("ws://localhost:8080/openai/v1/responses")
+    return aiohttp.WSServerHandshakeError(
+        request_info=RequestInfo(
+            url=url,
+            method="GET",
+            headers=request_headers,
+            real_url=url,
+        ),
+        history=(),
+        status=status,
+        message="Invalid response status",
+        headers=CIMultiDictProxy(CIMultiDict(headers or {})),
+    )
 
 
 class _FakeOpenThreadAdapter:
@@ -953,6 +998,39 @@ def test_record_new_thread_in_index_is_noop_without_explicit_thread_dir() -> Non
     assert len(doc.root.get_children()) == 0
 
 
+def test_chat_error_message_uses_room_exception_text() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    assert (
+        bot._chat_error_message(error=RoomException("Your account is out of credits"))
+        == "Your account is out of credits"
+    )
+
+
+def test_chat_error_message_uses_generic_for_non_room_exception() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    assert (
+        bot._chat_error_message(error=RuntimeError("boom"))
+        == "An unexpected error occured. Please try again later."
+    )
+
+
+def test_chat_error_message_uses_handshake_error_message() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    error = _make_ws_handshake_error(
+        status=402,
+        headers={
+            "X-Meshagent-Error-Message": "Your account is out of credits. Add credits to continue.",
+        },
+    )
+    assert (
+        bot._chat_error_message(error=error)
+        == "Your account is out of credits. Add credits to continue."
+    )
+
+
 @pytest.mark.asyncio
 async def test_thread_list_document_open_close_uses_thread_dir_index_path() -> None:
     adapter = _CaptureChatAdapter()
@@ -1016,3 +1094,45 @@ async def test_thread_list_document_not_opened_without_explicit_thread_dir() -> 
     await bot._open_thread_list_document()
 
     assert sync.open_calls == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_thread_waits_for_cleanup_before_returning() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+
+    path = ".threads/assistant/main.thread"
+    tracked_context = _TrackedThreadContext(path=path)
+    bot._thread_contexts[path] = tracked_context  # type: ignore[assignment]
+
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    async def _close_thread(*, path: str) -> None:
+        del path
+        close_started.set()
+        await allow_close.wait()
+
+    bot.close_thread = mock.AsyncMock(side_effect=_close_thread)  # type: ignore[method-assign]
+    bot._safe_invoke_thread_event = mock.AsyncMock()  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        bot._spawn_thread(
+            path=path,
+            messages=_ExplodingMessageChannel(error=RuntimeError("thread ended")),  # type: ignore[arg-type]
+        )
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+
+    assert close_started.is_set()
+    assert tracked_context.closed is True
+    assert path not in bot._thread_contexts
+
+    allow_close.set()
+
+    with pytest.raises(RuntimeError, match="thread ended"):
+        await task

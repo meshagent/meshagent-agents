@@ -294,6 +294,7 @@ class CompletionsThreadAdapter(ThreadAdapter):
         doc_messages = messages[0]
 
         updates: asyncio.Queue = asyncio.Queue()
+        update_thread_stop = object()
         message_elements_by_choice: dict[int, Element] = {}
         partial_text_by_choice: dict[int, str] = {}
 
@@ -302,24 +303,32 @@ class CompletionsThreadAdapter(ThreadAdapter):
             local_participant_name = ""
 
         async def update_thread() -> None:
-            changes: dict[Element, str] = {}
-            try:
+            while True:
+                entry = await updates.get()
+                if entry is update_thread_stop:
+                    break
+
+                element, text = entry
+                changes: dict[Element, str] = {element: text}
+                should_stop = False
                 while True:
                     try:
-                        element, text = updates.get_nowait()
-                        changes[element] = text
+                        pending = updates.get_nowait()
                     except asyncio.QueueEmpty:
-                        for element, text in changes.items():
-                            element["text"] = text
+                        break
 
-                        changes.clear()
+                    if pending is update_thread_stop:
+                        should_stop = True
+                        break
 
-                        element, text = await updates.get()
-                        changes[element] = text
-            except asyncio.QueueShutDown:
-                for element, text in changes.items():
-                    element["text"] = text
-                changes.clear()
+                    pending_element, pending_text = pending
+                    changes[pending_element] = pending_text
+
+                for changed_element, changed_text in changes.items():
+                    changed_element["text"] = changed_text
+
+                if should_stop:
+                    break
 
         def ensure_message_element(*, choice_index: int) -> Element:
             existing = message_elements_by_choice.get(choice_index)
@@ -408,6 +417,6 @@ class CompletionsThreadAdapter(ThreadAdapter):
         except asyncio.QueueShutDown:
             pass
         finally:
-            updates.shutdown()
+            updates.put_nowait(update_thread_stop)
 
         await update_thread_task

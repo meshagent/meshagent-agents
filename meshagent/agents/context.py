@@ -18,6 +18,8 @@ class AgentSessionContext:
         previous_response_id: Optional[str] = None,
         instructions: Optional[str] = None,
         metadata: Optional[dict] = None,
+        turn_count: Optional[float] = None,
+        usage: Optional[dict[str, float]] = None,
     ):
         self.id = str(uuid.uuid4())
         if messages is None:
@@ -34,6 +36,9 @@ class AgentSessionContext:
         self._metadata = metadata or {}
 
         self.instructions = instructions
+
+        self.turn_count = turn_count or 0
+        self.usage = usage or dict[str, float]()
 
     async def start(self) -> None:
         return None
@@ -197,7 +202,10 @@ class AgentSessionContext:
 
     def copy(self) -> "AgentSessionContext":
         return self.__class__(
-            messages=deepcopy(self.messages), system_role=self._system_role
+            messages=deepcopy(self.messages),
+            system_role=self._system_role,
+            turn_count=self.turn_count,
+            usage=deepcopy(self.usage),
         )
 
     def to_json(self) -> dict:

@@ -25,6 +25,7 @@ from meshagent.agents.adapter import LLMAdapter
 from meshagent.openai.tools.responses_adapter import (
     ReasoningTool,
     OpenAIResponsesAdapter,
+    OpenAIResponsesSessionContext,
 )
 from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
 from meshagent.agents.thread_adapter import ThreadAdapter
@@ -48,6 +49,7 @@ from meshagent.api import RoomException
 from meshagent.api.chan import ChanClosed
 from opentelemetry import trace
 import json
+import aiohttp
 from pydantic import BaseModel
 from meshagent.tools import tool
 from pathlib import Path
@@ -1348,6 +1350,15 @@ class ChatBotBase(SingleRoomAgent, ABC):
     def format_message(self, *, user_name: str, message: str, iso_timestamp: str):
         return f"{user_name} said at {iso_timestamp}: {message}"
 
+    def _chat_error_message(self, *, error: Exception) -> str:
+        if isinstance(error, RoomException):
+            message = str(error).strip()
+            if message != "":
+                return message
+        if isinstance(error, aiohttp.WSServerHandshakeError):
+            return OpenAIResponsesSessionContext._handshake_error_message(error)
+        return "An unexpected error occured. Please try again later."
+
     async def _spawn_thread(self, path: str, messages: Chan[RoomMessage]):
         logger.debug("chatbot is starting a thread", extra={"path": path})
         opened = False
@@ -1611,10 +1622,23 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             received.result.set_result(result)
 
                         except Exception as e:
-                            logger.error("An error was encountered", exc_info=e)
-                            text = (
-                                "An unexpected error occured. Please try again later."
-                            )
+                            handled_error: Exception = e
+                            if isinstance(e, aiohttp.WSServerHandshakeError):
+                                handled_error = RoomException(
+                                    OpenAIResponsesSessionContext._handshake_error_message(
+                                        e
+                                    ),
+                                    status_code=e.status,
+                                )
+
+                            if isinstance(handled_error, RoomException):
+                                logger.warning(
+                                    "A room error was encountered", exc_info=e
+                                )
+                            else:
+                                logger.error("An error was encountered", exc_info=e)
+
+                            text = self._chat_error_message(error=handled_error)
                             await self._send_and_save_chat(
                                 thread=thread,
                                 to=chat_with_participant,
@@ -1646,7 +1670,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
                     await self.close_thread(path=path)
 
-            asyncio.shield(cleanup())
+            await asyncio.shield(cleanup())
 
     def _get_message_channel(self, key: str) -> Chan[_QueuedChatMessage]:
         if key not in self._message_channels:
