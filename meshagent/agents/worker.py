@@ -13,7 +13,7 @@ from meshagent.tools import (
 from .adapter import LLMAdapter
 import asyncio
 import contextlib
-from typing import Optional
+from typing import Literal, Optional
 import json
 from meshagent.tools import ToolContext
 import logging
@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
+from meshagent.openai import OpenAIResponsesAdapter
 
 from .completions_thread_adapter import CompletionsThreadAdapter
 from .responses_thread_adapter import ResponsesThreadAdapter
@@ -28,6 +29,7 @@ from .thread_adapter import ThreadAdapter
 from .threaded_task_runner import ThreadedTaskRunner, ThreadingMode
 
 logger = logging.getLogger("worker")
+InitialMessageMode = Literal["summary", "code", "none"]
 
 
 def _summarize_worker_message(*, message: object) -> str:
@@ -132,6 +134,10 @@ class Worker(SingleRoomAgent):
         thread_dir: str = ".threads",
         thread_name_rules: Optional[list[str]] = None,
         thread_name_adapter: Optional[LLMAdapter] = None,
+        initial_message_mode: InitialMessageMode = "code",
+        initial_message_from: str = "worker",
+        decision_model: Optional[str] = None,
+        decision_llm_adapter: Optional[LLMAdapter] = None,
     ):
         super().__init__(
             name=name,
@@ -149,6 +155,24 @@ class Worker(SingleRoomAgent):
             toolkits = []
 
         self._llm_adapter = llm_adapter
+        self._initial_message_mode: InitialMessageMode = initial_message_mode
+        normalized_initial_message_from = initial_message_from.strip()
+        if normalized_initial_message_from == "":
+            raise ValueError("initial_message_from must not be empty")
+        self._initial_message_from = normalized_initial_message_from
+        self._decision_model = (
+            decision_model.strip()
+            if isinstance(decision_model, str) and decision_model.strip() != ""
+            else None
+        )
+        if self._initial_message_mode == "summary":
+            self._decision_llm_adapter = (
+                decision_llm_adapter
+                if decision_llm_adapter is not None
+                else OpenAIResponsesAdapter()
+            )
+        else:
+            self._decision_llm_adapter = decision_llm_adapter
         resolved_thread_name_adapter = (
             thread_name_adapter if thread_name_adapter is not None else llm_adapter
         )
@@ -186,6 +210,144 @@ class Worker(SingleRoomAgent):
             self._worker_toolkit = None
 
         self.supports_context = supports_context
+
+    def _serialize_initial_message_payload(
+        self,
+        *,
+        message: dict,
+        prompt: str,
+    ) -> tuple[str, str]:
+        prompt_from_message = message.get("prompt")
+        payload_value: object
+        if isinstance(prompt_from_message, str) and prompt_from_message.strip() != "":
+            payload_value = prompt_from_message
+        elif prompt.strip() != "":
+            payload_value = prompt
+        else:
+            payload_value = message
+
+        if isinstance(payload_value, str):
+            normalized_payload = payload_value.strip()
+            if normalized_payload != "":
+                try:
+                    parsed_payload = json.loads(normalized_payload)
+                except json.JSONDecodeError:
+                    return payload_value, "text"
+
+                return (
+                    json.dumps(parsed_payload, indent=2, ensure_ascii=False),
+                    "json",
+                )
+
+            return payload_value, "text"
+
+        try:
+            return (
+                json.dumps(payload_value, indent=2, ensure_ascii=False, default=str),
+                "json",
+            )
+        except TypeError:
+            return str(payload_value), "text"
+
+    def _format_initial_message_code_block(
+        self,
+        *,
+        payload_text: str,
+        language: str,
+    ) -> str:
+        normalized_language = language.strip().lower()
+        if normalized_language == "":
+            normalized_language = "text"
+        return f"```{normalized_language}\n{payload_text.rstrip()}\n```"
+
+    async def _summarize_initial_message_payload(
+        self,
+        *,
+        payload_text: str,
+        language: str,
+    ) -> Optional[str]:
+        if self._decision_llm_adapter is None:
+            return None
+
+        decision_context = self._decision_llm_adapter.create_session()
+        async with decision_context:
+            decision_context.append_rules(
+                [
+                    "Summarize worker queue requests, in a manner suitable for a conversation.",
+                    "Keep it concise and factual.",
+                    "Return only key details useful for later debugging.",
+                    "Do not include markdown code fences in the summary.",
+                ]
+            )
+            decision_context.append_user_message(
+                (f"Summarize what this request is:\n```{language}\n{payload_text}\n```")
+            )
+            response = await self._decision_llm_adapter.next(
+                context=decision_context,
+                room=self.room,
+                toolkits=[],
+                model=self._decision_model
+                or self._decision_llm_adapter.default_model(),
+                output_schema={
+                    "type": "object",
+                    "required": ["summary"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": (
+                                "concise summary, suitable for a conversation"
+                            ),
+                        },
+                    },
+                },
+            )
+
+        if not isinstance(response, dict):
+            return None
+
+        summary = response.get("summary")
+        if not isinstance(summary, str):
+            return None
+        normalized_summary = summary.strip()
+        if normalized_summary == "":
+            return None
+        return normalized_summary
+
+    async def _build_initial_thread_message(
+        self,
+        *,
+        message: dict,
+        prompt: str,
+    ) -> Optional[str]:
+        if self._initial_message_mode == "none":
+            return None
+
+        payload_text, payload_language = self._serialize_initial_message_payload(
+            message=message,
+            prompt=prompt,
+        )
+        if payload_text.strip() == "":
+            return None
+
+        if self._initial_message_mode == "summary":
+            try:
+                summary = await self._summarize_initial_message_payload(
+                    payload_text=payload_text,
+                    language=payload_language,
+                )
+            except Exception as ex:
+                logger.warning(
+                    "unable to summarize initial worker payload", exc_info=ex
+                )
+                summary = None
+            if summary is not None:
+                return summary
+
+        return self._format_initial_message_code_block(
+            payload_text=payload_text,
+            language=payload_language,
+        )
 
     async def preflight_start(self, *, room: RoomClient) -> None:
         del room
@@ -317,7 +479,15 @@ class Worker(SingleRoomAgent):
                 thread_adapter=thread_adapter,
             )
             thread_adapter.append_messages(context=chat_context)
-            thread_adapter.write_text_message(text=prompt, participant="user")
+            initial_message = await self._build_initial_thread_message(
+                message=message,
+                prompt=prompt,
+            )
+            if initial_message is not None:
+                thread_adapter.write_text_message(
+                    text=initial_message,
+                    participant=self._initial_message_from,
+                )
 
         def push(event: dict) -> None:
             if thread_adapter is not None:

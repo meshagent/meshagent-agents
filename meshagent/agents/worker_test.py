@@ -184,6 +184,31 @@ class _FakeLLMAdapter(LLMAdapter):
         return "assistant response"
 
 
+class _FakeDecisionLLMAdapter(LLMAdapter):
+    def __init__(self, *, summary: str):
+        self._summary = summary
+        self.calls: list[dict] = []
+
+    def default_model(self) -> str:
+        return "decision-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        output_schema=None,
+        event_handler=None,
+        model=None,
+        on_behalf_of=None,
+        options: Optional[dict] = None,
+    ):
+        del context, room, toolkits, event_handler, on_behalf_of, options
+        self.calls.append({"output_schema": output_schema, "model": model})
+        return {"summary": self._summary}
+
+
 @pytest.mark.asyncio
 async def test_worker_auto_threading_creates_thread_and_index_entry() -> None:
     _FakeThreadAdapter.instances.clear()
@@ -218,7 +243,7 @@ async def test_worker_auto_threading_creates_thread_and_index_entry() -> None:
     assert thread_adapter.appended
     assert thread_adapter.stopped
     assert thread_adapter.thread.member_names == ["assistant"]
-    assert thread_adapter.writes == [("Plan the release", "user")]
+    assert thread_adapter.writes == [("```text\nPlan the release\n```", "worker")]
     assert [event["type"] for event in thread_adapter.events] == [
         "response.output_text.done"
     ]
@@ -288,8 +313,76 @@ async def test_worker_manual_threading_uses_message_path_without_index() -> None
     thread_adapter = _FakeThreadAdapter.instances[0]
     assert thread_adapter.path == "/threads/manual.thread"
     assert thread_adapter.thread.member_names == ["assistant"]
+    assert thread_adapter.writes == [("```text\nManual task\n```", "worker")]
     assert room.sync.open_calls == []
     assert room.sync.close_calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_initial_message_summary_mode_uses_decision_adapter() -> None:
+    _FakeThreadAdapter.instances.clear()
+    adapter = _FakeLLMAdapter()
+    decision_adapter = _FakeDecisionLLMAdapter(summary="Incoming webhook event summary")
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=adapter,
+        threading_mode="manual",
+        thread_dir="/threads",
+        initial_message_mode="summary",
+        initial_message_from="Webhook",
+        decision_model="gpt-5.2-mini",
+        decision_llm_adapter=decision_adapter,
+    )
+    room = _FakeRoom()
+    worker._room = room
+    worker._threading_helper._thread_adapter_type = _FakeThreadAdapter
+
+    result = await worker.process_message(
+        chat_context=AgentSessionContext(system_role=None),
+        message={
+            "prompt": "Process webhook payload",
+            "path": "/threads/manual.thread",
+        },
+        toolkits=[],
+    )
+
+    assert result == "assistant response"
+    assert len(decision_adapter.calls) == 1
+    assert decision_adapter.calls[0]["output_schema"] is not None
+    assert decision_adapter.calls[0]["model"] == "gpt-5.2-mini"
+    assert len(_FakeThreadAdapter.instances) == 1
+    thread_adapter = _FakeThreadAdapter.instances[0]
+    assert thread_adapter.writes == [("Incoming webhook event summary", "Webhook")]
+
+
+@pytest.mark.asyncio
+async def test_worker_initial_message_none_mode_skips_thread_write() -> None:
+    _FakeThreadAdapter.instances.clear()
+    adapter = _FakeLLMAdapter()
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=adapter,
+        threading_mode="manual",
+        thread_dir="/threads",
+        initial_message_mode="none",
+    )
+    room = _FakeRoom()
+    worker._room = room
+    worker._threading_helper._thread_adapter_type = _FakeThreadAdapter
+
+    result = await worker.process_message(
+        chat_context=AgentSessionContext(system_role=None),
+        message={
+            "prompt": "Manual task",
+            "path": "/threads/manual.thread",
+        },
+        toolkits=[],
+    )
+
+    assert result == "assistant response"
+    assert len(_FakeThreadAdapter.instances) == 1
+    thread_adapter = _FakeThreadAdapter.instances[0]
+    assert thread_adapter.writes == []
 
 
 @pytest.mark.asyncio
