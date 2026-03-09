@@ -279,7 +279,7 @@ class ThreadAdapter(ABC):
                 break
 
         if doc_messages is None:
-            raise Exception("thread was not properly initialized")
+            doc_messages = self._thread.root.append_child(tag_name="messages")
 
     def write_text_message(
         self,
