@@ -304,6 +304,11 @@ thread_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
+                    name="path",
+                    description="optional path associated with the event, typically a file path",
+                    type="string",
+                ),
+                ValueProperty(
                     name="summary",
                     description="short human readable summary",
                     type="string",
@@ -316,6 +321,11 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="details",
                     description="optional newline-delimited detail lines for structured rendering",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="preview",
+                    description="optional structured preview body for compact rendering, for example file contents",
                     type="string",
                 ),
                 ValueProperty(
