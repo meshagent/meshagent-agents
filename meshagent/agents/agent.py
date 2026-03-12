@@ -368,14 +368,11 @@ class SingleRoomAgent(Agent):
                     logger.info(
                         f"{self.name} installing required schema {requirement.name} from json"
                     )
-                    handle = await self._room.storage.open(
-                        path=f".schemas/{requirement.name}.json", overwrite=True
-                    )
-                    await self._room.storage.write(
-                        handle=handle,
+                    await self._room.storage.upload(
+                        path=f".schemas/{requirement.name}.json",
+                        overwrite=True,
                         data=json.dumps(requirement.schema.to_json()).encode(),
                     )
-                    await self._room.storage.close(handle=handle)
 
                 elif requirement.name not in schemas_by_name:
                     installed = True

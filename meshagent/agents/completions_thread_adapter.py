@@ -211,6 +211,12 @@ class CompletionsThreadAdapter(ThreadAdapter):
         item_type = event.get("item_type")
         if not isinstance(item_type, str):
             item_type = ""
+        event_path = event.get("path")
+        if not isinstance(event_path, str):
+            event_path = ""
+        preview = event.get("preview")
+        if not isinstance(preview, str):
+            preview = ""
 
         raw_details = event.get("details")
         details: str
@@ -227,6 +233,7 @@ class CompletionsThreadAdapter(ThreadAdapter):
         data = event.get("data")
         if not isinstance(data, str):
             data = json.dumps(event, ensure_ascii=False, default=str)
+        persisted_data = data if kind == "diff" and data != "" else ""
 
         correlation_key = event.get("correlation_key")
         if not isinstance(correlation_key, str) or correlation_key.strip() == "":
@@ -244,24 +251,28 @@ class CompletionsThreadAdapter(ThreadAdapter):
             event_element = self._active_events_by_key.get(correlation_key)
 
         if event_element is None:
+            attributes = {
+                "id": str(uuid.uuid4()),
+                "source": source,
+                "name": name,
+                "kind": kind,
+                "state": state,
+                "method": method,
+                "item_id": item_id,
+                "item_type": item_type,
+                "path": event_path,
+                "preview": preview,
+                "summary": summary,
+                "headline": headline,
+                "details": details,
+                "created_at": now,
+                "updated_at": now,
+            }
+            if persisted_data != "":
+                attributes["data"] = persisted_data
             event_element = messages.append_child(
                 tag_name="event",
-                attributes={
-                    "id": str(uuid.uuid4()),
-                    "source": source,
-                    "name": name,
-                    "kind": kind,
-                    "state": state,
-                    "method": method,
-                    "item_id": item_id,
-                    "item_type": item_type,
-                    "summary": summary,
-                    "headline": headline,
-                    "details": details,
-                    "data": data,
-                    "created_at": now,
-                    "updated_at": now,
-                },
+                attributes=attributes,
             )
         else:
             event_element.set_attribute("source", source)
@@ -271,11 +282,15 @@ class CompletionsThreadAdapter(ThreadAdapter):
             event_element.set_attribute("method", method)
             event_element.set_attribute("item_id", item_id)
             event_element.set_attribute("item_type", item_type)
+            event_element.set_attribute("path", event_path)
+            if preview != "" or event_element.get_attribute("preview") in (None, ""):
+                event_element.set_attribute("preview", preview)
             event_element.set_attribute("summary", summary)
             event_element.set_attribute("headline", headline)
             if details != "" or event_element.get_attribute("details") in (None, ""):
                 event_element.set_attribute("details", details)
-            event_element.set_attribute("data", data)
+            if persisted_data != "":
+                event_element.set_attribute("data", persisted_data)
             event_element.set_attribute("updated_at", now)
 
         if correlation_key is not None:

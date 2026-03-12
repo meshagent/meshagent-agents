@@ -545,12 +545,8 @@ class MailBot(Worker):
             )
 
             path = f".emails/{folder_path}/attachments/{fname}"
-            handle = await room.storage.open(path=path)
-            try:
-                logger.info(f"writing content to {path}")
-                await room.storage.write(handle=handle, data=bin_data)
-            finally:
-                await room.storage.close(handle=handle)
+            logger.info(f"writing content to {path}")
+            await room.storage.upload(path=path, data=bin_data)
 
             queued_message["attachments"].append(path)
 
@@ -558,22 +554,15 @@ class MailBot(Worker):
 
         # write email
         path = f".emails/{folder_path}/message.eml"
-        handle = await room.storage.open(path=path)
-        try:
-            logger.info(f"writing source message.eml to {path}")
-            await room.storage.write(handle=handle, data=content)
-        finally:
-            await room.storage.close(handle=handle)
+        logger.info(f"writing source message.eml to {path}")
+        await room.storage.upload(path=path, data=content)
 
         path = f".emails/{folder_path}/message.json"
-        handle = await room.storage.open(path=path)
-        try:
-            logger.info(f"writing source message.json to {path}")
-            await room.storage.write(
-                handle=handle, data=json.dumps(queued_message, indent=4).encode("utf-8")
-            )
-        finally:
-            await room.storage.close(handle=handle)
+        logger.info(f"writing source message.json to {path}")
+        await room.storage.upload(
+            path=path,
+            data=json.dumps(queued_message, indent=4).encode("utf-8"),
+        )
 
         await room.database.insert(
             table="emails",

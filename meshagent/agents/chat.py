@@ -465,6 +465,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._skill_dirs = skill_dirs
         self._thread_status_values: dict[str, str] = {}
         self._thread_status_mode_values: dict[str, ThreadStatusMode] = {}
+        self._thread_status_started_at_values: dict[str, str] = {}
         self._thread_status_keys: dict[str, str] = {}
         self._thread_status_locks: dict[str, asyncio.Lock] = {}
         self._thread_status_generations: dict[str, int] = {}
@@ -883,6 +884,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
     def _thread_status_mode_attribute_name(self, *, path: str) -> str:
         return f"thread.status.mode.{path}"
 
+    def _thread_status_started_at_attribute_name(self, *, path: str) -> str:
+        return f"thread.status.started_at.{path}"
+
     def _status_lock(self, *, path: str) -> asyncio.Lock:
         lock = self._thread_status_locks.get(path)
         if lock is None:
@@ -940,38 +944,52 @@ class ChatBotBase(SingleRoomAgent, ABC):
         attribute_name = self._thread_status_attribute_name(path=path)
         text_attribute_name = self._thread_status_text_attribute_name(path=path)
         mode_attribute_name = self._thread_status_mode_attribute_name(path=path)
+        started_at_attribute_name = self._thread_status_started_at_attribute_name(
+            path=path
+        )
         if status is None:
             self._thread_status_values.pop(path, None)
             self._thread_status_mode_values.pop(path, None)
+            self._thread_status_started_at_values.pop(path, None)
             await set_local_attribute(attribute_name, None)
             await set_local_attribute(text_attribute_name, None)
             await set_local_attribute(mode_attribute_name, None)
+            await set_local_attribute(started_at_attribute_name, None)
             return
 
         normalized = status.strip()
         if normalized == "":
             self._thread_status_values.pop(path, None)
             self._thread_status_mode_values.pop(path, None)
+            self._thread_status_started_at_values.pop(path, None)
             await set_local_attribute(attribute_name, None)
             await set_local_attribute(text_attribute_name, None)
             await set_local_attribute(mode_attribute_name, None)
+            await set_local_attribute(started_at_attribute_name, None)
             return
 
         normalized_mode = self._normalize_thread_status_mode(mode=mode)
         if normalized_mode is None:
             normalized_mode = self._thread_status_mode_values.get(path, "busy")
 
+        started_at = self._thread_status_started_at_values.get(path)
+        if started_at is None:
+            started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
         if (
             self._thread_status_values.get(path) == normalized
             and self._thread_status_mode_values.get(path) == normalized_mode
+            and self._thread_status_started_at_values.get(path) == started_at
         ):
             return
 
         self._thread_status_values[path] = normalized
         self._thread_status_mode_values[path] = normalized_mode
+        self._thread_status_started_at_values[path] = started_at
         await set_local_attribute(attribute_name, normalized)
         await set_local_attribute(text_attribute_name, normalized)
         await set_local_attribute(mode_attribute_name, normalized_mode)
+        await set_local_attribute(started_at_attribute_name, started_at)
 
     async def _apply_thread_status(
         self,
@@ -1034,6 +1052,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_status_keys.clear()
         self._thread_status_values.clear()
         self._thread_status_mode_values.clear()
+        self._thread_status_started_at_values.clear()
         self._thread_status_locks.clear()
         self._thread_status_generations.clear()
 
