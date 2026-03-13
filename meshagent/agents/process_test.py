@@ -1543,8 +1543,9 @@ async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
 
     await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
     await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TEXT_CONTENT_ENDED))
-        == 1
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TEXT_CONTENT_ENDED)) == 1
+        )
     )
 
     started_payload = supervisor.payloads(
@@ -1697,8 +1698,9 @@ async def test_llm_agent_process_rejects_steer_with_thread_id_on_event() -> None
     )
 
     await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED))
-        == 1
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED)) == 1
+        )
     )
 
     rejected_payload = supervisor.payloads(
@@ -1756,8 +1758,9 @@ async def test_llm_agent_process_rejects_queued_steer_when_turn_is_interrupted()
     )
 
     await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED))
-        == 1
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED)) == 1
+        )
     )
     assert supervisor.payloads(message_type=AGENT_EVENT_TURN_STEERED) == []
 
@@ -1775,8 +1778,9 @@ async def test_llm_agent_process_rejects_queued_steer_when_turn_is_interrupted()
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
     await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED))
-        == 1
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED)) == 1
+        )
     )
 
     rejected_payload = supervisor.payloads(
@@ -1837,8 +1841,9 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
     )
 
     await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED))
-        == 1
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED)) == 1
+        )
     )
 
     process.send(
@@ -1856,8 +1861,9 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
     await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED))
-        == 1
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED)) == 1
+        )
     )
 
     ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
@@ -1910,10 +1916,14 @@ async def test_llm_agent_process_waits_for_pending_tool_call_approvals(
 
     await asyncio.wait_for(adapter.approval_requested.wait(), timeout=1)
     await _wait_for(
-        lambda: len(
-            supervisor.payloads(message_type=AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED)
+        lambda: (
+            len(
+                supervisor.payloads(
+                    message_type=AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED
+                )
+            )
+            == 1
         )
-        == 1
     )
 
     approval_payload = supervisor.payloads(
@@ -2199,10 +2209,12 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Thinking",
+                (
+                    "thread.status./threads/test.thread",
+                    "Thinking",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
         await _wait_for(
             lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
@@ -2211,10 +2223,12 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         await _wait_for(lambda: len(room.sync.document.event_elements) >= 2)
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                None,
+                (
+                    "thread.status./threads/test.thread",
+                    None,
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
 
         user_message = room.sync.document.message_elements[0]
@@ -2285,10 +2299,12 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         await real_sleep(0)
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Thinking",
+                (
+                    "thread.status./threads/test.thread",
+                    "Thinking",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
 
         adapter.push_message(
@@ -2306,20 +2322,24 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
 
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Reading src/app.py",
+                (
+                    "thread.status./threads/test.thread",
+                    "Reading src/app.py",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
         await _wait_for(
-            lambda: len(
-                [
-                    event
-                    for event in room.sync.document.event_elements
-                    if event.get_attribute("kind") == "exec"
-                ]
+            lambda: (
+                len(
+                    [
+                        event
+                        for event in room.sync.document.event_elements
+                        if event.get_attribute("kind") == "exec"
+                    ]
+                )
+                == 1
             )
-            == 1
         )
 
         exec_event = next(
@@ -2346,10 +2366,12 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         await _wait_for(lambda: exec_event.get_attribute("state") == "completed")
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Thinking",
+                (
+                    "thread.status./threads/test.thread",
+                    "Thinking",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
 
         adapter.push_message(
@@ -2366,8 +2388,10 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         await real_sleep(0)
 
         await _wait_for(
-            lambda: exec_event.get_attribute("item_id") == "tool-2"
-            and exec_event.get_attribute("state") == "in_progress"
+            lambda: (
+                exec_event.get_attribute("item_id") == "tool-2"
+                and exec_event.get_attribute("state") == "in_progress"
+            )
         )
         assert (
             len(
@@ -2394,8 +2418,10 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         await real_sleep(0)
 
         await _wait_for(
-            lambda: exec_event.get_attribute("item_id") == "tool-2"
-            and exec_event.get_attribute("state") == "completed"
+            lambda: (
+                exec_event.get_attribute("item_id") == "tool-2"
+                and exec_event.get_attribute("state") == "completed"
+            )
         )
         assert (
             len(
@@ -2420,10 +2446,12 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
 
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                None,
+                (
+                    "thread.status./threads/test.thread",
+                    None,
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
     finally:
         await adapter.stop()
@@ -2469,14 +2497,16 @@ async def test_agent_process_thread_adapter_renders_storage_read_write_and_grep_
         await real_sleep(0)
 
         await _wait_for(
-            lambda: len(
-                [
-                    event
-                    for event in room.sync.document.event_elements
-                    if event.get_attribute("kind") == "exec"
-                ]
+            lambda: (
+                len(
+                    [
+                        event
+                        for event in room.sync.document.event_elements
+                        if event.get_attribute("kind") == "exec"
+                    ]
+                )
+                == 1
             )
-            == 1
         )
         read_event = next(
             event
@@ -2566,8 +2596,10 @@ async def test_agent_process_thread_adapter_renders_storage_read_write_and_grep_
         await real_sleep(0)
 
         await _wait_for(
-            lambda: read_event.get_attribute("item_id") == "grep-1"
-            and read_event.get_attribute("state") == "in_progress"
+            lambda: (
+                read_event.get_attribute("item_id") == "grep-1"
+                and read_event.get_attribute("state") == "in_progress"
+            )
         )
         assert (
             len(
@@ -2604,8 +2636,10 @@ async def test_agent_process_thread_adapter_renders_storage_read_write_and_grep_
         await real_sleep(0)
 
         await _wait_for(
-            lambda: read_event.get_attribute("item_id") == "grep-1"
-            and read_event.get_attribute("state") == "completed"
+            lambda: (
+                read_event.get_attribute("item_id") == "grep-1"
+                and read_event.get_attribute("state") == "completed"
+            )
         )
         assert read_event.get_attribute("headline") == "Searched src/app.py"
     finally:
@@ -2639,10 +2673,12 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
         await real_sleep(0)
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Thinking",
+                (
+                    "thread.status./threads/test.thread",
+                    "Thinking",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
 
         adapter.push_message(
@@ -2663,10 +2699,12 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
         await real_sleep(0)
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Writing src/app.py",
+                (
+                    "thread.status./threads/test.thread",
+                    "Writing src/app.py",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
 
         write_event = next(
@@ -2710,10 +2748,12 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
         )
         await _wait_for(
             lambda: (
-                "thread.status./threads/test.thread",
-                "Thinking",
+                (
+                    "thread.status./threads/test.thread",
+                    "Thinking",
+                )
+                in room.local_participant.set_attribute_calls
             )
-            in room.local_participant.set_attribute_calls
         )
     finally:
         await adapter.stop()
@@ -2759,14 +2799,16 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
         await real_sleep(0)
 
         await _wait_for(
-            lambda: len(
-                [
-                    event
-                    for event in room.sync.document.event_elements
-                    if event.get_attribute("item_id") == "read-1"
-                ]
+            lambda: (
+                len(
+                    [
+                        event
+                        for event in room.sync.document.event_elements
+                        if event.get_attribute("item_id") == "read-1"
+                    ]
+                )
+                == 1
             )
-            == 1
         )
         read_event = next(
             event
@@ -2847,14 +2889,16 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
         await real_sleep(0)
 
         await _wait_for(
-            lambda: len(
-                [
-                    event
-                    for event in room.sync.document.event_elements
-                    if event.get_attribute("item_id") == "grep-1"
-                ]
+            lambda: (
+                len(
+                    [
+                        event
+                        for event in room.sync.document.event_elements
+                        if event.get_attribute("item_id") == "grep-1"
+                    ]
+                )
+                == 1
             )
-            == 1
         )
         grep_event = next(
             event
@@ -3069,14 +3113,16 @@ async def test_agent_process_thread_adapter_omits_inline_computer_result_payload
         await real_sleep(0)
 
         await _wait_for(
-            lambda: len(
-                [
-                    event
-                    for event in room.sync.document.event_elements
-                    if event.get_attribute("item_id") == "tool-1"
-                ]
+            lambda: (
+                len(
+                    [
+                        event
+                        for event in room.sync.document.event_elements
+                        if event.get_attribute("item_id") == "tool-1"
+                    ]
+                )
+                == 1
             )
-            == 1
         )
 
         tool_event = next(
