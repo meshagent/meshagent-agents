@@ -119,6 +119,10 @@ class AgentSessionContext:
         del data
         raise RoomException("this chat context does not support image inputs")
 
+    def append_image_url(self, *, url: str) -> dict:
+        del url
+        raise RoomException("this chat context does not support image URL inputs")
+
     def append_file_message(
         self, *, filename: str, mime_type: str, data: bytes
     ) -> dict:
@@ -126,6 +130,10 @@ class AgentSessionContext:
         del mime_type
         del data
         raise RoomException("this chat context does not support file inputs")
+
+    def append_file_url(self, *, url: str) -> dict:
+        del url
+        raise RoomException("this chat context does not support file URL inputs")
 
     def append_rules(self, rules: list[str]):
         system_message = None

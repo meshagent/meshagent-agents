@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from yarl import URL
 
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.chat import ChatBot, ChatThreadContext
+from meshagent.agents.chat import ChatBot, ChatBotClient, ChatThreadContext
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api import RoomException
@@ -54,6 +54,17 @@ class _FakeMessaging:
 
     def send_message_nowait(self, *, to, type, message):
         self.sent_messages.append({"to": to, "type": type, "message": message})
+
+    async def send_message(
+        self,
+        *,
+        to,
+        type,
+        message,
+        attachment=None,
+    ) -> None:
+        del attachment
+        self.send_message_nowait(to=to, type=type, message=message)
 
 
 class _FakeAgents:
@@ -342,6 +353,97 @@ class _ChatBotAlwaysReplies(ChatBot):
         del from_user
         return True
 
+
+@pytest.mark.asyncio
+async def test_chatbot_client_send_requests_server_side_store_without_touching_doc():
+    class _ExplodingDocument:
+        @property
+        def root(self):
+            raise AssertionError("chat client should not write directly to the thread")
+
+    room = _FakeRoom()
+    client = ChatBotClient(
+        room=room,
+        participant_name="assistant",
+        thread_path="/threads/test.thread",
+    )
+    client._participant = Participant(  # type: ignore[assignment]
+        id="assistant-id",
+        attributes={"name": "assistant"},
+    )
+    client._doc = _ExplodingDocument()
+
+    await client.send(
+        text="hello",
+        attachments=[{"path": "uploads/report.pdf"}],
+    )
+
+    assert room.messaging.sent_messages == [
+        {
+            "to": client._participant,
+            "type": "chat",
+            "message": {
+                "text": "hello",
+                "path": "/threads/test.thread",
+                "tools": [],
+                "attachments": [{"path": "uploads/report.pdf"}],
+                "store": True,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_and_save_chat_uses_thread_adapter_write_text_message() -> None:
+    class _RecordingThreadAdapter:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.path = "/threads/test.thread"
+
+        def write_text_message(
+            self,
+            *,
+            text: str,
+            participant,
+            attachments=None,
+        ) -> None:
+            self.calls.append(
+                {
+                    "text": text,
+                    "participant": participant,
+                    "attachments": attachments,
+                }
+            )
+
+    room = _FakeRoom()
+    bot = ChatBot(llm_adapter=_CaptureChatAdapter())
+    bot._room = room
+    adapter = _RecordingThreadAdapter()
+    recipient = Participant(id="caller-id", attributes={"name": "alice"})
+
+    await bot._send_and_save_chat(
+        thread_adapter=adapter,  # type: ignore[arg-type]
+        to=recipient,  # type: ignore[arg-type]
+        id="message-1",
+        text="hello",
+        thread_attributes={"path": "/threads/test.thread"},
+    )
+
+    assert room.messaging.sent_messages == [
+        {
+            "to": recipient,
+            "type": "chat",
+            "message": {"path": "/threads/test.thread", "text": "hello"},
+        }
+    ]
+    assert adapter.calls == [
+        {
+            "text": "hello",
+            "participant": room.local_participant,
+            "attachments": None,
+        }
+    ]
+
     async def get_thread_toolkits(
         self, *, thread_context: ChatThreadContext, participant: Participant
     ) -> list[Toolkit]:
@@ -389,6 +491,14 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
+    tools_schema = tool.input_schema["properties"]["message"]["properties"]["tools"]
+    assert len(tools_schema["anyOf"]) == 2
+    assert tools_schema["anyOf"][0]["type"] == "array"
+    assert tools_schema["anyOf"][0]["items"]["type"] == "object"
+    assert tools_schema["anyOf"][0]["items"]["additionalProperties"] is False
+    assert tools_schema["anyOf"][0]["items"]["properties"] == {}
+    assert tools_schema["anyOf"][0]["items"]["required"] == []
+    assert tools_schema["anyOf"][1] == {"type": "null"}
     context = ToolContext(
         room=room,
         caller=Participant(id="caller-id", attributes={"name": "alice"}),
@@ -403,6 +513,7 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
 
     assert isinstance(result, JsonContent)
     result_path = result.json["path"]
+    assert result.json["name"] == "Release Planning Q1"
     _assert_uuid_thread_path(path=result_path, prefix=".threads/assistant/")
 
     assert len(queue.items) == 1
@@ -434,6 +545,14 @@ async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
+    tools_schema = tool.input_schema["properties"]["message"]["properties"]["tools"]
+    assert len(tools_schema["anyOf"]) == 2
+    assert tools_schema["anyOf"][0]["type"] == "array"
+    assert tools_schema["anyOf"][0]["items"]["type"] == "object"
+    assert tools_schema["anyOf"][0]["items"]["additionalProperties"] is False
+    assert tools_schema["anyOf"][0]["items"]["properties"] == {}
+    assert tools_schema["anyOf"][0]["items"]["required"] == []
+    assert tools_schema["anyOf"][1] == {"type": "null"}
     context = ToolContext(
         room=room,
         caller=Participant(id="caller-id", attributes={"name": "alice"}),
@@ -470,6 +589,14 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
+    tools_schema = tool.input_schema["properties"]["message"]["properties"]["tools"]
+    assert len(tools_schema["anyOf"]) == 2
+    assert tools_schema["anyOf"][0]["type"] == "array"
+    assert tools_schema["anyOf"][0]["items"]["type"] == "object"
+    assert tools_schema["anyOf"][0]["items"]["additionalProperties"] is False
+    assert tools_schema["anyOf"][0]["items"]["properties"] == {}
+    assert tools_schema["anyOf"][0]["items"]["required"] == []
+    assert tools_schema["anyOf"][1] == {"type": "null"}
     context = ToolContext(
         room=room,
         caller=Participant(id="caller-id", attributes={"name": "alice"}),
@@ -488,6 +615,7 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
         path=result.json["path"],
         prefix=".threads/assistant/",
     )
+    assert result.json["name"] == "No Builder Tools"
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == []
@@ -510,6 +638,12 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
 
     tool = await _new_thread_tool(bot)
+    tools_schema = tool.input_schema["properties"]["message"]["properties"]["tools"]
+    assert len(tools_schema["anyOf"]) == 2
+    assert tools_schema["anyOf"][0]["type"] == "array"
+    assert tools_schema["anyOf"][0]["items"]["type"] == "object"
+    assert tools_schema["anyOf"][0]["items"]["properties"]["name"]["type"] == "string"
+    assert tools_schema["anyOf"][1] == {"type": "null"}
     context = ToolContext(
         room=room,
         caller=Participant(id="caller-id", attributes={"name": "alice"}),
@@ -527,6 +661,7 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
         path=result.json["path"],
         prefix=".threads/assistant/",
     )
+    assert result.json["name"] == "Builder Thread"
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == [{"name": "example", "enabled": True}]
@@ -571,6 +706,7 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
         path=result.json["path"],
         prefix=".threads/assistant/",
     )
+    assert result.json["name"] == "Adapter Context"
     assert adapter.last_context_type is _SessionRequiredContext
     assert [m.get("content") for m in adapter.last_messages] == [
         "prior context",
@@ -608,6 +744,7 @@ async def test_new_thread_tool_records_friendly_name_in_thread_list() -> None:
     )
 
     path = result.json["path"]
+    assert result.json["name"] == "Friendly Plan Name"
     _assert_uuid_thread_path(path=path, prefix="custom/")
     entries = doc.root.get_children()
     assert len(entries) == 1
@@ -634,6 +771,33 @@ async def test_thread_list_tools_only_present_when_thread_dir_is_set() -> None:
     names_with = {tool.name for tool in toolkit_with_thread_dir.tools}
     assert "list_threads" in names_with
     assert "grep_thread_list" in names_with
+
+
+@pytest.mark.asyncio
+async def test_default_new_threading_mode_enables_thread_list_tools_and_relaxed_remote_validation() -> (
+    None
+):
+    adapter = _CaptureChatAdapter()
+    sync = _FakeSync()
+    room = _FakeRoom(sync=sync)
+    bot = ChatBot(llm_adapter=adapter, threading_mode="default-new")
+    bot._room = room
+
+    toolkit = await _chat_toolkit(bot)
+    tool_names = {tool.name for tool in toolkit.tools}
+
+    assert toolkit.validation_mode == "content_types"
+    assert "list_threads" in tool_names
+    assert "grep_thread_list" in tool_names
+
+    await bot._open_thread_list_document()
+
+    assert sync.open_calls == [
+        {
+            "path": ".threads/assistant/index.threadl",
+            "schema": thread_list_schema,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -807,6 +971,7 @@ async def test_on_chat_received_adds_current_file_context_message() -> None:
     bot = _ChatBotAlwaysReplies(llm_adapter=adapter)
     room = _FakeRoom()
     bot._room = room
+    bot._open_threads[".threads/main.thread"] = _FakeOpenThreadAdapter()
 
     thread = mock.Mock()
     thread.root = mock.Mock()
@@ -843,6 +1008,7 @@ async def test_on_chat_received_adds_not_viewing_message_when_file_is_closed() -
     bot = _ChatBotAlwaysReplies(llm_adapter=adapter)
     room = _FakeRoom()
     bot._room = room
+    bot._open_threads[".threads/main.thread"] = _FakeOpenThreadAdapter()
 
     thread = mock.Mock()
     thread.root = mock.Mock()
@@ -887,6 +1053,7 @@ async def test_on_chat_received_updates_thread_index_modified_at() -> None:
     bot = _ChatBotAlwaysReplies(llm_adapter=adapter, thread_dir="custom")
     room = _FakeRoom()
     bot._room = room
+    bot._open_threads["custom/main.thread"] = _FakeOpenThreadAdapter()
 
     thread = mock.Mock()
     thread.root = mock.Mock()

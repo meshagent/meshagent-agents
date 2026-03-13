@@ -1,11 +1,31 @@
 from abc import ABC, abstractmethod
-from .agent import AgentSessionContext
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Generic, Literal, Optional, TypeVar
+
 from jsonschema import validate
-from meshagent.tools import Content, Toolkit, ToolkitBuilder, ToolkitConfig
+
 from meshagent.api import RoomClient, RoomException, RemoteParticipant
-from typing import Any, Optional, Callable, TypeVar, Generic, Literal
+from meshagent.tools import Content, ToolContext, Toolkit, ToolkitBuilder, ToolkitConfig
+
+from .agent import AgentSessionContext
+from .messages import AgentMessage
 
 TEvent = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallApprovalRequest:
+    item_id: str
+    toolkit: str
+    tool: str
+    arguments: dict[str, Any] | None = None
+
+
+ToolCallApprovalHandler = Callable[
+    [ToolContext, ToolCallApprovalRequest],
+    Awaitable[bool],
+]
 
 
 class ToolResponseAdapter(ABC):
@@ -67,6 +87,26 @@ class LLMAdapter(Generic[TEvent]):
         self, *, context: AgentSessionContext, room: RoomClient
     ):
         return True
+
+    def set_tool_call_approval_handler(
+        self, handler: ToolCallApprovalHandler | None
+    ) -> None:
+        del handler
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback: Callable[[AgentMessage], None],
+    ) -> Callable[[TEvent], None]:
+        del turn_id
+        del thread_id
+
+        def publish(event: TEvent) -> None:
+            if isinstance(event, AgentMessage):
+                callback(event)
+
+        return publish
 
     def tool_providers(self, *, model: str) -> list[ToolkitBuilder]:
         return []

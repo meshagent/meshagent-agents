@@ -17,11 +17,17 @@ def test_agent_session_context_does_not_support_binary_inputs_by_default() -> No
         context.append_image_message(mime_type="image/png", data=b"img")
 
     with pytest.raises(RoomException):
+        context.append_image_url(url="https://example.com/image.png")
+
+    with pytest.raises(RoomException):
         context.append_file_message(
             filename="file.txt",
             mime_type="text/plain",
             data=b"file",
         )
+
+    with pytest.raises(RoomException):
+        context.append_file_url(url="https://example.com/file.txt")
 
 
 class _LifecycleContext(AgentSessionContext):

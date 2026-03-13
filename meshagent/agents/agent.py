@@ -52,6 +52,7 @@ class RoomTool(FunctionTool):
         participant_id: Optional[str] = None,
         on_behalf_of_id: Optional[str] = None,
         defs: Optional[dict] = None,
+        strict: Optional[bool] = None,
     ):
         self._toolkit_name = toolkit_name
         self._participant_id = participant_id
@@ -74,6 +75,7 @@ class RoomTool(FunctionTool):
             thumbnail_url=thumbnail_url,
             pricing=pricing,
             defs=defs,
+            strict=True if strict is None else strict,
         )
 
     async def execute(self, context: ToolContext, **kwargs):
@@ -485,6 +487,7 @@ class SingleRoomAgent(Agent):
                             participant_id=tool_target.id,
                             defs=tool_description.defs,
                             pricing=tool_description.pricing,
+                            strict=tool_description.strict,
                         )
                         room_tools.append(tool)
 
@@ -513,6 +516,7 @@ class SingleRoomAgent(Agent):
                             participant_id=tool_description.participant_id,
                             defs=tool_description.defs,
                             pricing=tool_description.pricing,
+                            strict=tool_description.strict,
                         )
                         room_tools.append(tool)
 

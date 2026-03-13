@@ -110,3 +110,34 @@ async def test_room_tool_uses_non_stream_call_without_event_handler() -> None:
 
     assert result == response
     assert len(fake_agents.calls) == 1
+
+
+def test_room_tool_defaults_to_strict_when_metadata_is_missing() -> None:
+    tool = RoomTool(
+        toolkit_name="remote_tools",
+        name="computer_call",
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+
+    assert tool.strict is True
+
+
+def test_room_tool_preserves_explicit_non_strict_metadata() -> None:
+    tool = RoomTool(
+        toolkit_name="remote_tools",
+        name="computer_call",
+        input_schema={
+            "type": "object",
+            "required": [],
+            "properties": {},
+            "additionalProperties": False,
+        },
+        strict=False,
+    )
+
+    assert tool.strict is False

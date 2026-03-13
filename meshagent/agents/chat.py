@@ -52,6 +52,7 @@ import json
 import aiohttp
 from pydantic import BaseModel
 from meshagent.tools import tool
+from meshagent.tools.strict_schema import ensure_strict_json_schema
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 from meshagent.agents.toolkit_schema import build_tools_property_schema
@@ -328,34 +329,6 @@ class ChatBotClient:
         if self._participant is None or self._doc is None:
             raise RoomException("chat client not started")
 
-        messages = self._doc.root.get_elements_by_tag_name("messages")[0]
-        message = messages.append_child(
-            tag_name="message",
-            attributes={
-                "id": str(uuid.uuid4()),
-                "text": text,
-                "created_at": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "author_name": self.room.local_participant.get_attribute("name"),
-            },
-        )
-
-        if attachments is not None:
-            for attachment in attachments:
-                if not isinstance(attachment, dict):
-                    continue
-                path = attachment.get("path")
-                if not isinstance(path, str):
-                    continue
-                normalized_path = path.strip()
-                if normalized_path == "":
-                    continue
-                message.append_child(
-                    tag_name="file",
-                    attributes={"path": normalized_path},
-                )
-
         tool_payload = [tool.model_dump(mode="json") for tool in tools or []]
         attachment_payload: list[dict[str, str]] = []
         if attachments is not None:
@@ -378,6 +351,7 @@ class ChatBotClient:
                 "path": self.thread_path,
                 "tools": tool_payload,
                 "attachments": attachment_payload,
+                "store": True,
             },
             attachment=None,
         )
@@ -509,6 +483,13 @@ class ChatBotBase(SingleRoomAgent, ABC):
             return self._thread_dir
         return self._default_thread_dir()
 
+    def _thread_list_dir(self) -> Optional[str]:
+        if self._thread_dir is not None:
+            return self._thread_dir
+        if self._threading_mode == "default-new":
+            return self._default_thread_dir()
+        return None
+
     def _sanitize_thread_name(self, *, value: str) -> str:
         normalized = value.strip()
         if normalized.endswith(".thread"):
@@ -537,9 +518,10 @@ class ChatBotBase(SingleRoomAgent, ABC):
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def _thread_list_index_path(self) -> Optional[str]:
-        if self._thread_dir is None:
+        thread_dir = self._thread_list_dir()
+        if thread_dir is None:
             return None
-        return posixpath.join(self._thread_dir, "index.threadl")
+        return posixpath.join(thread_dir, "index.threadl")
 
     def _thread_list_entry_name_for_path(self, *, path: str) -> str:
         filename = posixpath.basename(path.strip())
@@ -558,7 +540,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         return normalized
 
     def _find_thread_list_entry(self, *, path: str) -> Optional[Element]:
-        if self._thread_dir is None:
+        if self._thread_list_dir() is None:
             return None
 
         if self._thread_list_document is None:
@@ -580,7 +562,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         created_at: Optional[str] = None,
         modified_at: Optional[str] = None,
     ) -> None:
-        if self._thread_dir is None or self._thread_list_document is None:
+        if self._thread_list_dir() is None or self._thread_list_document is None:
             return
 
         now = self._utc_now_iso()
@@ -664,7 +646,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         )
 
     def _thread_list_entries(self) -> list[Element]:
-        if self._thread_dir is None or self._thread_list_document is None:
+        if self._thread_list_dir() is None or self._thread_list_document is None:
             return []
 
         return [
@@ -1058,23 +1040,12 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
     async def _send_and_save_chat(
         self,
-        thread: MeshDocument,
-        path: str,
+        thread_adapter: ThreadAdapter,
         to: RemoteParticipant,
         id: str,
         text: str,
         thread_attributes: dict,
     ):
-        messages = None
-
-        for prop in thread.root.get_children():
-            if prop.tag_name == "messages":
-                messages = prop
-                break
-
-        if messages is None:
-            raise RoomException("messages element was not found in thread document")
-
         with tracer.start_as_current_span("chatbot.thread.message") as span:
             span.set_attributes(thread_attributes)
             span.set_attribute("role", "assistant")
@@ -1084,26 +1055,19 @@ class ChatBotBase(SingleRoomAgent, ABC):
             )
             span.set_attributes({"id": id, "text": text})
             await self.room.messaging.send_message(
-                to=to, type="chat", message={"path": path, "text": text}
+                to=to,
+                type="chat",
+                message={"path": thread_adapter.path, "text": text},
             )
-
-            messages.append_child(
-                tag_name="message",
-                attributes={
-                    "id": id,
-                    "text": text,
-                    "created_at": datetime.now(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
-                    "author_name": self.room.local_participant.get_attribute("name"),
-                },
+            thread_adapter.write_text_message(
+                text=text,
+                participant=self.room.local_participant,
             )
 
     async def _greet(
         self,
         *,
-        thread: MeshDocument,
-        path: str,
+        thread_adapter: ThreadAdapter,
         thread_context: ChatThreadContext,
         participant: RemoteParticipant,
         thread_attributes: dict,
@@ -1113,8 +1077,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             await self._send_and_save_chat(
                 id=str(uuid.uuid4()),
                 to=RemoteParticipant(id=participant.id),
-                thread=thread,
-                path=path,
+                thread_adapter=thread_adapter,
                 text=self._auto_greet_message,
                 thread_attributes=thread_attributes,
             )
@@ -1524,10 +1487,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             )
 
                         await self._greet(
-                            path=path,
                             thread_context=thread_context,
                             participant=chat_with_participant,
-                            thread=thread,
+                            thread_adapter=thread_adapter,
                             thread_attributes=thread_attributes,
                         )
                 elif received.type == "clear":
@@ -1659,9 +1621,8 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
                             text = self._chat_error_message(error=handled_error)
                             await self._send_and_save_chat(
-                                thread=thread,
+                                thread_adapter=thread_adapter,
                                 to=chat_with_participant,
-                                path=path,
                                 id=str(uuid.uuid4()),
                                 text=text,
                                 thread_attributes=thread_attributes,
@@ -1783,7 +1744,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         return None
 
     def _build_thread_list_tools(self) -> list[FunctionTool]:
-        if self._thread_dir is None:
+        if self._thread_list_dir() is None:
             return []
 
         read_file_hint = (
@@ -1806,7 +1767,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         def list_threads(*, limit: int = 20, offset: int = 0) -> JsonContent:
             normalized_offset = max(0, int(offset))
             normalized_limit = max(1, min(200, int(limit)))
-            if outer._thread_dir is None:
+            if outer._thread_list_dir() is None:
                 return JsonContent(
                     json={
                         "threads": [],
@@ -1864,7 +1825,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             description="searches the thread list for matching thread names and paths. Use read_file with a thread path to read that thread's contents.",
         )
         def grep_thread_list(*, pattern: str, ignore_case: bool = True) -> JsonContent:
-            if outer._thread_dir is None:
+            if outer._thread_list_dir() is None:
                 return JsonContent(
                     json={
                         "threads": [],
@@ -2002,13 +1963,20 @@ class ChatBotBase(SingleRoomAgent, ABC):
         else:
             # Backward compatibility: some clients always send `tools: []`.
             tools_schema["properties"]["message"]["properties"]["tools"] = {
-                "type": "array",
-                "maxItems": 0,
+                "anyOf": [
+                    {
+                        "type": "array",
+                        "items": ensure_strict_json_schema({}),
+                    },
+                    {"type": "null"},
+                ],
             }
 
         if len(defs) > 0:
             for key, value in defs.items():
                 tools_schema["$defs"][key] = value
+
+        tools_schema = ensure_strict_json_schema(tools_schema)
 
         outer = self
 
@@ -2016,7 +1984,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             def __init__(self):
                 super().__init__(
                     name="new_thread",
-                    description=f"creates a new thread for {outer.room.local_participant.get_attribute('name')} and sends the first chat message",
+                    description=f"creates a new thread for {outer.room.local_participant.get_attribute('name')} and sends the first chat message, returning the new thread path and name",
                     input_schema=tools_schema,
                     supports_context=True,
                 )
@@ -2042,7 +2010,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     message=payload,
                     wait_for_result=False,
                 )
-                return JsonContent(json={"path": path})
+                return JsonContent(json={"path": path, "name": friendly_name})
 
         tools: list[FunctionTool] = [
             ask,
@@ -2055,6 +2023,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             description=f"tools for interacting with {self.name}",
             public=False,
             tools=tools,
+            validation_mode="content_types",
         )
 
         exposed_toolkits.append(chatbot_toolkit)

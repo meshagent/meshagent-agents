@@ -12,7 +12,6 @@ from meshagent.api import (
     Element,
     MeshDocument,
     Participant,
-    RemoteParticipant,
     RoomClient,
     RoomException,
 )
@@ -51,6 +50,8 @@ class ThreadAdapter(ABC):
             path=self._thread_path,
             schema=thread_schema,
         )
+        self._ensure_members_element()
+        self._ensure_messages_element()
         self._processor_task = asyncio.create_task(self._process_llm_events())
 
     async def __aenter__(self) -> "ThreadAdapter":
@@ -60,6 +61,10 @@ class ThreadAdapter(ABC):
     @property
     def thread(self) -> Optional[MeshDocument]:
         return self._thread
+
+    @property
+    def path(self) -> str:
+        return self._thread_path
 
     async def stop(self) -> None:
         if self._processor_task is not None and not self._processor_task.done():
@@ -117,7 +122,19 @@ class ThreadAdapter(ABC):
         await self.stop()
 
     def push(self, *, event: dict) -> None:
-        self._llm_messages.put_nowait(event)
+        try:
+            self._llm_messages.put_nowait(event)
+        except asyncio.QueueShutDown:
+            logger.debug("dropping thread adapter event after queue shutdown")
+
+    async def clear_thread(self) -> None:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        messages = self._ensure_messages_element()
+
+        for child in list(messages.get_children()):
+            child.delete()
 
     @abstractmethod
     async def handle_custom_event(
@@ -279,18 +296,63 @@ class ThreadAdapter(ABC):
                 break
 
         if doc_messages is None:
-            doc_messages = self._thread.root.append_child(tag_name="messages")
+            doc_messages = self._ensure_messages_element()
+
+    def _ensure_members_element(self) -> Element:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        members = self._thread.root.get_children_by_tag_name("members")
+        if len(members) > 0:
+            return members[0]
+
+        return self._thread.root.append_child(tag_name="members")
+
+    def _ensure_messages_element(self) -> Element:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        messages = self._thread.root.get_children_by_tag_name("messages")
+        if len(messages) > 0:
+            return messages[0]
+
+        return self._thread.root.append_child(tag_name="messages")
+
+    def ensure_member(self, *, participant: Participant | str) -> None:
+        if isinstance(participant, Participant):
+            participant_name = participant.get_attribute("name")
+        else:
+            participant_name = participant
+
+        if not isinstance(participant_name, str):
+            return
+
+        normalized_name = participant_name.strip()
+        if normalized_name == "":
+            return
+
+        members = self._ensure_members_element()
+        for member in members.get_children():
+            if member.tag_name != "member":
+                continue
+
+            if member.get_attribute("name") == normalized_name:
+                return
+
+        members.append_child(
+            tag_name="member",
+            attributes={"name": normalized_name},
+        )
 
     def write_text_message(
         self,
         *,
         text: str,
-        participant: RemoteParticipant | str,
+        participant: Participant | str,
         attachments: Optional[list[dict[str, Any]]] = None,
     ) -> None:
-        doc_messages: Element = self._thread.root.get_children_by_tag_name("messages")[
-            0
-        ]
+        self.ensure_member(participant=participant)
+        doc_messages = self._ensure_messages_element()
 
         message = doc_messages.append_child(
             tag_name="message",
