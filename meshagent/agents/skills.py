@@ -7,11 +7,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import html
+import logging
 import aiofiles
 import aiofiles.ospath
 import strictyaml
 from dataclasses import dataclass, field
 import unicodedata
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -116,18 +120,7 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
     return metadata, body
 
 
-async def read_properties(skill_dir: Path) -> SkillProperties:
-    """Read skill properties from SKILL.md frontmatter (async).
-
-    This function parses the frontmatter and returns properties.
-    It does NOT perform full validation. Use validate() for that.
-    """
-    skill_dir = Path(skill_dir)
-    skill_md = await find_skill_md(skill_dir)
-
-    if skill_md is None:
-        raise ParseError(f"SKILL.md not found in {skill_dir}")
-
+async def _read_properties_from_skill_md(skill_md: Path) -> SkillProperties:
     async with aiofiles.open(skill_md, "r", encoding="utf-8") as f:
         content = await f.read()
 
@@ -156,10 +149,45 @@ async def read_properties(skill_dir: Path) -> SkillProperties:
     )
 
 
+async def read_properties(skill_dir: Path) -> SkillProperties:
+    """Read skill properties from SKILL.md frontmatter (async).
+
+    This function parses the frontmatter and returns properties.
+    It does NOT perform full validation. Use validate() for that.
+    """
+    skill_dir = Path(skill_dir)
+    skill_md = await find_skill_md(skill_dir)
+
+    if skill_md is None:
+        raise ParseError(f"SKILL.md not found in {skill_dir}")
+
+    return await _read_properties_from_skill_md(skill_md)
+
+
 """Generate <available_skills> XML prompt block for agent system prompts."""
 
 
-async def to_prompt(skill_dirs: list[Path]) -> str:
+def _append_prompt_skill(
+    *,
+    lines: list[str],
+    name: str,
+    description: str,
+    location: Path,
+) -> None:
+    lines.append("<skill>")
+    lines.append("<name>")
+    lines.append(html.escape(name))
+    lines.append("</name>")
+    lines.append("<description>")
+    lines.append(html.escape(description))
+    lines.append("</description>")
+    lines.append("<location>")
+    lines.append(str(location))
+    lines.append("</location>")
+    lines.append("</skill>")
+
+
+async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
     """Generate the <available_skills> XML block for inclusion in agent prompts.
 
     This XML format is what Anthropic uses and recommends for Claude models.
@@ -168,6 +196,8 @@ async def to_prompt(skill_dirs: list[Path]) -> str:
 
     Args:
         skill_dirs: List of paths to skill directories
+        missing_ok: When True, include a prompt entry for missing SKILL.md files
+            instead of failing.
 
     Returns:
         XML string with <available_skills> block containing each skill's
@@ -189,22 +219,30 @@ async def to_prompt(skill_dirs: list[Path]) -> str:
 
     for skill_dir in skill_dirs:
         skill_dir = Path(skill_dir).resolve()
-        props = await read_properties(skill_dir)
-
-        lines.append("<skill>")
-        lines.append("<name>")
-        lines.append(html.escape(props.name))
-        lines.append("</name>")
-        lines.append("<description>")
-        lines.append(html.escape(props.description))
-        lines.append("</description>")
-
         skill_md_path = await find_skill_md(skill_dir)
-        lines.append("<location>")
-        lines.append(str(skill_md_path))
-        lines.append("</location>")
+        if skill_md_path is None:
+            if not missing_ok:
+                raise ParseError(f"SKILL.md not found in {skill_dir}")
 
-        lines.append("</skill>")
+            logger.warning("SKILL.md not found in %s", skill_dir)
+            _append_prompt_skill(
+                lines=lines,
+                name=skill_dir.name or str(skill_dir),
+                description=(
+                    "Configured skill directory is missing SKILL.md and cannot be "
+                    "loaded until the file is added."
+                ),
+                location=skill_dir,
+            )
+            continue
+
+        props = await _read_properties_from_skill_md(skill_md_path)
+        _append_prompt_skill(
+            lines=lines,
+            name=props.name,
+            description=props.description,
+            location=skill_md_path,
+        )
 
     lines.append("</available_skills>")
 
