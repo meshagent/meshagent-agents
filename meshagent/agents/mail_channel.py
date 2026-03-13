@@ -14,8 +14,6 @@ import re
 from typing import Any
 import uuid
 
-import aiosmtplib
-
 from meshagent.api import Participant, RoomClient, RoomException
 from meshagent.api.room_server_client import TextDataType
 from meshagent.tools import FileContent, FunctionTool, ToolContext, Toolkit
@@ -51,6 +49,21 @@ from .messages import (
 from .process import Channel, Message
 
 logger = logging.getLogger("mail-channel")
+
+
+class _MissingAioSmtplib:
+    async def send(self, *args: Any, **kwargs: Any) -> None:
+        del args
+        del kwargs
+        raise ModuleNotFoundError(
+            "aiosmtplib is required to use MailChannel SMTP features"
+        )
+
+
+try:
+    import aiosmtplib
+except ModuleNotFoundError:
+    aiosmtplib = _MissingAioSmtplib()
 
 _MAIL_TABLE_NAME = "emails"
 _MAIL_STORAGE_ROOT = ".emails"
@@ -349,7 +362,6 @@ class MailChannel(Channel):
     async def _ensure_database_table(self) -> None:
         table_name, namespace = self._database_table_ref()
         try:
-            
             await self._room.database.create_table_with_schema(
                 name=table_name,
                 schema={

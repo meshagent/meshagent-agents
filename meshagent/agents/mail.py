@@ -24,13 +24,27 @@ import json
 import logging
 
 import os
-import aiosmtplib
 
 from pathlib import Path
 from . import mail_common
 from meshagent.agents.skills import to_prompt
 
 logger = logging.getLogger("mail")
+
+
+class _MissingAioSmtplib:
+    async def send(self, *args: object, **kwargs: object) -> None:
+        del args
+        del kwargs
+        raise ModuleNotFoundError(
+            "aiosmtplib is required to use mail agent SMTP features"
+        )
+
+
+try:
+    import aiosmtplib
+except ModuleNotFoundError:
+    aiosmtplib = _MissingAioSmtplib()
 
 type MessageRole = Literal["user", "agent"]
 

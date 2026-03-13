@@ -18,6 +18,7 @@ dependencies = [
   "pyjwt~=2.10",
   "pytest~=8.4",
   "pytest-asyncio~=0.26",
+  "aiosmtplib~=4.0.1",
   "meshagent-api~=0.30.1",
   "meshagent-tools~=0.30.1",
   "meshagent-openai~=0.30.1",
@@ -31,17 +32,14 @@ all = [
     "meshagent-api[all]~=0.30.1",
     "chonkie~=0.5.1",
     "chonkie[semantic]~=0.5.1",
-    "chonkie[openai]~=0.5.1",
-    "aiosmtplib~=4.0.1"
+    "chonkie[openai]~=0.5.1"
 ]
 
 sync = [
     "meshagent-api[sync]~=0.30.1",
 ]
 
-mail = [
-   "aiosmtplib~=4.0.1"
-]
+mail = []
 
 rag = [
     "chonkie~=0.5.1",
