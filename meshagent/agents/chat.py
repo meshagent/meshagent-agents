@@ -2320,7 +2320,7 @@ class ChatBot(ChatBotBase):
     ):
         self._llm_adapter = llm_adapter
         if decision_model is None:
-            decision_model = "gpt-5.2"
+            decision_model = "gpt-5.4"
             decision_options = {"reasoning": {"effort": "none"}}
 
         self._decision_model = decision_model
