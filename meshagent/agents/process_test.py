@@ -2751,7 +2751,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         assert exec_event.get_attribute("state") == "in_progress"
         assert exec_event.get_attribute("headline") == "Reading src/app.py"
         assert exec_event.get_attribute("path") == "src/app.py"
-        assert exec_event.get_attribute("details") == "Run sed -n '1,20p' src/app.py"
+        assert exec_event.get_attribute("details") == ""
 
         adapter.push_message(
             message=AgentToolCallEnded(
@@ -2805,7 +2805,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
             == 1
         )
         assert exec_event.get_attribute("headline") == "Reading src/app.py"
-        assert exec_event.get_attribute("details") == "Run cat src/app.py"
+        assert exec_event.get_attribute("details") == ""
 
         adapter.push_message(
             message=AgentToolCallEnded(
@@ -2853,6 +2853,198 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
                 )
                 in room.local_participant.set_attribute_calls
             )
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_exploration_commands(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={
+                    "action": {
+                        "command": "cd /website && pwd && ls -la && find . -maxdepth 2 -type f | sed 's#^./##' | sort | head -200",
+                    }
+                },
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                (
+                    "thread.status./threads/test.thread",
+                    "Exploring /website",
+                )
+                in room.local_participant.set_attribute_calls
+            )
+        )
+
+        exec_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "tool-1"
+        )
+        assert exec_event.get_attribute("kind") == "exec"
+        assert exec_event.get_attribute("headline") == "Exploring /website"
+        assert exec_event.get_attribute("path") == "/website"
+        assert exec_event.get_attribute("details") == ""
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                result=TextContent(text="/website"),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: exec_event.get_attribute("state") == "completed")
+        assert exec_event.get_attribute("headline") == "Explored /website"
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-2",
+                toolkit="openai",
+                tool="shell",
+                arguments={
+                    "action": {
+                        "command": "cd /website && sed -n '1,220p' public/index.html && printf '\\n---CSS---\\n' && sed -n '1,260p' public/styles.css && printf '\\n---JS---\\n' && sed -n '1,260p' public/app.js",
+                    }
+                },
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                exec_event.get_attribute("item_id") == "tool-2"
+                and exec_event.get_attribute("state") == "in_progress"
+            )
+        )
+        assert exec_event.get_attribute("headline") == "Exploring /website"
+        assert exec_event.get_attribute("path") == "/website"
+        assert (
+            len(
+                [
+                    event
+                    for event in room.sync.document.event_elements
+                    if event.get_attribute("kind") == "exec"
+                ]
+            )
+            == 1
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_renders_cd_prefixed_shell_heredoc_write_as_file_event(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="write-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={
+                    "action": {
+                        "command": "cd /website && cat > public/index.html <<'EOF'\n<!doctype html>\n<html></html>\nEOF",
+                    }
+                },
+            )
+        )
+        await real_sleep(0)
+
+        write_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "write-1"
+        )
+        assert write_event.get_attribute("kind") == "file"
+        assert (
+            write_event.get_attribute("headline")
+            == "Writing /website/public/index.html"
+        )
+        assert write_event.get_attribute("path") == "/website/public/index.html"
+        assert write_event.get_attribute("details") == ""
+        assert write_event.get_attribute("preview") == ""
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="write-1",
+                result=TextContent(text="ok"),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: write_event.get_attribute("state") == "completed")
+        assert (
+            write_event.get_attribute("headline") == "Wrote /website/public/index.html"
         )
     finally:
         await adapter.stop()

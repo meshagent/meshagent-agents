@@ -9,7 +9,8 @@ import shlex
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -56,7 +57,6 @@ logger = logging.getLogger("agent.process_thread_adapter")
 ThreadStatusMode = Literal["busy", "steerable"]
 _ACTIVE_STATES = {"queued", "in_progress", "running", "pending", "searching"}
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}
-EXEC_FILE_WRITE_PREVIEW_LIMIT = 12000
 EXEC_SEARCH_DETAIL_LIMIT = 2000
 DIFF_PREVIEW_LIMIT = 12000
 _APPLY_PATCH_PATH_RES = (
@@ -69,6 +69,10 @@ _EXEC_FILE_WRITE_HEREDOC_RE = re.compile(
 )
 _EXEC_FILE_WRITE_HEREDOC_REDIRECT_AFTER_RE = re.compile(
     r"""^\s*cat\s+<<(?P<quote>['"]?)(?P<marker>[A-Za-z0-9_:\-]+)(?P=quote)\s*(?P<redirect>>>?)\s*(?P<path>'[^']+'|"[^"]+"|[^\s]+)\s*\n(?P<content>.*)\n(?P=marker)\s*$""",
+    re.DOTALL,
+)
+_EXEC_LEADING_CD_RE = re.compile(
+    r"""^\s*cd\s+(?P<path>'[^']+'|"[^"]+"|[^\s;&|]+)\s*(?:&&|;)\s*(?P<rest>.*)$""",
     re.DOTALL,
 )
 _EXEC_SEARCH_COMMANDS = {"rg", "grep", "egrep", "fgrep"}
@@ -143,7 +147,6 @@ class ThreadAdapterMessage:
 @dataclass(frozen=True, slots=True)
 class _ExecFileWritePreview:
     path: str
-    preview: str
     append: bool
 
 
@@ -1008,6 +1011,105 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         return normalized
 
+    def _resolve_exec_path(self, *, path: str, cwd: str | None) -> str:
+        normalized = self._unquote_shell_token(token=path)
+        if normalized == "":
+            return ""
+
+        if cwd is not None and cwd != "":
+            if normalized == ".":
+                return cwd
+            if not PurePosixPath(normalized).is_absolute():
+                normalized = str(PurePosixPath(cwd) / normalized)
+
+        return posixpath.normpath(normalized)
+
+    def _extract_exec_context(self, *, command: str) -> tuple[str | None, str]:
+        script = self._extract_exec_script(command=command).strip()
+        if script == "":
+            return None, ""
+
+        match = _EXEC_LEADING_CD_RE.match(script)
+        if match is None:
+            return None, script
+
+        cwd = self._resolve_exec_path(path=match.group("path"), cwd=None)
+        return cwd or None, match.group("rest").strip()
+
+    def _split_exec_segments(self, *, script: str) -> list[str]:
+        normalized = script.strip()
+        if normalized == "":
+            return []
+
+        segments: list[str] = []
+        current: list[str] = []
+        in_single_quote = False
+        in_double_quote = False
+        index = 0
+
+        while index < len(normalized):
+            char = normalized[index]
+
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current.append(char)
+                index += 1
+                continue
+
+            if char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current.append(char)
+                index += 1
+                continue
+
+            if not in_single_quote and not in_double_quote:
+                if normalized.startswith("&&", index):
+                    segment = "".join(current).strip()
+                    if segment != "":
+                        segments.append(segment)
+                    current = []
+                    index += 2
+                    continue
+
+                if char == ";":
+                    segment = "".join(current).strip()
+                    if segment != "":
+                        segments.append(segment)
+                    current = []
+                    index += 1
+                    continue
+
+            current.append(char)
+            index += 1
+
+        segment = "".join(current).strip()
+        if segment != "":
+            segments.append(segment)
+
+        return segments
+
+    def _exec_segment_argv(self, *, segment: str) -> list[str] | None:
+        with contextlib.suppress(ValueError):
+            argv = shlex.split(segment)
+            if len(argv) > 0:
+                return argv
+        return None
+
+    def _is_exec_exploration_segment(self, *, segment: str) -> bool:
+        argv = self._exec_segment_argv(segment=segment)
+        if argv is None or len(argv) == 0:
+            return False
+
+        executable = Path(argv[0]).name.lower()
+        return executable in {
+            "pwd",
+            "printf",
+            "echo",
+            "find",
+            *_EXEC_READ_COMMANDS,
+            *_EXEC_LIST_COMMANDS,
+        }
+
     def _unquote_shell_token(self, *, token: str) -> str:
         normalized = token.strip()
         if normalized == "":
@@ -1109,7 +1211,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         *,
         command: str,
     ) -> _ExecFileWritePreview | None:
-        script = self._extract_exec_script(command=command)
+        cwd, script = self._extract_exec_context(command=command)
         if script == "":
             return None
 
@@ -1125,14 +1227,12 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         if match is None:
             return None
 
-        path = self._unquote_shell_token(token=match.group("path"))
+        path = self._resolve_exec_path(path=match.group("path"), cwd=cwd)
         if path == "":
             return None
 
-        preview = match.group("content").replace("\r\n", "\n")
         return _ExecFileWritePreview(
             path=path,
-            preview=_truncate_text(text=preview, limit=EXEC_FILE_WRITE_PREVIEW_LIMIT),
             append=match.group("redirect") == ">>",
         )
 
@@ -1152,16 +1252,20 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         *,
         command: str,
     ) -> _ExecSearchPreview | None:
-        script = self._extract_exec_script(command=command)
+        cwd, script = self._extract_exec_context(command=command)
         if script == "":
             return None
 
+        segments = self._split_exec_segments(script=script)
+        if len(segments) != 1:
+            return None
+
         with contextlib.suppress(ValueError):
-            argv = shlex.split(script)
+            argv = shlex.split(segments[0])
             if len(argv) == 0:
                 return None
 
-            if any(token in {"|", "&&", "||", ";"} for token in argv[1:]):
+            if any(token in {"&&", "||", ";"} for token in argv[1:]):
                 return None
 
             executable = Path(argv[0]).name.lower()
@@ -1221,7 +1325,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
             query = query.strip()
             normalized_paths = tuple(
-                path.strip()
+                self._resolve_exec_path(path=path, cwd=cwd)
                 for path in paths
                 if isinstance(path, str) and path.strip() != ""
             )
@@ -1236,25 +1340,42 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         *,
         command: str,
     ) -> _ExecExplorationPreview | None:
-        script = self._extract_exec_script(command=command)
+        cwd, script = self._extract_exec_context(command=command)
         if script == "":
+            if cwd is not None and cwd != "":
+                return _ExecExplorationPreview(action="explore", path=cwd)
             return None
 
-        with contextlib.suppress(ValueError):
-            argv = shlex.split(script)
-            if len(argv) == 0:
-                return None
+        segments = self._split_exec_segments(script=script)
+        if cwd is not None and len(segments) > 1:
+            if all(
+                self._is_exec_exploration_segment(segment=segment)
+                for segment in segments
+            ):
+                return _ExecExplorationPreview(action="explore", path=cwd)
 
-            if any(token in {"|", "&&", "||", ";"} for token in argv[1:]):
+        with contextlib.suppress(ValueError):
+            argv = shlex.split(segments[0] if len(segments) == 1 else script)
+            if len(argv) == 0:
                 return None
 
             path = self._exec_read_path_from_argv(argv=argv)
             if path != "":
-                return _ExecExplorationPreview(action="read", path=path)
+                return _ExecExplorationPreview(
+                    action="read",
+                    path=self._resolve_exec_path(path=path, cwd=cwd),
+                )
 
             path = self._exec_list_path_from_argv(argv=argv)
             if path != "":
-                return _ExecExplorationPreview(action="list", path=path)
+                return _ExecExplorationPreview(
+                    action="list",
+                    path=self._resolve_exec_path(path=path, cwd=cwd),
+                )
+
+            executable = Path(argv[0]).name.lower()
+            if cwd is not None and executable in {"pwd", "find", *_EXEC_LIST_COMMANDS}:
+                return _ExecExplorationPreview(action="explore", path=cwd)
 
         return None
 
@@ -1370,20 +1491,20 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         path = file_write_preview.path
         if file_write_preview.append:
             if status == "failed":
-                return f"Append Failed: {path}"
+                return f"Attempted to append file {path}"
             if status == "cancelled":
-                return f"Append Cancelled: {path}"
+                return f"Cancelled appending file {path}"
             if self._is_active_state(state=status):
                 return f"Appending {path}"
             return f"Appended {path}"
 
         if status == "failed":
-            return f"Create Failed: {path}"
+            return f"Attempted to write file {path}"
         if status == "cancelled":
-            return f"Create Cancelled: {path}"
+            return f"Cancelled writing file {path}"
         if self._is_active_state(state=status):
-            return f"Creating {path}"
-        return f"Created {path}"
+            return f"Writing {path}"
+        return f"Wrote {path}"
 
     def _exec_display(
         self,
@@ -1395,13 +1516,12 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         exploration_preview: _ExecExplorationPreview | None = None,
     ) -> tuple[str, tuple[str, ...]]:
         if file_write_preview is not None:
-            details = (f"Run {command}",) if command != "" else ()
             return (
                 self._file_write_headline(
                     status=status,
                     file_write_preview=file_write_preview,
                 ),
-                details,
+                (),
             )
 
         if search_preview is not None:
@@ -1414,13 +1534,12 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             )
 
         if exploration_preview is not None:
-            details = (f"Run {command}",) if command != "" else ()
             return (
                 self._exec_exploration_headline(
                     status=status,
                     exploration_preview=exploration_preview,
                 ),
-                details,
+                (),
             )
 
         if command == "":
@@ -1728,9 +1847,22 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             )
 
             if file_write_preview is not None:
-                path = file_write_preview.path
-                preview = file_write_preview.preview
-            elif search_preview is not None and search_preview.path != "":
+                return _NormalizedThreadEvent(
+                    source="agent",
+                    name=message_type,
+                    kind="file",
+                    state=state,
+                    method=message_type,
+                    item_id=item_id,
+                    item_type="tool_call",
+                    summary=summary,
+                    headline=headline,
+                    path=file_write_preview.path,
+                    data=data,
+                    correlation_key=f"tool:{item_id}",
+                )
+
+            if search_preview is not None and search_preview.path != "":
                 path = search_preview.path
             elif exploration_preview is not None:
                 path = exploration_preview.path
