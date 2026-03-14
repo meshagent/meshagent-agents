@@ -19,6 +19,7 @@ dependencies = [
   "pytest~=8.4",
   "pytest-asyncio~=0.26",
   "aiosmtplib~=4.0.1",
+  "lark~=1.3.1",
   "meshagent-api~=0.30.1",
   "meshagent-tools~=0.30.1",
   "meshagent-openai~=0.30.1",
@@ -56,7 +57,7 @@ Source = "https://www.meshagent.com"
 include = ["meshagent.*"]
 
 [tool.setuptools.package-data]
-"meshagent.agents" = ["py.typed", "*.pyi", "**/*.pyi", "**/*.js"]
+"meshagent.agents" = ["py.typed", "*.pyi", "**/*.pyi", "*.lark", "**/*.lark", "**/*.js"]
 
 [tool.setuptools.dynamic]
 version = {attr = "meshagent.agents.version.__version__"}

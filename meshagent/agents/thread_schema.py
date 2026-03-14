@@ -166,6 +166,11 @@ thread_schema = MeshSchema(
             description="a reasoning trace",
             properties=[
                 ValueProperty(
+                    name="turn_id",
+                    description="the agent turn id associated with this reasoning trace",
+                    type="string",
+                ),
+                ValueProperty(
                     name="summary",
                     description="a summary of the reasoning",
                     type="string",
@@ -181,6 +186,11 @@ thread_schema = MeshSchema(
             tag_name="exec",
             description="a command execution",
             properties=[
+                ValueProperty(
+                    name="turn_id",
+                    description="the agent turn id associated with this command execution",
+                    type="string",
+                ),
                 ValueProperty(
                     name="command",
                     description="a command that was executed",
@@ -228,6 +238,11 @@ thread_schema = MeshSchema(
             description="custom user interface data",
             properties=[
                 ValueProperty(
+                    name="turn_id",
+                    description="the agent turn id associated with this UI payload",
+                    type="string",
+                ),
+                ValueProperty(
                     name="data",
                     description="raw data to be renderered, usually in JSON format",
                     type="string",
@@ -263,6 +278,11 @@ thread_schema = MeshSchema(
             tag_name="event",
             description="a structured event emitted by an agent backend",
             properties=[
+                ValueProperty(
+                    name="turn_id",
+                    description="the agent turn id associated with this event",
+                    type="string",
+                ),
                 ValueProperty(
                     name="id",
                     description="a unique id for this event",
@@ -382,6 +402,11 @@ thread_schema = MeshSchema(
             properties=[
                 ValueProperty(
                     name="id", description="the id of the message", type="string"
+                ),
+                ValueProperty(
+                    name="turn_id",
+                    description="the agent turn id associated with this message",
+                    type="string",
                 ),
                 ValueProperty(
                     name="text", description="the text of the message", type="string"

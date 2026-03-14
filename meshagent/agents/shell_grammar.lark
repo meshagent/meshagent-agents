@@ -1,0 +1,24 @@
+start: sequence
+
+sequence: pipeline (separator pipeline)* separator?
+
+separator: AND_IF | OR_IF | SEMICOLON | NEWLINE_SEPARATOR
+
+pipeline: command (_PIPE command)*
+
+command: command_part+
+
+?command_part: redirection | WORD
+
+redirection: IO_NUMBER? REDIR WORD
+
+AND_IF: "&&"
+OR_IF: "||"
+SEMICOLON: ";"
+_PIPE: "|"
+IO_NUMBER.10: /\d+(?=(?:<<-|<<|>&|<&|>>|>|<))/
+REDIR: "&>>" | "&>" | "<<-" | "<<" | ">&" | "<&" | ">>" | ">" | "<"
+WORD: /(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^ \t\r\n;&|<>])+/
+NEWLINE_SEPARATOR: /(\r?\n)+/
+
+%ignore /[ \t]+/

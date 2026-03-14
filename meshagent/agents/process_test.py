@@ -6,6 +6,7 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel, ValidationError
 
+import meshagent.agents.process_thread_adapter as process_thread_adapter_module
 import meshagent.agents.thread_adapter as thread_adapter_module
 from meshagent.agents import AgentProcessThreadAdapter
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
@@ -15,6 +16,9 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_STARTED,
+    AGENT_EVENT_REASONING_CONTENT_DELTA,
+    AGENT_EVENT_REASONING_CONTENT_ENDED,
+    AGENT_EVENT_REASONING_CONTENT_STARTED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
@@ -35,6 +39,9 @@ from meshagent.agents.messages import (
     ApproveAgentToolCall,
     AgentError,
     AgentMessage,
+    AgentReasoningContentDelta,
+    AgentReasoningContentEnded,
+    AgentReasoningContentStarted,
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
@@ -822,6 +829,10 @@ class _ThreadDocument:
     @property
     def event_elements(self) -> list[_ThreadElement]:
         return self.root.messages.get_children_by_tag_name("event")
+
+    @property
+    def reasoning_elements(self) -> list[_ThreadElement]:
+        return self.root.messages.get_children_by_tag_name("reasoning")
 
     @property
     def member_names(self) -> list[str]:
@@ -2575,8 +2586,11 @@ def test_llm_agent_process_requires_agent_process_thread_adapter() -> None:
 async def test_llm_agent_process_thread_adapter_persists_events_messages_and_status(
     monkeypatch,
 ) -> None:
+    real_sleep = asyncio.sleep
+
     async def _fast_sleep(delay: float) -> None:
         del delay
+        await real_sleep(0)
 
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
@@ -2662,6 +2676,14 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         assert turn_event.get_attribute("kind") == "turn"
         assert turn_event.get_attribute("state") == "completed"
 
+        turn_id = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0][
+            "turn_id"
+        ]
+        assert user_message.get_attribute("turn_id") == turn_id
+        assert assistant_message.get_attribute("turn_id") == turn_id
+        assert tool_event.get_attribute("turn_id") == turn_id
+        assert turn_event.get_attribute("turn_id") == turn_id
+
         assert room.sync.document.member_names == ["assistant", "caller"]
         assert (
             "thread.status.mode./threads/test.thread",
@@ -2671,6 +2693,139 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         await process.stop(supervisor)
 
     assert room.sync.close_calls == ["/threads/test.thread"]
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messages_and_events(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+            message=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="/threads/test.thread",
+                message_id="turn-start-1",
+                content=[{"type": "text", "text": "hello"}],
+            ),
+        )
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="turn-start-1",
+            ),
+        )
+        adapter.push_message(
+            message=AgentReasoningContentStarted(
+                type=AGENT_EVENT_REASONING_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="reasoning-1",
+            ),
+        )
+        adapter.push_message(
+            message=AgentReasoningContentDelta(
+                type=AGENT_EVENT_REASONING_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="reasoning-1",
+                text="thinking",
+            ),
+        )
+        adapter.push_message(
+            message=AgentReasoningContentEnded(
+                type=AGENT_EVENT_REASONING_CONTENT_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="reasoning-1",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentStarted(
+                type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-1",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentDelta(
+                type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-1",
+                text="hi there",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentEnded(
+                type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-1",
+            ),
+        )
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                toolkit="lookup",
+                tool="lookup",
+                arguments={"query": "meshagent"},
+            ),
+        )
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                result=TextContent(text="ok"),
+            ),
+        )
+
+        await real_sleep(0)
+        await _wait_for(lambda: len(room.sync.document.message_elements) >= 2)
+        await _wait_for(lambda: len(room.sync.document.reasoning_elements) == 1)
+        await _wait_for(lambda: len(room.sync.document.event_elements) >= 2)
+
+        user_message = room.sync.document.message_elements[0]
+        assistant_message = room.sync.document.message_elements[1]
+        reasoning = room.sync.document.reasoning_elements[0]
+        tool_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "tool-1"
+        )
+        turn_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "turn-1"
+        )
+
+        assert user_message.get_attribute("turn_id") == "turn-1"
+        assert assistant_message.get_attribute("turn_id") == "turn-1"
+        assert reasoning.get_attribute("turn_id") == "turn-1"
+        assert tool_event.get_attribute("turn_id") == "turn-1"
+        assert turn_event.get_attribute("turn_id") == "turn-1"
+    finally:
+        await adapter.stop()
 
 
 @pytest.mark.asyncio
@@ -2750,7 +2905,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         )
         assert exec_event.get_attribute("state") == "in_progress"
         assert exec_event.get_attribute("headline") == "Reading src/app.py"
-        assert exec_event.get_attribute("path") == "src/app.py"
+        assert exec_event.get_attribute("path") == ""
         assert exec_event.get_attribute("details") == ""
 
         adapter.push_message(
@@ -2859,6 +3014,65 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_writes_preview_for_fallback_running_command(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        command = "node scripts/custom.js --flag"
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={"action": {"command": command}},
+            )
+        )
+        await real_sleep(0)
+
+        exec_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "tool-1"
+        )
+        await _wait_for(
+            lambda: (
+                exec_event.get_attribute("state") == "in_progress"
+                and exec_event.get_attribute("headline") == "Running Command"
+            )
+        )
+
+        assert exec_event.get_attribute("kind") == "exec"
+        assert exec_event.get_attribute("path") == ""
+        assert exec_event.get_attribute("preview") == command
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_exploration_commands(
     monkeypatch,
 ) -> None:
@@ -2918,7 +3132,7 @@ async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_explorat
         )
         assert exec_event.get_attribute("kind") == "exec"
         assert exec_event.get_attribute("headline") == "Exploring /website"
-        assert exec_event.get_attribute("path") == "/website"
+        assert exec_event.get_attribute("path") == ""
         assert exec_event.get_attribute("details") == ""
 
         adapter.push_message(
@@ -2959,7 +3173,7 @@ async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_explorat
             )
         )
         assert exec_event.get_attribute("headline") == "Exploring /website"
-        assert exec_event.get_attribute("path") == "/website"
+        assert exec_event.get_attribute("path") == ""
         assert (
             len(
                 [
@@ -3029,7 +3243,12 @@ async def test_agent_process_thread_adapter_renders_cd_prefixed_shell_heredoc_wr
         )
         assert write_event.get_attribute("path") == "/website/public/index.html"
         assert write_event.get_attribute("details") == ""
-        assert write_event.get_attribute("preview") == ""
+        assert write_event.get_attribute("preview") == (
+            "cd /website && cat > public/index.html <<'EOF'\n"
+            "<!doctype html>\n"
+            "<html></html>\n"
+            "..."
+        )
 
         adapter.push_message(
             message=AgentToolCallEnded(
@@ -3046,6 +3265,82 @@ async def test_agent_process_thread_adapter_renders_cd_prefixed_shell_heredoc_wr
         assert (
             write_event.get_attribute("headline") == "Wrote /website/public/index.html"
         )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_groups_multi_file_shell_heredoc_writes(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="write-many-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={
+                    "action": {
+                        "command": "cd /website && mkdir -p src public dist && cat > package.json <<'EOF'\n{}\nEOF\ncat > tsconfig.json <<'EOF'\n{}\nEOF\ncat > src/main.tsx <<'EOF'\nconsole.log('hi')\nEOF\nnpm install\nnpm run build",
+                    }
+                },
+            )
+        )
+        await real_sleep(0)
+
+        write_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "write-many-1"
+        )
+        assert write_event.get_attribute("kind") == "file"
+        assert write_event.get_attribute("headline") == "Writing files in /website"
+        assert write_event.get_attribute("path") == "/website"
+        assert write_event.get_attribute("details") == ""
+        assert write_event.get_attribute("preview") == (
+            "cd /website && mkdir -p src public dist && cat > package.json <<'EOF'\n"
+            "{}\n"
+            "EOF\n"
+            "..."
+        )
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="write-many-1",
+                result=TextContent(text="ok"),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: write_event.get_attribute("state") == "completed")
+        assert write_event.get_attribute("headline") == "Wrote files in /website"
     finally:
         await adapter.stop()
 
@@ -3299,6 +3594,12 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
                 in room.local_participant.set_attribute_calls
             )
         )
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.pending_item_id./threads/test.thread"
+            )
+            == "write-1"
+        )
 
         write_event = next(
             event
@@ -3347,6 +3648,12 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
                 )
                 in room.local_participant.set_attribute_calls
             )
+        )
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.pending_item_id./threads/test.thread"
+            )
+            is None
         )
     finally:
         await adapter.stop()
@@ -3399,6 +3706,12 @@ async def test_agent_process_thread_adapter_restores_thinking_status_on_turn_int
                 in room.local_participant.set_attribute_calls
             )
         )
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.pending_item_id./threads/test.thread"
+            )
+            == "read-1"
+        )
 
         adapter.push_message(
             message=TurnInterrupted(
@@ -3418,6 +3731,12 @@ async def test_agent_process_thread_adapter_restores_thinking_status_on_turn_int
                 )
                 in room.local_participant.set_attribute_calls
             )
+        )
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.pending_item_id./threads/test.thread"
+            )
+            is None
         )
     finally:
         await adapter.stop()
@@ -3474,6 +3793,55 @@ async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_
             "Queued turn steering",
         ) not in room.local_participant.set_attribute_calls
         assert room.local_participant.set_attribute_calls == previous_calls
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_resets_started_at_when_status_changes(
+    monkeypatch,
+) -> None:
+    timestamps = iter(
+        [
+            "2026-03-14T01:00:00Z",
+            "2026-03-14T01:00:05Z",
+            "2026-03-14T01:00:10Z",
+        ]
+    )
+    monkeypatch.setattr(
+        process_thread_adapter_module,
+        "_now_iso",
+        lambda: next(timestamps),
+    )
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        await adapter.set_thread_status(status="Reading src/app.py")
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.started_at./threads/test.thread"
+            )
+            == "2026-03-14T01:00:00Z"
+        )
+
+        await adapter.set_thread_status(status="Reading src/app.py")
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.started_at./threads/test.thread"
+            )
+            == "2026-03-14T01:00:00Z"
+        )
+
+        await adapter.set_thread_status(status="Thinking")
+        assert (
+            room.local_participant.get_attribute(
+                "thread.status.started_at./threads/test.thread"
+            )
+            == "2026-03-14T01:00:05Z"
+        )
     finally:
         await adapter.stop()
 

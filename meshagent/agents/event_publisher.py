@@ -598,6 +598,7 @@ class _OpenAIAgentEventPublisher:
     function_tool_name_resolver: FunctionToolNameResolver | None = None
     _output_item_ids: dict[int, str] = field(default_factory=dict)
     _pending_handler_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
+    _finished_handler_tool_call_ids: set[str] = field(default_factory=set)
 
     def set_function_tool_name_resolver(
         self,
@@ -675,8 +676,14 @@ class _OpenAIAgentEventPublisher:
             function_tool_name_resolver=self.function_tool_name_resolver,
         )
         if tool_info is not None:
-            if completed and tool_info.item_type in _HANDLER_RESULT_TOOL_TYPES:
+            if tool_info.item_id in self._finished_handler_tool_call_ids:
+                return
+
+            if tool_info.item_type in _HANDLER_RESULT_TOOL_TYPES:
                 self._pending_handler_tool_calls[tool_info.item_id] = tool_info
+
+            if completed and tool_info.item_type in _HANDLER_RESULT_TOOL_TYPES:
+                self.emitter.emit_tool_started(info=tool_info)
                 return
 
             if completed:
@@ -917,6 +924,7 @@ class _OpenAIAgentEventPublisher:
                 )
 
             error_text = _as_str(event.get("error"))
+            self._finished_handler_tool_call_ids.add(pending_tool_call.item_id)
             self.emitter.emit_tool_ended(
                 info=replace(
                     pending_tool_call,

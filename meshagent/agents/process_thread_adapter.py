@@ -9,8 +9,7 @@ import shlex
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
-import posixpath
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -50,6 +49,7 @@ from .messages import (
     TurnSteered,
     TurnSteerRejected,
 )
+from .shell_semantics import analyze_shell_command
 from .thread_adapter import ThreadAdapter
 
 logger = logging.getLogger("agent.process_thread_adapter")
@@ -63,67 +63,6 @@ _APPLY_PATCH_PATH_RES = (
     re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (?P<path>.+)$", re.MULTILINE),
     re.compile(r"^(?:\+\+\+ b/|--- a/)(?P<path>.+)$", re.MULTILINE),
 )
-_EXEC_FILE_WRITE_HEREDOC_RE = re.compile(
-    r"""^\s*cat\s+(?P<redirect>>>?)\s*(?P<path>'[^']+'|"[^"]+"|[^\s]+)\s*<<(?P<quote>['"]?)(?P<marker>[A-Za-z0-9_:\-]+)(?P=quote)\s*\n(?P<content>.*)\n(?P=marker)\s*$""",
-    re.DOTALL,
-)
-_EXEC_FILE_WRITE_HEREDOC_REDIRECT_AFTER_RE = re.compile(
-    r"""^\s*cat\s+<<(?P<quote>['"]?)(?P<marker>[A-Za-z0-9_:\-]+)(?P=quote)\s*(?P<redirect>>>?)\s*(?P<path>'[^']+'|"[^"]+"|[^\s]+)\s*\n(?P<content>.*)\n(?P=marker)\s*$""",
-    re.DOTALL,
-)
-_EXEC_LEADING_CD_RE = re.compile(
-    r"""^\s*cd\s+(?P<path>'[^']+'|"[^"]+"|[^\s;&|]+)\s*(?:&&|;)\s*(?P<rest>.*)$""",
-    re.DOTALL,
-)
-_EXEC_SEARCH_COMMANDS = {"rg", "grep", "egrep", "fgrep"}
-_EXEC_READ_COMMANDS = {"bat", "cat", "head", "less", "more", "sed", "tail"}
-_EXEC_LIST_COMMANDS = {"ls", "tree"}
-_EXEC_SEARCH_QUERY_FLAGS = {"-e", "--regexp"}
-_EXEC_SEARCH_SHORT_VALUE_FLAGS = {
-    "-A",
-    "-B",
-    "-C",
-    "-D",
-    "-M",
-    "-T",
-    "-f",
-    "-g",
-    "-j",
-    "-m",
-    "-t",
-}
-_EXEC_READ_VALUE_FLAGS = {"-c", "-e", "-f", "-n"}
-_EXEC_LIST_VALUE_FLAGS = {"-I", "--ignore"}
-_EXEC_SEARCH_LONG_VALUE_FLAGS = {
-    "--binary-files",
-    "--color",
-    "--colors",
-    "--context",
-    "--context-separator",
-    "--devices",
-    "--directories",
-    "--encoding",
-    "--engine",
-    "--exclude",
-    "--exclude-dir",
-    "--file",
-    "--glob",
-    "--include",
-    "--label",
-    "--max-columns",
-    "--max-count",
-    "--max-filesize",
-    "--path-separator",
-    "--pre",
-    "--pre-glob",
-    "--replace",
-    "--sort",
-    "--sortr",
-    "--threads",
-    "--type",
-    "--type-add",
-    "--type-not",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +84,6 @@ class ThreadAdapterMessage:
 
 
 @dataclass(frozen=True, slots=True)
-class _ExecFileWritePreview:
-    path: str
-    append: bool
-
-
-@dataclass(frozen=True, slots=True)
 class _ExecSearchPreview:
     query: str
     paths: tuple[str, ...]
@@ -160,12 +93,6 @@ class _ExecSearchPreview:
         if len(self.paths) == 1:
             return self.paths[0]
         return ""
-
-
-@dataclass(frozen=True, slots=True)
-class _ExecExplorationPreview:
-    action: str
-    path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +214,7 @@ class _NormalizedThreadEvent:
     kind: str
     state: str
     method: str
+    turn_id: str = ""
     item_id: str = ""
     item_type: str = ""
     summary: str = ""
@@ -339,6 +267,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
+        self._pending_turn_ids_by_message_id: dict[str, str] = {}
         self._thread_status_lock = asyncio.Lock()
         self._thread_status_generation = 0
         self._thread_status_key: str | None = None
@@ -347,6 +276,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._thread_status_started_at_value: str | None = None
         self._thread_status_turn_id_value: str | None = None
         self._thread_status_pending_messages_value: list[dict[str, Any]] = []
+        self._thread_status_pending_item_id_value: str | None = None
 
     async def start(self) -> None:
         await super().start()
@@ -361,6 +291,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_reasoning_elements_by_item_id.clear()
         self._active_event_elements_by_key.clear()
         self._active_tool_calls_by_item_id.clear()
+        self._pending_turn_ids_by_message_id.clear()
 
     async def clear_thread(self) -> None:
         if self._processor_task is None or self._processor_task.done():
@@ -504,11 +435,13 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="text", item_id=message.item_id),
+                turn_id=message.turn_id,
             )
         elif isinstance(message, AgentTextContentDelta):
             assistant_message = self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="text", item_id=message.item_id),
+                turn_id=message.turn_id,
             )
             current_text = self._attribute_as_str(assistant_message, "text")
             assistant_message.set_attribute("text", current_text + message.text)
@@ -521,11 +454,13 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="file", item_id=message.item_id),
+                turn_id=message.turn_id,
             )
         elif isinstance(message, AgentFileContentDelta):
             assistant_message = self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="file", item_id=message.item_id),
+                turn_id=message.turn_id,
             )
             file_element = self._ensure_file_element(message=assistant_message)
             file_element.set_attribute("path", message.url)
@@ -535,11 +470,16 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 None,
             )
         elif isinstance(message, AgentReasoningContentStarted):
-            self._ensure_reasoning_element(messages=messages, item_id=message.item_id)
+            self._ensure_reasoning_element(
+                messages=messages,
+                item_id=message.item_id,
+                turn_id=message.turn_id,
+            )
         elif isinstance(message, AgentReasoningContentDelta):
             reasoning = self._ensure_reasoning_element(
                 messages=messages,
                 item_id=message.item_id,
+                turn_id=message.turn_id,
             )
             current_summary = self._attribute_as_str(reasoning, "summary")
             reasoning.set_attribute("summary", current_summary + message.text)
@@ -551,6 +491,13 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 self._upsert_event(messages=messages, event=normalized_event)
 
         if isinstance(message, TurnStarted):
+            if not self.set_message_turn_id(
+                message_id=message.source_message_id,
+                turn_id=message.turn_id,
+            ):
+                self._pending_turn_ids_by_message_id[message.source_message_id] = (
+                    message.turn_id
+                )
             await self.set_thread_turn_id(turn_id=message.turn_id)
             if normalized_event is not None:
                 await self._update_thread_status_from_event(event=normalized_event)
@@ -588,9 +535,16 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             return
 
         participant: Participant | str = sender if sender is not None else "user"
+        turn_id: str | None = turn.turn_id if isinstance(turn, TurnSteer) else None
+        if turn_id is None:
+            turn_id = self._pending_turn_ids_by_message_id.pop(turn.message_id, None)
+        else:
+            self._pending_turn_ids_by_message_id.pop(turn.message_id, None)
         self.write_text_message(
             text="\n\n".join(text_parts),
             participant=participant,
+            message_id=turn.message_id,
+            turn_id=turn_id,
             attachments=attachments if len(attachments) > 0 else None,
         )
 
@@ -647,9 +601,17 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     ) -> str:
         return f"{kind}:{item_id}"
 
-    def _ensure_assistant_message(self, *, messages: Element, key: str) -> Element:
+    def _ensure_assistant_message(
+        self,
+        *,
+        messages: Element,
+        key: str,
+        turn_id: str | None = None,
+    ) -> Element:
         existing = self._active_message_elements_by_key.get(key)
         if existing is not None:
+            if isinstance(turn_id, str) and turn_id.strip() != "":
+                existing.set_attribute("turn_id", turn_id.strip())
             return existing
 
         existing_id = key
@@ -658,17 +620,23 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 continue
 
             if self._attribute_as_str(child, "id") == existing_id:
+                if isinstance(turn_id, str) and turn_id.strip() != "":
+                    child.set_attribute("turn_id", turn_id.strip())
                 self._active_message_elements_by_key[key] = child
                 return child
 
+        assistant_message_attributes: dict[str, Any] = {
+            "id": existing_id,
+            "text": "",
+            "created_at": _now_iso(),
+            "author_name": self._local_participant_name(),
+        }
+        if isinstance(turn_id, str) and turn_id.strip() != "":
+            assistant_message_attributes["turn_id"] = turn_id.strip()
+
         assistant_message = messages.append_child(
             tag_name="message",
-            attributes={
-                "id": existing_id,
-                "text": "",
-                "created_at": _now_iso(),
-                "author_name": self._local_participant_name(),
-            },
+            attributes=assistant_message_attributes,
         )
         self._active_message_elements_by_key[key] = assistant_message
         return assistant_message
@@ -680,17 +648,29 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         return message.append_child(tag_name="file", attributes={"path": ""})
 
-    def _ensure_reasoning_element(self, *, messages: Element, item_id: str) -> Element:
+    def _ensure_reasoning_element(
+        self,
+        *,
+        messages: Element,
+        item_id: str,
+        turn_id: str | None = None,
+    ) -> Element:
         existing = self._active_reasoning_elements_by_item_id.get(item_id)
         if existing is not None:
+            if isinstance(turn_id, str) and turn_id.strip() != "":
+                existing.set_attribute("turn_id", turn_id.strip())
             return existing
+
+        reasoning_attributes: dict[str, str] = {
+            "summary": "",
+            "created_at": _now_iso(),
+        }
+        if isinstance(turn_id, str) and turn_id.strip() != "":
+            reasoning_attributes["turn_id"] = turn_id.strip()
 
         reasoning = messages.append_child(
             tag_name="reasoning",
-            attributes={
-                "summary": "",
-                "created_at": _now_iso(),
-            },
+            attributes=reasoning_attributes,
         )
         self._active_reasoning_elements_by_item_id[item_id] = reasoning
         return reasoning
@@ -699,6 +679,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_message_elements_by_key.clear()
         self._active_reasoning_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
+        self._pending_turn_ids_by_message_id.clear()
 
     async def _clear_thread_contents(self, *, messages: Element) -> None:
         self._clear_active_turn_state()
@@ -765,6 +746,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             method=event.get("method")
             if isinstance(event.get("method"), str)
             else name,
+            turn_id=event.get("turn_id")
+            if isinstance(event.get("turn_id"), str)
+            else "",
             item_id=event.get("item_id")
             if isinstance(event.get("item_id"), str)
             else "",
@@ -989,396 +973,6 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     def _is_active_state(self, *, state: str) -> bool:
         return state in _ACTIVE_STATES
 
-    def _is_shell_command_flag(self, *, token: str) -> bool:
-        if len(token) <= 1 or not token.startswith("-"):
-            return False
-
-        flags = token[1:]
-        return "c" in flags and all(flag in ("c", "l") for flag in flags)
-
-    def _extract_exec_script(self, *, command: str) -> str:
-        normalized = command.strip()
-        if normalized == "":
-            return ""
-
-        with contextlib.suppress(ValueError):
-            argv = shlex.split(normalized)
-            for index, token in enumerate(argv[:-1]):
-                if self._is_shell_command_flag(token=token):
-                    script = argv[index + 1]
-                    if isinstance(script, str) and script.strip() != "":
-                        return script
-
-        return normalized
-
-    def _resolve_exec_path(self, *, path: str, cwd: str | None) -> str:
-        normalized = self._unquote_shell_token(token=path)
-        if normalized == "":
-            return ""
-
-        if cwd is not None and cwd != "":
-            if normalized == ".":
-                return cwd
-            if not PurePosixPath(normalized).is_absolute():
-                normalized = str(PurePosixPath(cwd) / normalized)
-
-        return posixpath.normpath(normalized)
-
-    def _extract_exec_context(self, *, command: str) -> tuple[str | None, str]:
-        script = self._extract_exec_script(command=command).strip()
-        if script == "":
-            return None, ""
-
-        match = _EXEC_LEADING_CD_RE.match(script)
-        if match is None:
-            return None, script
-
-        cwd = self._resolve_exec_path(path=match.group("path"), cwd=None)
-        return cwd or None, match.group("rest").strip()
-
-    def _split_exec_segments(self, *, script: str) -> list[str]:
-        normalized = script.strip()
-        if normalized == "":
-            return []
-
-        segments: list[str] = []
-        current: list[str] = []
-        in_single_quote = False
-        in_double_quote = False
-        index = 0
-
-        while index < len(normalized):
-            char = normalized[index]
-
-            if char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-                current.append(char)
-                index += 1
-                continue
-
-            if char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-                current.append(char)
-                index += 1
-                continue
-
-            if not in_single_quote and not in_double_quote:
-                if normalized.startswith("&&", index):
-                    segment = "".join(current).strip()
-                    if segment != "":
-                        segments.append(segment)
-                    current = []
-                    index += 2
-                    continue
-
-                if char == ";":
-                    segment = "".join(current).strip()
-                    if segment != "":
-                        segments.append(segment)
-                    current = []
-                    index += 1
-                    continue
-
-            current.append(char)
-            index += 1
-
-        segment = "".join(current).strip()
-        if segment != "":
-            segments.append(segment)
-
-        return segments
-
-    def _exec_segment_argv(self, *, segment: str) -> list[str] | None:
-        with contextlib.suppress(ValueError):
-            argv = shlex.split(segment)
-            if len(argv) > 0:
-                return argv
-        return None
-
-    def _is_exec_exploration_segment(self, *, segment: str) -> bool:
-        argv = self._exec_segment_argv(segment=segment)
-        if argv is None or len(argv) == 0:
-            return False
-
-        executable = Path(argv[0]).name.lower()
-        return executable in {
-            "pwd",
-            "printf",
-            "echo",
-            "find",
-            *_EXEC_READ_COMMANDS,
-            *_EXEC_LIST_COMMANDS,
-        }
-
-    def _unquote_shell_token(self, *, token: str) -> str:
-        normalized = token.strip()
-        if normalized == "":
-            return ""
-
-        with contextlib.suppress(ValueError):
-            parts = shlex.split(normalized)
-            if len(parts) == 1:
-                return parts[0]
-
-        if len(normalized) >= 2 and normalized[0] == normalized[-1]:
-            if normalized[0] in ("'", '"'):
-                return normalized[1:-1]
-
-        return normalized
-
-    def _exec_positional_tokens(
-        self,
-        *,
-        argv: list[str],
-        value_flags: set[str],
-    ) -> list[str]:
-        tokens: list[str] = []
-        after_separator = False
-        index = 1
-        while index < len(argv):
-            token = argv[index]
-            if not after_separator and token == "--":
-                after_separator = True
-                index += 1
-                continue
-
-            if not after_separator and token in value_flags:
-                index += 2
-                continue
-
-            if not after_separator and token.startswith("--") and "=" in token:
-                index += 1
-                continue
-
-            if not after_separator and token.startswith("-") and token != "-":
-                index += 1
-                continue
-
-            tokens.append(token)
-            index += 1
-
-        return tokens
-
-    def _exec_read_path_from_argv(self, *, argv: list[str]) -> str:
-        if len(argv) == 0:
-            return ""
-
-        executable = Path(argv[0]).name.lower()
-        if executable == "sed":
-            tokens = self._exec_positional_tokens(
-                argv=argv,
-                value_flags={"-e", "-f"},
-            )
-            if len(tokens) >= 2:
-                return tokens[-1]
-            return ""
-
-        if executable in {"head", "tail"}:
-            tokens = self._exec_positional_tokens(
-                argv=argv,
-                value_flags=_EXEC_READ_VALUE_FLAGS,
-            )
-            if len(tokens) == 1:
-                return tokens[0]
-            return ""
-
-        if executable in _EXEC_READ_COMMANDS:
-            tokens = self._exec_positional_tokens(argv=argv, value_flags=set())
-            if len(tokens) == 1:
-                return tokens[0]
-            return ""
-
-        return ""
-
-    def _exec_list_path_from_argv(self, *, argv: list[str]) -> str:
-        if len(argv) == 0:
-            return ""
-
-        executable = Path(argv[0]).name.lower()
-        if executable not in _EXEC_LIST_COMMANDS:
-            return ""
-
-        tokens = self._exec_positional_tokens(
-            argv=argv,
-            value_flags=_EXEC_LIST_VALUE_FLAGS,
-        )
-        if len(tokens) == 1:
-            return tokens[0]
-        return ""
-
-    def _extract_exec_file_write_preview(
-        self,
-        *,
-        command: str,
-    ) -> _ExecFileWritePreview | None:
-        cwd, script = self._extract_exec_context(command=command)
-        if script == "":
-            return None
-
-        match = None
-        for candidate in (
-            _EXEC_FILE_WRITE_HEREDOC_RE,
-            _EXEC_FILE_WRITE_HEREDOC_REDIRECT_AFTER_RE,
-        ):
-            match = candidate.match(script)
-            if match is not None:
-                break
-
-        if match is None:
-            return None
-
-        path = self._resolve_exec_path(path=match.group("path"), cwd=cwd)
-        if path == "":
-            return None
-
-        return _ExecFileWritePreview(
-            path=path,
-            append=match.group("redirect") == ">>",
-        )
-
-    def _exec_search_option_parts(self, *, token: str) -> tuple[str, str | None]:
-        if token.startswith("--") and "=" in token:
-            flag, _, value = token.partition("=")
-            return flag, value
-        return token, None
-
-    def _is_exec_search_short_value_flag(self, *, token: str) -> bool:
-        if len(token) <= 2 or not token.startswith("-") or token.startswith("--"):
-            return False
-        return token[:2] in _EXEC_SEARCH_SHORT_VALUE_FLAGS
-
-    def _extract_exec_search_preview(
-        self,
-        *,
-        command: str,
-    ) -> _ExecSearchPreview | None:
-        cwd, script = self._extract_exec_context(command=command)
-        if script == "":
-            return None
-
-        segments = self._split_exec_segments(script=script)
-        if len(segments) != 1:
-            return None
-
-        with contextlib.suppress(ValueError):
-            argv = shlex.split(segments[0])
-            if len(argv) == 0:
-                return None
-
-            if any(token in {"&&", "||", ";"} for token in argv[1:]):
-                return None
-
-            executable = Path(argv[0]).name.lower()
-            if executable not in _EXEC_SEARCH_COMMANDS:
-                return None
-
-            query = ""
-            paths: list[str] = []
-            after_separator = False
-            index = 1
-            while index < len(argv):
-                token = argv[index]
-                if not after_separator and token == "--":
-                    after_separator = True
-                    index += 1
-                    continue
-
-                flag, attached_value = self._exec_search_option_parts(token=token)
-                if not after_separator and flag in _EXEC_SEARCH_QUERY_FLAGS:
-                    if attached_value is not None and attached_value != "":
-                        if query == "":
-                            query = attached_value
-                        index += 1
-                        continue
-                    if index + 1 >= len(argv):
-                        return None
-                    if query == "":
-                        query = argv[index + 1]
-                    index += 2
-                    continue
-
-                if not after_separator and token.startswith("-e") and token != "-e":
-                    if query == "":
-                        query = token[2:]
-                    index += 1
-                    continue
-
-                if not after_separator and flag in _EXEC_SEARCH_LONG_VALUE_FLAGS:
-                    index += 1 if attached_value is not None else 2
-                    continue
-
-                if not after_separator and self._is_exec_search_short_value_flag(
-                    token=token
-                ):
-                    index += 1
-                    continue
-
-                if not after_separator and token.startswith("-") and token != "-":
-                    index += 1
-                    continue
-
-                if query == "":
-                    query = token
-                else:
-                    paths.append(token)
-                index += 1
-
-            query = query.strip()
-            normalized_paths = tuple(
-                self._resolve_exec_path(path=path, cwd=cwd)
-                for path in paths
-                if isinstance(path, str) and path.strip() != ""
-            )
-            if query == "":
-                return None
-            return _ExecSearchPreview(query=query, paths=normalized_paths)
-
-        return None
-
-    def _extract_exec_exploration_preview(
-        self,
-        *,
-        command: str,
-    ) -> _ExecExplorationPreview | None:
-        cwd, script = self._extract_exec_context(command=command)
-        if script == "":
-            if cwd is not None and cwd != "":
-                return _ExecExplorationPreview(action="explore", path=cwd)
-            return None
-
-        segments = self._split_exec_segments(script=script)
-        if cwd is not None and len(segments) > 1:
-            if all(
-                self._is_exec_exploration_segment(segment=segment)
-                for segment in segments
-            ):
-                return _ExecExplorationPreview(action="explore", path=cwd)
-
-        with contextlib.suppress(ValueError):
-            argv = shlex.split(segments[0] if len(segments) == 1 else script)
-            if len(argv) == 0:
-                return None
-
-            path = self._exec_read_path_from_argv(argv=argv)
-            if path != "":
-                return _ExecExplorationPreview(
-                    action="read",
-                    path=self._resolve_exec_path(path=path, cwd=cwd),
-                )
-
-            path = self._exec_list_path_from_argv(argv=argv)
-            if path != "":
-                return _ExecExplorationPreview(
-                    action="list",
-                    path=self._resolve_exec_path(path=path, cwd=cwd),
-                )
-
-            executable = Path(argv[0]).name.lower()
-            if cwd is not None and executable in {"pwd", "find", *_EXEC_LIST_COMMANDS}:
-                return _ExecExplorationPreview(action="explore", path=cwd)
-
-        return None
-
     def _exec_search_target(self, *, search_preview: _ExecSearchPreview) -> str:
         if search_preview.path != "":
             return search_preview.path
@@ -1448,145 +1042,6 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 )
             )
         return tuple(details)
-
-    def _exec_exploration_headline(
-        self,
-        *,
-        status: str,
-        exploration_preview: _ExecExplorationPreview,
-    ) -> str:
-        path = exploration_preview.path
-        if exploration_preview.action == "read":
-            if status == "failed":
-                return f"Read Failed: {path}"
-            if status == "cancelled":
-                return f"Read Cancelled: {path}"
-            if self._is_active_state(state=status):
-                return f"Reading {path}"
-            return f"Read {path}"
-
-        if exploration_preview.action == "list":
-            if status == "failed":
-                return f"List Failed: {path}"
-            if status == "cancelled":
-                return f"List Cancelled: {path}"
-            if self._is_active_state(state=status):
-                return f"Listing {path}"
-            return f"Listed {path}"
-
-        if status == "failed":
-            return f"Exploration Failed: {path}"
-        if status == "cancelled":
-            return f"Exploration Cancelled: {path}"
-        if self._is_active_state(state=status):
-            return f"Exploring {path}"
-        return f"Explored {path}"
-
-    def _file_write_headline(
-        self,
-        *,
-        status: str,
-        file_write_preview: _ExecFileWritePreview,
-    ) -> str:
-        path = file_write_preview.path
-        if file_write_preview.append:
-            if status == "failed":
-                return f"Attempted to append file {path}"
-            if status == "cancelled":
-                return f"Cancelled appending file {path}"
-            if self._is_active_state(state=status):
-                return f"Appending {path}"
-            return f"Appended {path}"
-
-        if status == "failed":
-            return f"Attempted to write file {path}"
-        if status == "cancelled":
-            return f"Cancelled writing file {path}"
-        if self._is_active_state(state=status):
-            return f"Writing {path}"
-        return f"Wrote {path}"
-
-    def _exec_display(
-        self,
-        *,
-        status: str,
-        command: str,
-        file_write_preview: _ExecFileWritePreview | None = None,
-        search_preview: _ExecSearchPreview | None = None,
-        exploration_preview: _ExecExplorationPreview | None = None,
-    ) -> tuple[str, tuple[str, ...]]:
-        if file_write_preview is not None:
-            return (
-                self._file_write_headline(
-                    status=status,
-                    file_write_preview=file_write_preview,
-                ),
-                (),
-            )
-
-        if search_preview is not None:
-            return (
-                self._exec_search_headline(
-                    status=status,
-                    search_preview=search_preview,
-                ),
-                self._exec_search_details(search_preview=search_preview),
-            )
-
-        if exploration_preview is not None:
-            return (
-                self._exec_exploration_headline(
-                    status=status,
-                    exploration_preview=exploration_preview,
-                ),
-                (),
-            )
-
-        if command == "":
-            if status == "failed":
-                return "Command Failed", ()
-            if status == "cancelled":
-                return "Command Cancelled", ()
-            if self._is_active_state(state=status):
-                return "Running Command", ()
-            return "Ran Command", ()
-
-        if status == "failed":
-            return "Command Failed", (command,)
-        if status == "cancelled":
-            return "Command Cancelled", (command,)
-        if self._is_active_state(state=status):
-            return "Running Command", (command,)
-        return "Ran Command", (command,)
-
-    def _exec_summary(
-        self,
-        *,
-        status: str,
-        command: str,
-        headline: str,
-        search_preview: _ExecSearchPreview | None = None,
-        exploration_preview: _ExecExplorationPreview | None = None,
-    ) -> str:
-        if search_preview is not None:
-            return self._exec_search_headline(
-                status=status,
-                search_preview=search_preview,
-            )
-
-        if exploration_preview is not None:
-            return self._exec_exploration_headline(
-                status=status,
-                exploration_preview=exploration_preview,
-            )
-
-        if command != "":
-            text = command
-            if self._is_active_state(state=status):
-                text = f"Run {command}"
-            return _truncate_text(text=text, limit=280)
-
-        return _truncate_text(text=headline, limit=280)
 
     def _apply_patch_path(self, *, patch: str) -> str:
         for pattern in _APPLY_PATCH_PATH_RES:
@@ -1664,6 +1119,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="exec",
                 state=state,
                 method=message_type,
+                turn_id=turn_id,
                 item_id=item_id,
                 item_type="tool_call",
                 summary=_truncate_text(text=headline, limit=280),
@@ -1699,6 +1155,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="exec",
                 state=state,
                 method=message_type,
+                turn_id=turn_id,
                 item_id=item_id,
                 item_type="tool_call",
                 summary=_truncate_text(text=headline, limit=280),
@@ -1727,6 +1184,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             kind="file",
             state=state,
             method=message_type,
+            turn_id=turn_id,
             item_id=item_id,
             item_type="tool_call",
             summary=_truncate_text(text=headline, limit=280),
@@ -1791,6 +1249,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="thread",
                 state=state,
                 method=message_type,
+                turn_id=turn_id,
                 item_id=item_id,
                 item_type="tool_call",
                 summary=_truncate_text(text=new_thread_display.name, limit=280),
@@ -1821,63 +1280,31 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         if kind == "exec":
             command = self._extract_tool_command(tool=tool, arguments=arguments)
-            file_write_preview = self._extract_exec_file_write_preview(command=command)
-            search_preview = None
-            exploration_preview = None
-            if file_write_preview is None:
-                search_preview = self._extract_exec_search_preview(command=command)
-            if file_write_preview is None and search_preview is None:
-                exploration_preview = self._extract_exec_exploration_preview(
-                    command=command
-                )
+            shell_analysis = analyze_shell_command(command=command)
+            shell_phase = shell_analysis.display.phase_for_state(state=state)
 
-            headline, details = self._exec_display(
-                status=state,
-                command=command,
-                file_write_preview=file_write_preview,
-                search_preview=search_preview,
-                exploration_preview=exploration_preview,
-            )
-            summary = self._exec_summary(
-                status=state,
-                command=command,
-                headline=headline,
-                search_preview=search_preview,
-                exploration_preview=exploration_preview,
-            )
-
-            if file_write_preview is not None:
+            if shell_analysis.display.event_kind == "file":
                 return _NormalizedThreadEvent(
                     source="agent",
                     name=message_type,
                     kind="file",
                     state=state,
                     method=message_type,
+                    turn_id=turn_id,
                     item_id=item_id,
                     item_type="tool_call",
-                    summary=summary,
-                    headline=headline,
-                    path=file_write_preview.path,
+                    summary=shell_phase.summary,
+                    headline=shell_phase.headline,
+                    path=shell_analysis.display.path,
+                    preview=shell_analysis.display.preview,
                     data=data,
                     correlation_key=f"tool:{item_id}",
                 )
 
-            if search_preview is not None and search_preview.path != "":
-                path = search_preview.path
-            elif exploration_preview is not None:
-                path = exploration_preview.path
-
-            exploration_path = ""
-            if search_preview is not None and search_preview.path != "":
-                exploration_path = search_preview.path
-            elif exploration_preview is not None:
-                exploration_path = exploration_preview.path
+            exploration_path = shell_analysis.display.coalesce_path
             if exploration_path != "":
                 correlation_key = f"turn.explore:{turn_id}:{exploration_path}"
                 retain_correlation = True
-
-            if preview == "":
-                preview = self._tool_result_preview(result=result)
 
             return _NormalizedThreadEvent(
                 source="agent",
@@ -1885,13 +1312,14 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind=kind,
                 state=state,
                 method=message_type,
+                turn_id=turn_id,
                 item_id=item_id,
                 item_type="tool_call",
-                summary=summary,
-                headline=headline,
-                details=details,
-                preview=preview,
-                path=path,
+                summary=shell_phase.summary,
+                headline=shell_phase.headline,
+                details=shell_analysis.display.details,
+                preview=shell_analysis.display.preview,
+                path="",
                 data=data,
                 correlation_key=correlation_key,
                 retain_correlation=retain_correlation,
@@ -1920,6 +1348,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind=kind,
                 state=state,
                 method=message_type,
+                turn_id=turn_id,
                 item_id=item_id,
                 item_type="tool_call",
                 summary=summary,
@@ -1955,6 +1384,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind=kind,
                 state=state,
                 method=message_type,
+                turn_id=turn_id,
                 item_id=item_id,
                 item_type="tool_call",
                 summary=_truncate_text(text=headline, limit=280),
@@ -1992,6 +1422,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             kind=kind,
             state=state,
             method=message_type,
+            turn_id=turn_id,
             item_id=item_id,
             item_type="tool_call",
             summary=_truncate_text(text=headline, limit=280),
@@ -2027,6 +1458,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="turn",
                 state="in_progress",
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.turn_id,
                 item_type="turn",
                 summary="Thinking",
@@ -2050,6 +1482,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="turn",
                 state=_terminal_state_from_error(message.error),
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.turn_id,
                 item_type="turn",
                 summary=summary,
@@ -2067,6 +1500,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="turn",
                 state="cancelled",
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.turn_id,
                 item_type="turn",
                 summary="Turn interrupted",
@@ -2081,6 +1515,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="turn",
                 state="accepted",
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.source_message_id,
                 item_type="turn_steer",
                 summary="Queued turn steering",
@@ -2096,6 +1531,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="turn",
                 state="completed",
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.source_message_id,
                 item_type="turn_steer",
                 summary="Applied turn steering",
@@ -2111,6 +1547,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="turn",
                 state="failed",
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.source_message_id,
                 item_type="turn_steer",
                 summary="Rejected turn steering",
@@ -2134,6 +1571,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 kind="approval",
                 state="pending",
                 method=message.type,
+                turn_id=message.turn_id,
                 item_id=message.item_id,
                 item_type="tool_call",
                 summary="Tool approval requested",
@@ -2213,6 +1651,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 "created_at": now,
                 "updated_at": now,
             }
+            if event.turn_id != "":
+                attributes["turn_id"] = event.turn_id
             if event.data != "":
                 attributes["data"] = event.data
             event_element = messages.append_child(
@@ -2224,6 +1664,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             event_element.set_attribute("kind", event.kind)
             event_element.set_attribute("state", state)
             event_element.set_attribute("method", event.method)
+            if event.turn_id != "":
+                event_element.set_attribute("turn_id", event.turn_id)
             event_element.set_attribute("item_id", event.item_id)
             event_element.set_attribute("item_type", event.item_type)
             event_element.set_attribute("path", event.path)
@@ -2276,6 +1718,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
     def _thread_status_pending_messages_attribute_name(self) -> str:
         return f"thread.status.pending_messages.{self.path}"
+
+    def _thread_status_pending_item_id_attribute_name(self) -> str:
+        return f"thread.status.pending_item_id.{self.path}"
 
     def processing_thread_status_mode(self) -> ThreadStatusMode:
         return "steerable"
@@ -2335,6 +1780,10 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             self._thread_status_started_at_attribute_name(),
             self._thread_status_started_at_value,
         )
+        await self._set_local_participant_attribute(
+            self._thread_status_pending_item_id_attribute_name(),
+            self._thread_status_pending_item_id_value,
+        )
 
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._thread_status_lock:
@@ -2373,6 +1822,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             self._thread_status_value = None
             self._thread_status_mode_value = None
             self._thread_status_started_at_value = None
+            self._thread_status_pending_item_id_value = None
             await self._write_thread_status_attributes()
             return
 
@@ -2381,7 +1831,11 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             mode if mode is not None else self.processing_thread_status_mode()
         )
         started_at = self._thread_status_started_at_value
-        if started_at is None:
+        if (
+            started_at is None
+            or self._thread_status_value != normalized_status
+            or self._thread_status_mode_value != normalized_mode
+        ):
             started_at = _now_iso()
 
         if (
@@ -2449,6 +1903,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 return
             if key is not None:
                 self._thread_status_key = key
+            self._thread_status_pending_item_id_value = (
+                event.item_id.strip() if event.item_id.strip() != "" else None
+            )
             await self.set_thread_status(status=text)
             return
 
@@ -2458,8 +1915,10 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             tracked = self._thread_status_key
             if tracked is not None and tracked == key:
                 self._thread_status_key = None
+                self._thread_status_pending_item_id_value = None
                 await self.set_thread_status(status=fallback_status)
             return
 
         if state in _TERMINAL_STATES:
+            self._thread_status_pending_item_id_value = None
             await self.set_thread_status(status=fallback_status)

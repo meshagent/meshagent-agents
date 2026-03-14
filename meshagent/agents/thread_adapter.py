@@ -349,22 +349,28 @@ class ThreadAdapter(ABC):
         *,
         text: str,
         participant: Participant | str,
+        message_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         attachments: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         self.ensure_member(participant=participant)
         doc_messages = self._ensure_messages_element()
 
+        attributes: dict[str, Any] = {
+            "text": text,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "author_name": participant.get_attribute("name")
+            if isinstance(participant, Participant)
+            else participant,
+        }
+        if isinstance(message_id, str) and message_id.strip() != "":
+            attributes["id"] = message_id.strip()
+        if isinstance(turn_id, str) and turn_id.strip() != "":
+            attributes["turn_id"] = turn_id.strip()
+
         message = doc_messages.append_child(
             tag_name="message",
-            attributes={
-                "text": text,
-                "created_at": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "author_name": participant.get_attribute("name")
-                if isinstance(participant, Participant)
-                else participant,
-            },
+            attributes=attributes,
         )
 
         if attachments is None:
@@ -388,6 +394,7 @@ class ThreadAdapter(ABC):
         self,
         *,
         message_id: Optional[str],
+        turn_id: Optional[str] = None,
         image_id: Optional[str] = None,
         mime_type: Optional[str] = None,
         created_at: Optional[str] = None,
@@ -426,17 +433,23 @@ class ThreadAdapter(ABC):
             if not isinstance(author_name, str):
                 author_name = ""
 
+            message_attributes: dict[str, Any] = {
+                "id": resolved_message_id,
+                "text": "",
+                "created_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "author_name": author_name,
+            }
+            if isinstance(turn_id, str) and turn_id.strip() != "":
+                message_attributes["turn_id"] = turn_id.strip()
+
             message = messages.append_child(
                 tag_name="message",
-                attributes={
-                    "id": resolved_message_id,
-                    "text": "",
-                    "created_at": datetime.now(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
-                    "author_name": author_name,
-                },
+                attributes=message_attributes,
             )
+        elif isinstance(turn_id, str) and turn_id.strip() != "":
+            message.set_attribute("turn_id", turn_id.strip())
 
         image = None
         for child in message.get_children():
@@ -482,6 +495,28 @@ class ThreadAdapter(ABC):
             image.set_attribute(key, value)
 
         return resolved_message_id
+
+    def set_message_turn_id(
+        self,
+        *,
+        message_id: str,
+        turn_id: str,
+    ) -> bool:
+        normalized_message_id = message_id.strip()
+        normalized_turn_id = turn_id.strip()
+        if normalized_message_id == "" or normalized_turn_id == "":
+            return False
+
+        messages = self._ensure_messages_element()
+        for child in messages.get_children():
+            if child.tag_name != "message":
+                continue
+            if child.get_attribute("id") != normalized_message_id:
+                continue
+            child.set_attribute("turn_id", normalized_turn_id)
+            return True
+
+        return False
 
 
 # Backwards-compatible import path for existing callers.
