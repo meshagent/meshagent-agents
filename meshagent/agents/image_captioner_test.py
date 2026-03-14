@@ -53,6 +53,7 @@ class _FakeAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
@@ -61,6 +62,7 @@ class _FakeAdapter(LLMAdapter):
         del toolkits
         del output_schema
         del event_handler
+        del steering_callback
         del model
         del on_behalf_of
         self.last_context = context

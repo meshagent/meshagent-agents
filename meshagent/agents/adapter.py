@@ -26,6 +26,7 @@ ToolCallApprovalHandler = Callable[
     [ToolContext, ToolCallApprovalRequest],
     Awaitable[bool],
 ]
+SteeringCallback = Callable[[], Awaitable[bool]]
 
 
 class ToolResponseAdapter(ABC):
@@ -132,6 +133,7 @@ class LLMAdapter(Generic[TEvent]):
         toolkits: list[Toolkit],
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[TEvent], None]] = None,
+        steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[RemoteParticipant] = None,
         options: Optional[dict] = None,
@@ -168,10 +170,12 @@ class MessageStreamLLMAdapter(LLMAdapter):
         toolkits: list[Toolkit],
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[TEvent], None]] = None,
+        steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[RemoteParticipant] = None,
         options: Optional[dict] = None,
     ) -> Any:
+        del steering_callback
         participant = room.messaging.get_participant_by_name(self.participant_name)
         if participant is None:
             raise RoomException("participant is not currently connected")

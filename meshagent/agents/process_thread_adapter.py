@@ -1922,7 +1922,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 source="agent",
                 name=message.type,
                 kind="turn",
-                state="queued",
+                state="accepted",
                 method=message.type,
                 item_id=message.source_message_id,
                 item_type="turn_steer",

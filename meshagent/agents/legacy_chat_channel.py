@@ -264,7 +264,10 @@ class LegacyChatChannel(Channel):
                 thread_id=thread_id,
                 participant_id=sender.id,
             )
-            self._touch_thread_in_index(path=thread_id)
+            if self._should_touch_thread_index_for_room_message(
+                message_type=message.type
+            ):
+                self._touch_thread_in_index(path=thread_id)
 
         try:
             agent_message = self._agent_message_from_room_message(message=message)
@@ -993,7 +996,6 @@ class LegacyChatChannel(Channel):
                 thread_id=thread_id,
                 participant_id=sender.id,
             )
-            self._touch_thread_in_index(path=thread_id)
             self._send_thread_tool_providers(
                 to=sender,
                 path=thread_id,
@@ -1004,6 +1006,15 @@ class LegacyChatChannel(Channel):
             return True
 
         return False
+
+    @staticmethod
+    def _should_touch_thread_index_for_room_message(*, message_type: str) -> bool:
+        return message_type not in {
+            "opened",
+            "cleared",
+            "get_thread_toolkit_builders",
+            "typing",
+        }
 
     def _register_open_participant(
         self,

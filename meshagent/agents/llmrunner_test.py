@@ -169,10 +169,12 @@ class _FakeLLMAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
     ):
+        del steering_callback
         self.calls.append(
             {
                 "context": context,

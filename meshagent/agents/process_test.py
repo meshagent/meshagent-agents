@@ -19,6 +19,8 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
+    AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
@@ -44,6 +46,7 @@ from meshagent.agents.messages import (
     TurnEnded,
     TurnInterrupt,
     TurnStarted,
+    TurnSteerAccepted,
     TurnSteer,
 )
 from meshagent.agents.process import (
@@ -377,11 +380,13 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
     ) -> Any:
         del output_schema
+        del steering_callback
         del on_behalf_of
         del options
         self.calls.append(
@@ -455,6 +460,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
@@ -464,6 +470,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         del toolkits
         del output_schema
         del model
+        del steering_callback
         del on_behalf_of
         del options
         if event_handler is not None:
@@ -493,12 +500,14 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
     ) -> Any:
         del output_schema
         del event_handler
+        del steering_callback
         del on_behalf_of
         del options
         call_index = len(self.calls)
@@ -514,6 +523,172 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
         self.started_events[call_index].set()
         await self.release_events[call_index].wait()
         return {"call_index": call_index}
+
+
+class _ToolBoundarySteeringLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.calls: list[dict[str, Any]] = []
+        self.call_started = asyncio.Event()
+        self.release_tool_boundary = asyncio.Event()
+        self.tool_boundary_applied = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        room,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+    ) -> Any:
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
+        del model
+        del on_behalf_of
+        del options
+
+        self.call_started.set()
+        await self.release_tool_boundary.wait()
+        messages_before_boundary = [*context.messages]
+        steered = False
+        if steering_callback is not None:
+            steered = await steering_callback()
+        self.calls.append(
+            {
+                "messages_before_boundary": messages_before_boundary,
+                "messages_after_boundary": [*context.messages],
+                "steered": steered,
+            }
+        )
+        self.tool_boundary_applied.set()
+        return {"ok": True}
+
+
+class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.call_started = asyncio.Event()
+        self.release_tool_boundary = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+    ):
+        def publish(event: dict[str, Any]) -> None:
+            event_type = event["type"]
+            if event_type == "tool_started":
+                callback(
+                    AgentToolCallStarted(
+                        type=AGENT_EVENT_TOOL_CALL_STARTED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="tool-1",
+                        toolkit="storage",
+                        tool="write_file",
+                        arguments={
+                            "path": "/website/openai3/index.html",
+                            "text": "<html>hi</html>",
+                        },
+                    )
+                )
+                return
+
+            if event_type == "tool_ended":
+                callback(
+                    AgentToolCallEnded(
+                        type=AGENT_EVENT_TOOL_CALL_ENDED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="tool-1",
+                        result=JsonContent(
+                            json={"ok": True, "path": "/website/openai3/index.html"}
+                        ),
+                    )
+                )
+                return
+
+            if event_type == "text":
+                callback(
+                    AgentTextContentStarted(
+                        type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="assistant-1",
+                    )
+                )
+                callback(
+                    AgentTextContentDelta(
+                        type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="assistant-1",
+                        text=event["text"],
+                    )
+                )
+                callback(
+                    AgentTextContentEnded(
+                        type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="assistant-1",
+                    )
+                )
+
+        return publish
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        room,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+    ) -> Any:
+        del context
+        del room
+        del toolkits
+        del output_schema
+        del model
+        del on_behalf_of
+        del options
+
+        if event_handler is not None:
+            event_handler({"type": "tool_started"})
+        self.call_started.set()
+        await self.release_tool_boundary.wait()
+        if event_handler is not None:
+            event_handler({"type": "tool_ended"})
+        if steering_callback is not None:
+            await steering_callback()
+        if event_handler is not None:
+            event_handler({"type": "text", "text": "steered reply"})
+        return {"ok": True}
 
 
 class _RestoringLLMAgentProcess(LLMAgentProcess):
@@ -695,6 +870,7 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
@@ -704,6 +880,7 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
         del output_schema
         del event_handler
         del model
+        del steering_callback
         del on_behalf_of
         del options
         if self._approval_handler is None:
@@ -804,6 +981,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
@@ -812,6 +990,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         del toolkits
         del output_schema
         del model
+        del steering_callback
         del on_behalf_of
         del options
         self.calls.append({"messages": [*context.messages]})
@@ -880,6 +1059,7 @@ class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
@@ -888,6 +1068,7 @@ class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
         del toolkits
         del output_schema
         del model
+        del steering_callback
         del on_behalf_of
         del options
 
@@ -933,6 +1114,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
+        steering_callback=None,
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
@@ -941,6 +1123,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
         del toolkits
         del output_schema
         del model
+        del steering_callback
         del on_behalf_of
         del options
 
@@ -1673,6 +1856,93 @@ async def test_llm_agent_process_processes_queued_steer_messages_before_turn_end
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_applies_queued_steer_at_tool_boundary() -> None:
+    adapter = _ToolBoundarySteeringLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = LLMAgentProcess(
+        thread_id="thread-1",
+        room=object(),  # type: ignore[arg-type]
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    try:
+        turn_start_message_id = "00000000-0000-0000-0000-000000000030"
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    message_id=turn_start_message_id,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "first"}],
+                )
+            )
+        )
+
+        await asyncio.wait_for(adapter.call_started.wait(), timeout=1)
+
+        started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
+        turn_id = started_payload["turn_id"]
+
+        steer_message_id = "00000000-0000-0000-0000-000000000031"
+        process.send(
+            Message(
+                data=TurnSteer(
+                    type=AGENT_MESSAGE_TURN_STEER,
+                    message_id=steer_message_id,
+                    thread_id="thread-1",
+                    turn_id=turn_id,
+                    content=[{"type": "text", "text": "second"}],
+                )
+            )
+        )
+
+        await _wait_for(
+            lambda: (
+                len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED))
+                == 1
+            )
+        )
+        accepted_payloads = supervisor.payloads(
+            message_type=AGENT_EVENT_TURN_STEER_ACCEPTED
+        )
+        assert [payload["source_message_id"] for payload in accepted_payloads] == [
+            steer_message_id
+        ]
+        assert supervisor.payloads(message_type=AGENT_EVENT_TURN_STEERED) == []
+        assert supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED) == []
+
+        adapter.release_tool_boundary.set()
+
+        await asyncio.wait_for(adapter.tool_boundary_applied.wait(), timeout=1)
+        await _wait_for(
+            lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+        )
+
+        assert len(adapter.calls) == 1
+        assert adapter.calls[0]["messages_before_boundary"] == [
+            {"role": "user", "content": "first"}
+        ]
+        assert adapter.calls[0]["messages_after_boundary"] == [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ]
+        assert adapter.calls[0]["steered"] is True
+
+        steered_payloads = supervisor.payloads(message_type=AGENT_EVENT_TURN_STEERED)
+        assert [payload["source_message_id"] for payload in steered_payloads] == [
+            steer_message_id
+        ]
+        assert steered_payloads[0]["turn_id"] == turn_id
+
+        ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
+        assert ended_payload["error"] is None
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_rejects_steer_with_thread_id_on_event() -> None:
     adapter = _RecordingLLMAdapter()
     supervisor = _RecordingSupervisor()
@@ -1716,7 +1986,7 @@ async def test_llm_agent_process_rejects_steer_with_thread_id_on_event() -> None
 
 
 @pytest.mark.asyncio
-async def test_llm_agent_process_rejects_queued_steer_when_turn_is_interrupted() -> (
+async def test_llm_agent_process_restarts_queued_steer_when_turn_is_interrupted() -> (
     None
 ):
     adapter = _QueuedSteerLLMAdapter()
@@ -1768,6 +2038,7 @@ async def test_llm_agent_process_rejects_queued_steer_when_turn_is_interrupted()
         Message(
             data=TurnInterrupt(
                 type=AGENT_MESSAGE_TURN_INTERRUPT,
+                message_id="00000000-0000-0000-0000-000000000009",
                 thread_id="thread-1",
                 turn_id=turn_id,
             )
@@ -1779,21 +2050,58 @@ async def test_llm_agent_process_rejects_queued_steer_when_turn_is_interrupted()
     )
     await _wait_for(
         lambda: (
-            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED)) == 1
+            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_INTERRUPT_ACCEPTED))
+            == 1
         )
     )
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_INTERRUPTED)) == 1
+    )
+    await asyncio.wait_for(adapter.started_events[1].wait(), timeout=1)
 
-    rejected_payload = supervisor.payloads(
-        message_type=AGENT_EVENT_TURN_STEER_REJECTED
+    interrupt_accepted_payload = supervisor.payloads(
+        message_type=AGENT_EVENT_TURN_INTERRUPT_ACCEPTED
     )[0]
-    uuid.UUID(rejected_payload["message_id"])
-    assert rejected_payload["thread_id"] == "thread-1"
-    assert rejected_payload["turn_id"] == turn_id
-    assert rejected_payload["source_message_id"] == steer_message_id
-    assert rejected_payload["error"]["code"] == "turn_ended"
+    assert interrupt_accepted_payload["thread_id"] == "thread-1"
+    assert interrupt_accepted_payload["turn_id"] == turn_id
+    assert (
+        interrupt_accepted_payload["source_message_id"]
+        == "00000000-0000-0000-0000-000000000009"
+    )
+
+    interrupted_payload = supervisor.payloads(
+        message_type=AGENT_EVENT_TURN_INTERRUPTED
+    )[0]
+    assert interrupted_payload["thread_id"] == "thread-1"
+    assert interrupted_payload["turn_id"] == turn_id
+    assert (
+        interrupted_payload["source_message_id"]
+        == "00000000-0000-0000-0000-000000000009"
+    )
 
     ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
     assert ended_payload["error"]["code"] == "cancelled"
+    assert supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED) == []
+
+    restarted_started_payload = supervisor.payloads(
+        message_type=AGENT_EVENT_TURN_STARTED
+    )[1]
+    assert restarted_started_payload["source_message_id"] == steer_message_id
+    assert restarted_started_payload["turn_id"] != turn_id
+
+    assert adapter.calls[1]["messages"] == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
+
+    adapter.release_events[1].set()
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 2
+    )
+    restarted_ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[
+        1
+    ]
+    assert restarted_ended_payload["error"] is None
 
     await process.stop(supervisor)
 
@@ -1850,6 +2158,7 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
         Message(
             data=TurnInterrupt(
                 type=AGENT_MESSAGE_TURN_INTERRUPT,
+                message_id="00000000-0000-0000-0000-000000000010",
                 thread_id="thread-1",
                 turn_id=turn_id,
             )
@@ -1861,23 +2170,33 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
     await _wait_for(
-        lambda: (
-            len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED)) == 1
-        )
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_INTERRUPTED)) == 1
     )
 
     ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
     assert ended_payload["error"]["code"] == "cancelled"
-
-    rejected_payload = supervisor.payloads(
-        message_type=AGENT_EVENT_TURN_STEER_REJECTED
+    interrupted_payload = supervisor.payloads(
+        message_type=AGENT_EVENT_TURN_INTERRUPTED
     )[0]
-    assert rejected_payload["source_message_id"] == steer_message_id
-    assert rejected_payload["error"]["code"] == "turn_ended"
+    assert interrupted_payload["source_message_id"] == (
+        "00000000-0000-0000-0000-000000000010"
+    )
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)) == 2
+    )
+    restarted_started_payload = supervisor.payloads(
+        message_type=AGENT_EVENT_TURN_STARTED
+    )[1]
+    assert restarted_started_payload["source_message_id"] == steer_message_id
 
+    assert supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_REJECTED) == []
     assert supervisor.payloads(message_type=AGENT_EVENT_TURN_STEERED) == []
     assert supervisor.payloads(message_type=AGENT_EVENT_TEXT_CONTENT_DELTA) == []
-    assert len(adapter.calls) == 1
+    assert len(adapter.calls) == 2
+    assert adapter.calls[1]["messages"] == [
+        {"role": "user", "content": "tell a story"},
+        {"role": "user", "content": "change direction"},
+    ]
 
     await process.stop(supervisor)
 
@@ -2760,6 +3079,61 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_queued_steer(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+        await _wait_for(
+            lambda: (
+                (
+                    "thread.status./threads/test.thread",
+                    "Thinking",
+                )
+                in room.local_participant.set_attribute_calls
+            )
+        )
+
+        previous_calls = list(room.local_participant.set_attribute_calls)
+        adapter.push_message(
+            message=TurnSteerAccepted(
+                type=AGENT_EVENT_TURN_STEER_ACCEPTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="steer-1",
+            )
+        )
+        await real_sleep(0)
+
+        assert (
+            "thread.status./threads/test.thread",
+            "Queued turn steering",
+        ) not in room.local_participant.set_attribute_calls
+        assert room.local_participant.set_attribute_calls == previous_calls
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_grep_items(
     monkeypatch,
 ) -> None:
@@ -3204,6 +3578,85 @@ async def test_agent_process_thread_adapter_renders_new_thread_tool_as_thread_re
         assert thread_event.get_attribute("path") == "/threads/generated.thread"
     finally:
         await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_thread_adapter_inserts_applied_steer_before_post_tool_response() -> (
+    None
+):
+    room = _ThreadRoom(document=_ThreadDocument())
+    thread_adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    llm_adapter = _ToolBoundaryThreadOrderingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = LLMAgentProcess(
+        thread_id="/threads/test.thread",
+        room=room,
+        llm_adapter=llm_adapter,
+        thread_adapter=thread_adapter,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/test.thread",
+                    content=[{"type": "text", "text": "make the website"}],
+                ),
+            )
+        )
+
+        await asyncio.wait_for(llm_adapter.call_started.wait(), timeout=1)
+
+        started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
+        turn_id = started_payload["turn_id"]
+        process.send(
+            Message(
+                sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+                data=TurnSteer(
+                    type=AGENT_MESSAGE_TURN_STEER,
+                    message_id="00000000-0000-0000-0000-000000000041",
+                    thread_id="/threads/test.thread",
+                    turn_id=turn_id,
+                    content=[{"type": "text", "text": "nevermind"}],
+                ),
+            )
+        )
+
+        await _wait_for(
+            lambda: (
+                len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED))
+                == 1
+            )
+        )
+        llm_adapter.release_tool_boundary.set()
+        await _wait_for(
+            lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+        )
+        await _wait_for(lambda: len(room.sync.document.message_elements) >= 3)
+        await _wait_for(lambda: len(room.sync.document.event_elements) >= 1)
+
+        ordered_children = room.sync.document.root.get_children_by_tag_name("messages")[
+            0
+        ].get_children()
+        steer_index = next(
+            index
+            for index, child in enumerate(ordered_children)
+            if child.tag_name == "message"
+            and child.get_attribute("text") == "nevermind"
+        )
+        assistant_index = next(
+            index
+            for index, child in enumerate(ordered_children)
+            if child.tag_name == "message"
+            and child.get_attribute("author_name") == "assistant"
+            and child.get_attribute("text") == "steered reply"
+        )
+        assert steer_index < assistant_index
+    finally:
+        await process.stop(supervisor)
 
 
 @pytest.mark.asyncio

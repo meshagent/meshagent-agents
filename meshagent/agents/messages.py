@@ -12,6 +12,8 @@ AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
 AGENT_EVENT_THREAD_CLEARED = "meshagent.agent.thread.cleared"
 AGENT_EVENT_TURN_START_ACCEPTED = "meshagent.agent.turn.start.accepted"
+AGENT_EVENT_TURN_INTERRUPT_ACCEPTED = "meshagent.agent.turn.interrupt.accepted"
+AGENT_EVENT_TURN_INTERRUPTED = "meshagent.agent.turn.interrupted"
 AGENT_EVENT_TURN_STEER_ACCEPTED = "meshagent.agent.turn.steer.accepted"
 AGENT_EVENT_TURN_STEERED = "meshagent.agent.turn.steered"
 AGENT_EVENT_TURN_STEER_REJECTED = "meshagent.agent.turn.steer.rejected"
@@ -101,6 +103,18 @@ class ThreadCleared(AgentMessage):
 
 class TurnStartAccepted(AgentMessage):
     type: Literal[AGENT_EVENT_TURN_START_ACCEPTED]
+    source_message_id: str
+
+
+class TurnInterruptAccepted(AgentMessage):
+    type: Literal[AGENT_EVENT_TURN_INTERRUPT_ACCEPTED]
+    turn_id: str
+    source_message_id: str
+
+
+class TurnInterrupted(AgentMessage):
+    type: Literal[AGENT_EVENT_TURN_INTERRUPTED]
+    turn_id: str
     source_message_id: str
 
 

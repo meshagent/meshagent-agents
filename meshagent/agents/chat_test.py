@@ -17,6 +17,7 @@ from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api import RoomException
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
+from meshagent.openai.tools.responses_adapter import MCPToolkitBuilder
 from meshagent.tools import ToolContext, ToolkitBuilder, Toolkit
 
 
@@ -229,6 +230,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
@@ -237,6 +239,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         del room
         del toolkits
         del event_handler
+        del steering_callback
         del on_behalf_of
         del options
         self.calls.append({"output_schema": output_schema, "model": model})
@@ -267,6 +270,7 @@ class _SessionRequiredThreadNameAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
@@ -275,6 +279,7 @@ class _SessionRequiredThreadNameAdapter(LLMAdapter):
         del toolkits
         del output_schema
         del event_handler
+        del steering_callback
         del model
         del on_behalf_of
         del options
@@ -300,6 +305,7 @@ class _CaptureChatAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
@@ -308,6 +314,7 @@ class _CaptureChatAdapter(LLMAdapter):
         del toolkits
         del output_schema
         del event_handler
+        del steering_callback
         del model
         del on_behalf_of
         del options
@@ -334,6 +341,11 @@ class _ExampleToolkitBuilder(ToolkitBuilder):
 class _ChatBotWithToolBuilders(ChatBot):
     def get_toolkit_builders(self) -> list[ToolkitBuilder]:
         return [_ExampleToolkitBuilder()]
+
+
+class _ChatBotWithMCPToolkitBuilder(ChatBot):
+    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
+        return [MCPToolkitBuilder()]
 
 
 class _ChatBotAlwaysReplies(ChatBot):
@@ -620,6 +632,25 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     queued = queue.items[0]
     assert queued.message["tools"] == []
     assert queued.message["store"] is True
+
+
+@pytest.mark.asyncio
+async def test_new_thread_tool_schema_supports_mcp_toolkit_builder() -> None:
+    adapter = _FakeThreadNameAdapter(generated_thread_name="MCP")
+    bot = _ChatBotWithMCPToolkitBuilder(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+
+    tool = await _new_thread_tool(bot)
+    tools_schema = tool.input_schema["properties"]["message"]["properties"]["tools"]
+    items_schema = tools_schema["anyOf"][0]["items"]
+    headers_schema = items_schema["$defs"]["MCPServer"]["properties"]["headers"][
+        "anyOf"
+    ][0]
+
+    assert headers_schema["type"] == "array"
+    assert headers_schema["items"]["$ref"] == "#/$defs/Header"
+    assert items_schema["$defs"]["Header"]["additionalProperties"] is False
 
 
 @pytest.mark.asyncio

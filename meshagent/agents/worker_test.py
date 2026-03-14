@@ -162,11 +162,12 @@ class _FakeLLMAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
     ):
-        del context, room, toolkits, on_behalf_of, options
+        del context, room, toolkits, steering_callback, on_behalf_of, options
         self.calls.append(
             {
                 "output_schema": output_schema,
@@ -200,11 +201,20 @@ class _FakeDecisionLLMAdapter(LLMAdapter):
         toolkits,
         output_schema=None,
         event_handler=None,
+        steering_callback=None,
         model=None,
         on_behalf_of=None,
         options: Optional[dict] = None,
     ):
-        del context, room, toolkits, event_handler, on_behalf_of, options
+        del (
+            context,
+            room,
+            toolkits,
+            event_handler,
+            steering_callback,
+            on_behalf_of,
+            options,
+        )
         self.calls.append({"output_schema": output_schema, "model": model})
         return {"summary": self._summary}
 

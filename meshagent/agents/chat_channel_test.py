@@ -805,10 +805,7 @@ async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_rep
             )
         )
 
-        entries = sync.document.root.get_children()
-        assert len(entries) == 1
-        assert entries[0].get_attribute("path") == "/threads/chat/example.thread"
-        assert entries[0].get_attribute("name") == "Example"
+        assert sync.document.root.get_children() == []
 
         room.messaging.emit_message(
             RoomMessage(
@@ -835,3 +832,53 @@ async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_rep
         await channel.stop(supervisor)
 
     assert sync.close_calls == ["/threads/chat/index.threadl"]
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_does_not_bump_thread_index_on_open_or_tool_provider_request() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    existing_entry = sync.document.root.append_child(
+        tag_name="thread",
+        attributes={
+            "path": "/threads/chat/example.thread",
+            "name": "Example",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
+        },
+    )
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+        toolkit_builders=[_FakeToolkitBuilder(name="search")],
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="opened",
+                message={"path": "/threads/chat/example.thread"},
+            )
+        )
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="get_thread_toolkit_builders",
+                message={"path": "/threads/chat/example.thread"},
+            )
+        )
+
+        assert existing_entry.get_attribute("modified_at") == "2024-01-01T00:00:00Z"
+    finally:
+        await channel.stop(supervisor)
