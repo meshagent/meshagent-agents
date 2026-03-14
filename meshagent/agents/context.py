@@ -32,7 +32,6 @@ class AgentSessionContext:
 
         self.previous_response_id = previous_response_id
         self._previous_messages = previous_messages
-        self._deferred_messages = []
         self._metadata = metadata or {}
 
         self.instructions = instructions
@@ -69,10 +68,6 @@ class AgentSessionContext:
         return self._system_role
 
     @property
-    def deferred_messages(self):
-        return self._deferred_messages
-
-    @property
     def previous_messages(self):
         return self._previous_messages
 
@@ -88,8 +83,6 @@ class AgentSessionContext:
         self.previous_response_id = id
         self._previous_messages.extend(self.messages)
         self.messages.clear()
-        self.messages.extend(self._deferred_messages)
-        self._deferred_messages.clear()
 
     def replace_rules(self, rules: list[str]):
         system_message = None
@@ -183,15 +176,10 @@ class AgentSessionContext:
         else:
             return self.instructions
 
-    def append_assistant_message(self, message: str, deferred: bool = False) -> dict:
-        if deferred:
-            m = {"role": "assistant", "content": message}
-            self.deferred_messages.append(m)
-            return m
-        else:
-            m = {"role": "assistant", "content": message}
-            self.messages.append(m)
-            return m
+    def append_assistant_message(self, message: str) -> dict:
+        m = {"role": "assistant", "content": message}
+        self.messages.append(m)
+        return m
 
     def append_user_message(self, message: str) -> dict:
         m = {"role": "user", "content": message}

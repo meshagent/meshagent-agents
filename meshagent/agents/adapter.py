@@ -58,6 +58,13 @@ class LLMAdapter(Generic[TEvent]):
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()
 
+    def get_additional_instructions(self) -> str | None:
+        return None
+
+    def on_turn_steer(self, *, context: AgentSessionContext, interrupted: bool) -> None:
+        del context
+        del interrupted
+
     def context_window_size(self, model: str) -> float:
         return float("inf")
 

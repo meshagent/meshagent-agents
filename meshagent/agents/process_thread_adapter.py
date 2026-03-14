@@ -22,6 +22,7 @@ from meshagent.api.messaging import (
 
 from .context import AgentSessionContext
 from .messages import (
+    AGENT_EVENT_TURN_INTERRUPTED,
     AgentError,
     AgentFileContent,
     AgentFileContentDelta,
@@ -40,6 +41,7 @@ from .messages import (
     AgentToolCallStarted,
     ThreadCleared,
     TurnEnded,
+    TurnInterrupted,
     TurnStart,
     TurnStarted,
     TurnSteer,
@@ -824,6 +826,14 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         *,
         event: _NormalizedThreadEvent,
     ) -> tuple[str | None, str | None, str | None]:
+        if event.name == AGENT_EVENT_TURN_INTERRUPTED:
+            text = event.headline.strip()
+            if text == "":
+                text = event.summary.strip()
+            if text == "":
+                text = event.name.strip()
+            return None, event.state, text or None
+
         key = event.correlation_key
         if key is None and event.item_id.strip() != "":
             key = event.item_id.strip()
@@ -1915,6 +1925,21 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 details=details,
                 data=data,
                 correlation_key=f"turn:{message.turn_id}",
+            )
+
+        if isinstance(message, TurnInterrupted):
+            self._active_tool_calls_by_item_id.clear()
+            return _NormalizedThreadEvent(
+                source="agent",
+                name=message.type,
+                kind="turn",
+                state="cancelled",
+                method=message.type,
+                item_id=message.turn_id,
+                item_type="turn",
+                summary="Turn interrupted",
+                headline="Turn interrupted",
+                data=data,
             )
 
         if isinstance(message, TurnSteerAccepted):
