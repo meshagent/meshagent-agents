@@ -2,15 +2,38 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 from lark import Lark, Token, Transformer, UnexpectedInput
 
 ShellSeparator = Literal["&&", "||", ";", "\n"]
 
-_GRAMMAR_PATH = Path(__file__).with_name("shell_grammar.lark")
-_GRAMMAR_TEXT = _GRAMMAR_PATH.read_text(encoding="utf-8")
+_GRAMMAR_TEXT = r"""
+start: sequence
+
+sequence: pipeline (separator pipeline)* separator?
+
+separator: AND_IF | OR_IF | SEMICOLON | NEWLINE_SEPARATOR
+
+pipeline: command (_PIPE command)*
+
+command: command_part+
+
+?command_part: redirection | WORD
+
+redirection: IO_NUMBER? REDIR WORD
+
+AND_IF: "&&"
+OR_IF: "||"
+SEMICOLON: ";"
+_PIPE: "|"
+IO_NUMBER.10: /\d+(?=(?:<<-|<<|>&|<&|>>|>|<))/
+REDIR: "&>>" | "&>" | "<<-" | "<<" | ">&" | "<&" | ">>" | ">" | "<"
+WORD: /(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^ \t\r\n;&|<>])+/
+NEWLINE_SEPARATOR: /(\r?\n)+/
+
+%ignore /[ \t]+/
+"""
 _HEREDOC_MARKER_RE = re.compile(
     r"<<-?\s*(?P<quote>['\"]?)(?P<marker>[A-Za-z0-9_:\-]+)(?P=quote)"
 )

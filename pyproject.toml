@@ -57,7 +57,7 @@ Source = "https://www.meshagent.com"
 include = ["meshagent.*"]
 
 [tool.setuptools.package-data]
-"meshagent.agents" = ["py.typed", "*.pyi", "**/*.pyi", "*.lark", "**/*.lark", "**/*.js"]
+"meshagent.agents" = ["py.typed", "*.pyi", "**/*.pyi", "**/*.js"]
 
 [tool.setuptools.dynamic]
 version = {attr = "meshagent.agents.version.__version__"}
