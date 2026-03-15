@@ -972,6 +972,14 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             keys=("query", "queries", "q"),
         )
 
+    def _web_tool_correlation_key(self, *, turn_id: str, query: str) -> str | None:
+        normalized_query = re.sub(r"\s+", " ", query.strip()).lower()
+        if normalized_query == "":
+            return None
+        return (
+            f"turn.web_search:{turn_id}:{_truncate_text(normalized_query, limit=512)}"
+        )
+
     def _extract_apply_patch_text(
         self,
         *,
@@ -1354,6 +1362,12 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         if kind == "web":
             query = self._extract_web_query(arguments=arguments)
+            if query != "":
+                correlation_key = (
+                    self._web_tool_correlation_key(turn_id=turn_id, query=query)
+                    or correlation_key
+                )
+                retain_correlation = True
             if self._is_pending_state(state=state):
                 headline = "Preparing web search"
             elif self._is_active_state(state=state):
@@ -1386,6 +1400,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 preview=preview,
                 data=data,
                 correlation_key=correlation_key,
+                retain_correlation=retain_correlation,
             )
 
         if kind == "diff":

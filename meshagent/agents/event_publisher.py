@@ -700,23 +700,34 @@ class _OpenAIAgentEventPublisher:
         self.function_tool_name_resolver = resolver
 
     def _item_id_from_event(self, *, event: dict[str, Any]) -> str | None:
+        output_index = _as_int(event.get("output_index"))
         item_id = _as_str(event.get("item_id"))
-        if item_id is not None:
-            return item_id
 
         item = _as_dict(event.get("item"))
-        if item is not None:
+        if item is not None and item_id is None:
             item_id = _as_str(item.get("id"))
-            if item_id is not None:
-                return item_id
 
-        output_index = _as_int(event.get("output_index"))
-        if output_index is None:
-            return None
+        if output_index is not None:
+            return self._mapped_output_item_id(
+                output_index=output_index,
+                item_id=item_id,
+            )
 
+        return item_id
+
+    def _mapped_output_item_id(
+        self,
+        *,
+        output_index: int,
+        item_id: str | None = None,
+    ) -> str:
         existing = self._output_item_ids.get(output_index)
         if existing is not None:
             return existing
+
+        if item_id is not None:
+            self._output_item_ids[output_index] = item_id
+            return item_id
 
         synthesized = f"output:{output_index}"
         self._output_item_ids[output_index] = synthesized
@@ -729,7 +740,7 @@ class _OpenAIAgentEventPublisher:
         item_id = _as_str(item.get("id"))
         if output_index is None or item_id is None:
             return
-        self._output_item_ids[output_index] = item_id
+        self._mapped_output_item_id(output_index=output_index, item_id=item_id)
 
     def _finish_part_from_snapshot(self, *, item_id: str, part: dict[str, Any]) -> None:
         content_kind = _content_kind_from_part(part)
@@ -784,7 +795,7 @@ class _OpenAIAgentEventPublisher:
             return
 
         item_type = _as_str(item.get("type"))
-        item_id = _as_str(item.get("id"))
+        item_id = self._item_id_from_event(event=event)
         if item_type == "reasoning" and item_id is not None:
             if not completed:
                 self.emitter.emit_reasoning_started(item_id=item_id)

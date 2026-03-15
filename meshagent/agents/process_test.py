@@ -3019,6 +3019,126 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_same_query(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    query = (
+        "auto research agent implementation python planning report generation "
+        "official docs examples"
+    )
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="ws_1",
+                toolkit="openai",
+                tool="web_search",
+                arguments={"query": query},
+            )
+        )
+        await real_sleep(0)
+
+        web_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "ws_1"
+        )
+        await _wait_for(
+            lambda: (
+                web_event.get_attribute("state") == "in_progress"
+                and web_event.get_attribute("headline") == "Searching the web"
+            )
+        )
+        assert web_event.get_attribute("details") == query
+        assert (
+            len(
+                [
+                    event
+                    for event in room.sync.document.event_elements
+                    if event.get_attribute("kind") == "web"
+                ]
+            )
+            == 1
+        )
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="ws_1",
+                result=JsonContent(json={"results": [{"title": "Auto Research"}]}),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                web_event.get_attribute("state") == "completed"
+                and web_event.get_attribute("headline") == "Searched the web"
+            )
+        )
+        assert web_event.get_attribute("details") == query
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="ws_2",
+                toolkit="openai",
+                tool="web_search",
+                arguments={"query": query},
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                web_event.get_attribute("item_id") == "ws_2"
+                and web_event.get_attribute("state") == "in_progress"
+                and web_event.get_attribute("headline") == "Searching the web"
+            )
+        )
+        assert web_event.get_attribute("details") == query
+        assert (
+            len(
+                [
+                    event
+                    for event in room.sync.document.event_elements
+                    if event.get_attribute("kind") == "web"
+                ]
+            )
+            == 1
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_process_thread_adapter_writes_preview_for_pending_and_started_running_command(
     monkeypatch,
 ) -> None:
