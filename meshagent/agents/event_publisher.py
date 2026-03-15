@@ -16,6 +16,9 @@ from .messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
+    AGENT_EVENT_TOOL_CALL_PENDING,
+    AGENT_EVENT_TOOL_CALL_IN_PROGRESS,
+    AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AgentError,
@@ -29,6 +32,10 @@ from .messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentToolCallPending,
+    AgentToolCallInProgress,
+    AgentToolCallLogDelta,
+    AgentToolCallLogLine,
     AgentToolCallEnded,
     AgentToolCallStarted,
 )
@@ -92,6 +99,25 @@ def _parse_tool_arguments(value: Any) -> dict[str, Any] | None:
             return parsed
         return {"value": parsed}
     return None
+
+
+def _parse_tool_log_lines(value: Any) -> list[AgentToolCallLogLine]:
+    if not isinstance(value, list):
+        return []
+
+    parsed_lines: list[AgentToolCallLogLine] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+
+        source = _as_str(entry.get("source"))
+        text = _as_text(entry.get("text"))
+        if source not in {"stdout", "stderr"} or text is None:
+            continue
+
+        parsed_lines.append(AgentToolCallLogLine(source=source, text=text))
+
+    return parsed_lines
 
 
 def _data_url(*, mime_type: str, data: str) -> str:
@@ -398,6 +424,8 @@ class _AgentMessageEmitter:
     _started_content: set[tuple[_ContentKind, str]] = field(default_factory=set)
     _ended_content: set[tuple[_ContentKind, str]] = field(default_factory=set)
     _content_with_data: set[tuple[_ContentKind, str]] = field(default_factory=set)
+    _pending_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
+    _in_progress_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _started_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _ended_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
 
@@ -548,6 +576,51 @@ class _AgentMessageEmitter:
             )
         )
 
+    def emit_tool_pending(self, *, info: _ToolCallInfo) -> None:
+        existing = self._pending_tool_calls.get(info.item_id)
+        if (
+            existing is not None
+            and existing.toolkit == info.toolkit
+            and existing.tool == info.tool
+            and existing.arguments == info.arguments
+        ):
+            return
+        self._pending_tool_calls[info.item_id] = info
+        self.callback(
+            AgentToolCallPending(
+                type=AGENT_EVENT_TOOL_CALL_PENDING,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=info.item_id,
+                toolkit=info.toolkit,
+                tool=info.tool,
+                arguments=info.arguments,
+            )
+        )
+
+    def emit_tool_in_progress(self, *, info: _ToolCallInfo) -> None:
+        existing = self._in_progress_tool_calls.get(info.item_id)
+        if (
+            existing is not None
+            and existing.toolkit == info.toolkit
+            and existing.tool == info.tool
+            and existing.arguments == info.arguments
+        ):
+            return
+        self._pending_tool_calls.pop(info.item_id, None)
+        self._in_progress_tool_calls[info.item_id] = info
+        self.callback(
+            AgentToolCallInProgress(
+                type=AGENT_EVENT_TOOL_CALL_IN_PROGRESS,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=info.item_id,
+                toolkit=info.toolkit,
+                tool=info.tool,
+                arguments=info.arguments,
+            )
+        )
+
     def emit_tool_started(self, *, info: _ToolCallInfo) -> None:
         existing = self._started_tool_calls.get(info.item_id)
         if (
@@ -557,6 +630,8 @@ class _AgentMessageEmitter:
             and existing.arguments == info.arguments
         ):
             return
+        self._pending_tool_calls.pop(info.item_id, None)
+        self._in_progress_tool_calls.pop(info.item_id, None)
         self._started_tool_calls[info.item_id] = info
         self.callback(
             AgentToolCallStarted(
@@ -570,6 +645,21 @@ class _AgentMessageEmitter:
             )
         )
 
+    def emit_tool_log_delta(
+        self, *, item_id: str, lines: list[AgentToolCallLogLine]
+    ) -> None:
+        if len(lines) == 0:
+            return
+        self.callback(
+            AgentToolCallLogDelta(
+                type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                lines=lines,
+            )
+        )
+
     def emit_tool_ended(self, *, info: _ToolCallInfo) -> None:
         self.emit_tool_started(info=info)
         existing = self._ended_tool_calls.get(info.item_id)
@@ -579,6 +669,9 @@ class _AgentMessageEmitter:
             and existing.error == info.error
         ):
             return
+        self._pending_tool_calls.pop(info.item_id, None)
+        self._in_progress_tool_calls.pop(info.item_id, None)
+        self._started_tool_calls.pop(info.item_id, None)
         self._ended_tool_calls[info.item_id] = info
         self.callback(
             AgentToolCallEnded(
@@ -681,9 +774,7 @@ class _OpenAIAgentEventPublisher:
 
             if tool_info.item_type in _HANDLER_RESULT_TOOL_TYPES:
                 self._pending_handler_tool_calls[tool_info.item_id] = tool_info
-
-            if completed and tool_info.item_type in _HANDLER_RESULT_TOOL_TYPES:
-                self.emitter.emit_tool_started(info=tool_info)
+                self.emitter.emit_tool_pending(info=tool_info)
                 return
 
             if completed:
@@ -873,6 +964,16 @@ class _OpenAIAgentEventPublisher:
             self.emitter.emit_tool_started(info=tool_info)
             return
 
+        if event_type == "meshagent.handler.output":
+            item_id = _as_str(event.get("item_id"))
+            if item_id is None:
+                return
+            self.emitter.emit_tool_log_delta(
+                item_id=item_id,
+                lines=_parse_tool_log_lines(event.get("lines")),
+            )
+            return
+
         if event_type == "meshagent.handler.done":
             result_item = _as_dict(event.get("item"))
             item_id = _as_str(event.get("item_id"))
@@ -1051,7 +1152,7 @@ class _AnthropicAgentEventPublisher:
                     item_id=tool_info.item_id,
                     block=block,
                 )
-                self.emitter.emit_tool_started(info=tool_info)
+                self.emitter.emit_tool_pending(info=tool_info)
                 return
 
             if block_type in {"document", "image"}:
@@ -1146,10 +1247,12 @@ class _AnthropicAgentEventPublisher:
                     if state.arguments_text != ""
                     else None
                 )
-                if parsed_arguments is not None and tool_info.arguments is None:
-                    self.emitter.emit_tool_started(
-                        info=replace(tool_info, arguments=parsed_arguments)
-                    )
+                updated_arguments = parsed_arguments
+                if updated_arguments is None:
+                    updated_arguments = tool_info.arguments
+                self.emitter.emit_tool_pending(
+                    info=replace(tool_info, arguments=updated_arguments)
+                )
 
 
 def make_openai_agent_event_publisher(

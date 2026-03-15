@@ -38,6 +38,10 @@ from .messages import (
     AgentTextContentStarted,
     AgentToolCallApprovalRequested,
     AgentToolCallEnded,
+    AgentToolCallInProgress,
+    AgentToolCallLogDelta,
+    AgentToolCallLogLine,
+    AgentToolCallPending,
     AgentToolCallStarted,
     ThreadCleared,
     TurnEnded,
@@ -59,6 +63,7 @@ _ACTIVE_STATES = {"queued", "in_progress", "running", "pending", "searching"}
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}
 EXEC_SEARCH_DETAIL_LIMIT = 2000
 DIFF_PREVIEW_LIMIT = 12000
+EVENT_LOG_LINE_LIMIT = 10
 _APPLY_PATCH_PATH_RES = (
     re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (?P<path>.+)$", re.MULTILINE),
     re.compile(r"^(?:\+\+\+ b/|--- a/)(?P<path>.+)$", re.MULTILINE),
@@ -266,6 +271,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_message_elements_by_key: dict[str, Element] = {}
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}
+        self._active_event_elements_by_item_id: dict[str, Element] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
         self._pending_turn_ids_by_message_id: dict[str, str] = {}
         self._thread_status_lock = asyncio.Lock()
@@ -290,6 +296,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_message_elements_by_key.clear()
         self._active_reasoning_elements_by_item_id.clear()
         self._active_event_elements_by_key.clear()
+        self._active_event_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
         self._pending_turn_ids_by_message_id.clear()
 
@@ -485,6 +492,12 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             reasoning.set_attribute("summary", current_summary + message.text)
         elif isinstance(message, AgentReasoningContentEnded):
             self._active_reasoning_elements_by_item_id.pop(message.item_id, None)
+        elif isinstance(message, AgentToolCallLogDelta):
+            self._append_event_logs(
+                messages=messages,
+                item_id=message.item_id,
+                lines=message.lines,
+            )
         else:
             normalized_event = self._normalized_event_from_message(message)
             if normalized_event is not None:
@@ -684,6 +697,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     async def _clear_thread_contents(self, *, messages: Element) -> None:
         self._clear_active_turn_state()
         self._active_event_elements_by_key.clear()
+        self._active_event_elements_by_item_id.clear()
         for child in list(messages.get_children()):
             child.delete()
         await self.clear_thread_status()
@@ -973,6 +987,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     def _is_active_state(self, *, state: str) -> bool:
         return state in _ACTIVE_STATES
 
+    def _is_pending_state(self, *, state: str) -> bool:
+        return state == "pending"
+
     def _exec_search_target(self, *, search_preview: _ExecSearchPreview) -> str:
         if search_preview.path != "":
             return search_preview.path
@@ -1060,6 +1077,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         path: str,
     ) -> str:
         if path != "":
+            if self._is_pending_state(state=status):
+                return f"Preparing to edit {path}"
             if status == "failed":
                 return f"Patch Failed: {path}"
             if status == "cancelled":
@@ -1068,6 +1087,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 return f"Editing {path}"
             return f"Edited {path}"
 
+        if self._is_pending_state(state=status):
+            return "Preparing Patch"
         if status == "failed":
             return "Patch Failed"
         if status == "cancelled":
@@ -1105,7 +1126,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         )
         if grep_preview is not None:
             path = grep_preview.path
-            if self._is_active_state(state=state):
+            if self._is_pending_state(state=state):
+                headline = f"Preparing to search {path}"
+            elif self._is_active_state(state=state):
                 headline = f"Searching {path}"
             elif state == "failed":
                 headline = f"Attempted to search file {path}"
@@ -1141,7 +1164,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         if isinstance(display, _StorageReadToolCallDisplay):
             path = display.path
-            if self._is_active_state(state=state):
+            if self._is_pending_state(state=state):
+                headline = f"Preparing to read {path}"
+            elif self._is_active_state(state=state):
                 headline = f"Reading {path}"
             elif state == "failed":
                 headline = f"Attempted to read file {path}"
@@ -1170,7 +1195,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             return None
 
         path = display.path
-        if self._is_active_state(state=state):
+        if self._is_pending_state(state=state):
+            headline = f"Preparing to write {path}"
+        elif self._is_active_state(state=state):
             headline = f"Writing {path}"
         elif state == "failed":
             headline = f"Attempted to write file {path}"
@@ -1327,7 +1354,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         if kind == "web":
             query = self._extract_web_query(arguments=arguments)
-            if self._is_active_state(state=state):
+            if self._is_pending_state(state=state):
+                headline = "Preparing web search"
+            elif self._is_active_state(state=state):
                 headline = "Searching the web"
             elif state == "failed":
                 headline = "Web Search Failed"
@@ -1397,7 +1426,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             )
 
         if kind == "image":
-            if self._is_active_state(state=state):
+            if self._is_pending_state(state=state):
+                headline = "Preparing image generation"
+            elif self._is_active_state(state=state):
                 headline = "Generating image"
             elif state == "failed":
                 headline = "Image Generation Failed"
@@ -1407,7 +1438,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 headline = "Generated image"
         else:
             humanized = _humanize_name(tool)
-            if self._is_active_state(state=state):
+            if self._is_pending_state(state=state):
+                headline = f"Preparing {humanized}"
+            elif self._is_active_state(state=state):
                 headline = f"Calling {humanized}"
             elif state == "failed":
                 headline = f"{humanized} Failed"
@@ -1446,6 +1479,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         if isinstance(message, ThreadCleared):
             self._clear_active_turn_state()
             self._active_event_elements_by_key.clear()
+            self._active_event_elements_by_item_id.clear()
             self._clear_thread_status_nowait()
             return None
 
@@ -1581,6 +1615,44 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 correlation_key=f"approval:{message.item_id}",
             )
 
+        if isinstance(message, AgentToolCallPending):
+            self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+            )
+            return self._tool_event(
+                turn_id=message.turn_id,
+                message_type=message.type,
+                item_id=message.item_id,
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+                state="pending",
+                result=None,
+                error=None,
+                data=data,
+            )
+
+        if isinstance(message, AgentToolCallInProgress):
+            self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+            )
+            return self._tool_event(
+                turn_id=message.turn_id,
+                message_type=message.type,
+                item_id=message.item_id,
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+                state="in_progress",
+                result=None,
+                error=None,
+                data=data,
+            )
+
         if isinstance(message, AgentToolCallStarted):
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
                 toolkit=message.toolkit,
@@ -1629,10 +1701,17 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         key = event.correlation_key
         state = event.state
         now = _now_iso()
+        item_id = event.item_id.strip()
 
         event_element = (
-            self._active_event_elements_by_key.get(key) if key is not None else None
+            self._active_event_elements_by_item_id.get(item_id)
+            if item_id != ""
+            else None
         )
+        if event_element is None:
+            event_element = (
+                self._active_event_elements_by_key.get(key) if key is not None else None
+            )
         if event_element is None:
             attributes = {
                 "id": str(uuid.uuid4()),
@@ -1686,17 +1765,79 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             if event.data != "":
                 event_element.set_attribute("data", event.data)
 
-        if key is None:
-            for drop_key in event.drop_correlation_keys:
-                self._active_event_elements_by_key.pop(drop_key, None)
-            return
+        self._clear_active_event_element_mappings(event_element=event_element)
 
         if state in _ACTIVE_STATES or event.retain_correlation:
-            self._active_event_elements_by_key[key] = event_element
-        elif state in _TERMINAL_STATES:
-            self._active_event_elements_by_key.pop(key, None)
+            if key is not None:
+                self._active_event_elements_by_key[key] = event_element
+            if item_id != "":
+                self._active_event_elements_by_item_id[item_id] = event_element
         for drop_key in event.drop_correlation_keys:
             self._active_event_elements_by_key.pop(drop_key, None)
+
+    def _event_element_by_item_id(
+        self, *, messages: Element, item_id: str
+    ) -> Element | None:
+        normalized_item_id = item_id.strip()
+        if normalized_item_id == "":
+            return None
+
+        active_event = self._active_event_elements_by_item_id.get(normalized_item_id)
+        if active_event is not None:
+            return active_event
+
+        for child in reversed(messages.get_children()):
+            if not isinstance(child, Element) or child.tag_name != "event":
+                continue
+            if self._attribute_as_str(child, "item_id") == normalized_item_id:
+                return child
+
+        return None
+
+    def _append_event_logs(
+        self,
+        *,
+        messages: Element,
+        item_id: str,
+        lines: list[AgentToolCallLogLine],
+    ) -> None:
+        if len(lines) == 0:
+            return
+
+        event_element = self._event_element_by_item_id(
+            messages=messages, item_id=item_id
+        )
+        if event_element is None:
+            return
+
+        for line in lines:
+            event_element.append_child(
+                "log",
+                {
+                    "source": line.source,
+                    "text": line.text,
+                    "created_at": _now_iso(),
+                },
+            )
+
+        log_elements = event_element.get_children_by_tag_name("log")
+        overflow = len(log_elements) - EVENT_LOG_LINE_LIMIT
+        if overflow > 0:
+            for log_element in log_elements[:overflow]:
+                log_element.delete()
+
+        event_element.set_attribute("updated_at", _now_iso())
+
+    def _clear_active_event_element_mappings(self, *, event_element: Element) -> None:
+        for key, mapped_element in list(self._active_event_elements_by_key.items()):
+            if mapped_element is event_element:
+                self._active_event_elements_by_key.pop(key, None)
+
+        for item_id, mapped_element in list(
+            self._active_event_elements_by_item_id.items()
+        ):
+            if mapped_element is event_element:
+                self._active_event_elements_by_item_id.pop(item_id, None)
 
     @staticmethod
     def _error_details(error: AgentError) -> str:

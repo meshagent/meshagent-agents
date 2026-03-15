@@ -348,6 +348,11 @@ thread_schema = MeshSchema(
                     description="optional structured preview body for compact rendering, for example file contents",
                     type="string",
                 ),
+                ChildProperty(
+                    name="logs",
+                    description="bounded rolling logs for this event",
+                    child_tag_names=["log"],
+                ),
                 ValueProperty(
                     name="data",
                     description="serialized backend payload",
@@ -361,6 +366,27 @@ thread_schema = MeshSchema(
                 ValueProperty(
                     name="updated_at",
                     description="the date this event was last updated in ISO format",
+                    type="string",
+                ),
+            ],
+        ),
+        ElementType(
+            tag_name="log",
+            description="a single stdout or stderr log line emitted by an event",
+            properties=[
+                ValueProperty(
+                    name="source",
+                    description="the source stream for this log line",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="text",
+                    description="the log line text",
+                    type="string",
+                ),
+                ValueProperty(
+                    name="created_at",
+                    description="the date this log line was recorded in ISO format",
                     type="string",
                 ),
             ],

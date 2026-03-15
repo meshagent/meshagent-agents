@@ -13,8 +13,10 @@ from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.messages import (
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TOOL_CALL_ENDED,
+    AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_EVENT_REASONING_CONTENT_DELTA,
     AGENT_EVENT_REASONING_CONTENT_ENDED,
@@ -45,6 +47,9 @@ from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentToolCallLogDelta,
+    AgentToolCallLogLine,
+    AgentToolCallPending,
     AgentToolCallStarted,
     AgentToolCallEnded,
     ClearThread,
@@ -3014,7 +3019,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
 
 
 @pytest.mark.asyncio
-async def test_agent_process_thread_adapter_writes_preview_for_fallback_running_command(
+async def test_agent_process_thread_adapter_writes_preview_for_pending_and_started_running_command(
     monkeypatch,
 ) -> None:
     real_sleep = asyncio.sleep
@@ -3041,8 +3046,8 @@ async def test_agent_process_thread_adapter_writes_preview_for_fallback_running_
 
         command = "node scripts/custom.js --flag"
         adapter.push_message(
-            message=AgentToolCallStarted(
-                type=AGENT_EVENT_TOOL_CALL_STARTED,
+            message=AgentToolCallPending(
+                type=AGENT_EVENT_TOOL_CALL_PENDING,
                 thread_id="/threads/test.thread",
                 turn_id="turn-1",
                 item_id="tool-1",
@@ -3060,14 +3065,148 @@ async def test_agent_process_thread_adapter_writes_preview_for_fallback_running_
         )
         await _wait_for(
             lambda: (
-                exec_event.get_attribute("state") == "in_progress"
-                and exec_event.get_attribute("headline") == "Running Command"
+                exec_event.get_attribute("state") == "pending"
+                and exec_event.get_attribute("headline") == "Preparing Command"
             )
         )
 
         assert exec_event.get_attribute("kind") == "exec"
         assert exec_event.get_attribute("path") == ""
         assert exec_event.get_attribute("preview") == command
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={"action": {"command": command}},
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                exec_event.get_attribute("state") == "in_progress"
+                and exec_event.get_attribute("headline") == "Running Command"
+            )
+        )
+
+        assert (
+            len(
+                [
+                    event
+                    for event in room.sync.document.event_elements
+                    if event.get_attribute("kind") == "exec"
+                ]
+            )
+            == 1
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_appends_and_prunes_event_logs(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-logs-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={"action": {"command": "echo hello"}},
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallLogDelta(
+                type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-logs-1",
+                lines=[
+                    AgentToolCallLogLine(source="stdout", text="line-1"),
+                    AgentToolCallLogLine(source="stderr", text="line-2"),
+                ],
+            )
+        )
+        await real_sleep(0)
+
+        exec_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "tool-logs-1"
+        )
+        await _wait_for(lambda: len(exec_event.get_children_by_tag_name("log")) == 2)
+
+        initial_logs = exec_event.get_children_by_tag_name("log")
+        assert [log.get_attribute("source") for log in initial_logs] == [
+            "stdout",
+            "stderr",
+        ]
+        assert [log.get_attribute("text") for log in initial_logs] == [
+            "line-1",
+            "line-2",
+        ]
+
+        adapter.push_message(
+            message=AgentToolCallLogDelta(
+                type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-logs-1",
+                lines=[
+                    AgentToolCallLogLine(source="stdout", text=f"line-{index}")
+                    for index in range(
+                        3,
+                        3 + process_thread_adapter_module.EVENT_LOG_LINE_LIMIT,
+                    )
+                ],
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                len(exec_event.get_children_by_tag_name("log"))
+                == process_thread_adapter_module.EVENT_LOG_LINE_LIMIT
+            )
+        )
+
+        pruned_logs = exec_event.get_children_by_tag_name("log")
+        assert pruned_logs[0].get_attribute("text") == "line-3"
+        assert pruned_logs[-1].get_attribute("text") == (
+            f"line-{2 + process_thread_adapter_module.EVENT_LOG_LINE_LIMIT}"
+        )
     finally:
         await adapter.stop()
 
@@ -3174,6 +3313,114 @@ async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_explorat
         )
         assert exec_event.get_attribute("headline") == "Exploring /website"
         assert exec_event.get_attribute("path") == ""
+        assert (
+            len(
+                [
+                    event
+                    for event in room.sync.document.event_elements
+                    if event.get_attribute("kind") == "exec"
+                ]
+            )
+            == 1
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_refines_shell_event_by_item_id_without_adding_duplicate(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={"action": {"command": "node scripts/custom.js --flag"}},
+            )
+        )
+        await real_sleep(0)
+
+        exec_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "tool-1"
+        )
+        await _wait_for(
+            lambda: (
+                exec_event.get_attribute("state") == "in_progress"
+                and exec_event.get_attribute("headline") == "Running Command"
+            )
+        )
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={
+                    "action": {
+                        "command": "pwd && ls -la / && ls -la /workspace && find . -maxdepth 3 -type f | sed -n '1,120p'",
+                    }
+                },
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: exec_event.get_attribute("headline") == "Exploring .")
+        assert exec_event.get_attribute("item_id") == "tool-1"
+        assert (
+            len(
+                [
+                    event
+                    for event in room.sync.document.event_elements
+                    if event.get_attribute("kind") == "exec"
+                ]
+            )
+            == 1
+        )
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="tool-1",
+                result=TextContent(text="done"),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: exec_event.get_attribute("state") == "completed")
+        assert exec_event.get_attribute("headline") == "Explored ."
         assert (
             len(
                 [

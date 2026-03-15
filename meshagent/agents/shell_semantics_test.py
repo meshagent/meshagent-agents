@@ -19,6 +19,9 @@ def test_analyze_shell_command_coalesces_cd_prefixed_exploration_chain() -> None
     assert analysis.display.event_kind == "exec"
     assert analysis.display.path == "/website"
     assert analysis.display.coalesce_path == "/website"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to explore /website"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Exploring /website"
     )
@@ -38,6 +41,9 @@ def test_analyze_shell_command_coalesces_cd_prefixed_read_chain() -> None:
 
     assert [op.kind for op in analysis.operations] == ["explore"]
     assert analysis.operations[0].path == "/website"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to explore /website"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Exploring /website"
     )
@@ -62,6 +68,9 @@ def test_analyze_shell_command_renders_single_heredoc_write() -> None:
         "<!doctype html>\n"
         "<html></html>\n"
         "EOF"
+    )
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to write /website/public/index.html"
     )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Writing /website/public/index.html"
@@ -126,6 +135,9 @@ def test_analyze_shell_command_groups_multi_file_heredoc_writes() -> None:
         "{}\n"
         "..."
     )
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to write files in /website"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Writing files in /website"
     )
@@ -151,6 +163,9 @@ def test_analyze_shell_command_treats_python_heredoc_file_generation_as_write() 
     assert analysis.operations[0].multi is True
     assert analysis.operations[-1].kind == "explore"
     assert analysis.display.event_kind == "file"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to write files in /data/docs"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Writing files in /data/docs"
     )
@@ -172,6 +187,9 @@ def test_analyze_shell_command_tracks_install_build_and_exploration_sequence() -
     assert analysis.operations[0].path == "/website"
     assert analysis.operations[1].path == "/website"
     assert analysis.operations[2].path == "/website/dist"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to install packages and preparing to build project in /website"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Installing packages and building project in /website"
     )
@@ -190,6 +208,9 @@ def test_analyze_shell_command_combines_install_and_lint_in_same_directory() -> 
     )
 
     assert [op.kind for op in analysis.operations] == ["install", "lint"]
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to install packages and preparing to check code in /data/pythontest"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Installing packages and checking code in /data/pythontest"
     )
@@ -239,6 +260,9 @@ def test_analyze_shell_command_recognizes_search_display() -> None:
     assert analysis.operations[0].path == "/website/public/index.html"
     assert analysis.display.path == "/website/public/index.html"
     assert analysis.display.coalesce_path == "/website/public/index.html"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to search /website/public/index.html"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Searching /website/public/index.html"
     )
@@ -253,6 +277,9 @@ def test_analyze_shell_command_recognizes_download_display() -> None:
     assert [op.kind for op in analysis.operations] == ["download"]
     assert analysis.operations[0].path == "/website/public/logo.svg"
     assert analysis.display.event_kind == "file"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to download /website/public/logo.svg"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Downloading /website/public/logo.svg"
     )
@@ -268,6 +295,9 @@ def test_analyze_shell_command_treats_curl_without_output_as_web_request() -> No
     analysis = analyze_shell_command(command="curl -sS http://127.0.0.1:8080/")
 
     assert [op.kind for op in analysis.operations] == ["request"]
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing web request"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Making web request"
     )
@@ -281,6 +311,9 @@ def test_analyze_shell_command_falls_back_to_run_display() -> None:
     assert [op.kind for op in analysis.operations] == ["run"]
     assert analysis.display.event_kind == "exec"
     assert analysis.display.path == ""
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing Command"
+    )
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Running Command"
     )

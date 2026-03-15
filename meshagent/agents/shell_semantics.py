@@ -17,7 +17,7 @@ from .shell_parser import (
     parse_shell_script,
 )
 
-ShellDisplayPhaseName = Literal["active", "completed", "failed", "cancelled"]
+ShellDisplayPhaseName = Literal["pending", "active", "completed", "failed", "cancelled"]
 ShellEventKind = Literal["exec", "file"]
 ShellOpKind = Literal[
     "build",
@@ -201,6 +201,7 @@ class ShellDisplay:
     details: tuple[str, ...] = ()
     preview: str = ""
     coalesce_path: str = ""
+    pending: ShellDisplayPhase = ShellDisplayPhase("", "")
     active: ShellDisplayPhase = ShellDisplayPhase("", "")
     completed: ShellDisplayPhase = ShellDisplayPhase("", "")
     failed: ShellDisplayPhase = ShellDisplayPhase("", "")
@@ -208,6 +209,8 @@ class ShellDisplay:
 
     def phase_for_state(self, *, state: str) -> ShellDisplayPhase:
         phase = phase_name_for_state(state=state)
+        if phase == "pending":
+            return self.pending
         if phase == "failed":
             return self.failed
         if phase == "cancelled":
@@ -254,6 +257,8 @@ class _PipelineContext:
 
 
 def phase_name_for_state(*, state: str) -> ShellDisplayPhaseName:
+    if state == "pending":
+        return "pending"
     if state == "failed":
         return "failed"
     if state == "cancelled":
@@ -1884,6 +1889,13 @@ def _combined_contextual_exec_display(
     return ShellDisplay(
         event_kind="exec",
         path=common_target,
+        pending=_phase(
+            headline=_combined_contextual_headline(
+                operations=tuple(deduped_ops),
+                phase="pending",
+                target=common_target,
+            )
+        ),
         active=_phase(
             headline=_combined_contextual_headline(
                 operations=tuple(deduped_ops),
@@ -1946,30 +1958,35 @@ def _combined_contextual_fragment(
 ) -> str:
     fragment_map: dict[ShellOpKind, dict[ShellDisplayPhaseName, str]] = {
         "install": {
+            "pending": "Preparing to install packages",
             "active": "Installing packages",
             "completed": "Installed packages",
             "failed": "Attempted to install packages",
             "cancelled": "Cancelled installing packages",
         },
         "build": {
+            "pending": "Preparing to build project",
             "active": "Building project",
             "completed": "Built project",
             "failed": "Attempted to build project",
             "cancelled": "Cancelled building project",
         },
         "lint": {
+            "pending": "Preparing to check code",
             "active": "Checking code",
             "completed": "Checked code",
             "failed": "Attempted to check code",
             "cancelled": "Cancelled checking code",
         },
         "test": {
+            "pending": "Preparing to run tests",
             "active": "Running tests",
             "completed": "Ran tests",
             "failed": "Attempted to run tests",
             "cancelled": "Cancelled tests",
         },
         "dev": {
+            "pending": "Preparing to start dev command",
             "active": "Starting dev command",
             "completed": "Ran dev command",
             "failed": "Attempted to start dev command",
@@ -1994,6 +2011,7 @@ def _write_display(op: ShellOp) -> ShellDisplay:
     is_multi_file = op.multi or len(op.paths) > 1
     target = f"files in {op.path}" if is_multi_file else op.path
     if op.append:
+        pending = f"Preparing to append {target}"
         active = f"Appending {target}"
         completed = f"Appended {target}"
         failed = (
@@ -2007,6 +2025,7 @@ def _write_display(op: ShellOp) -> ShellDisplay:
             else f"Cancelled appending file {target}"
         )
     else:
+        pending = f"Preparing to write {target}"
         active = f"Writing {target}"
         completed = f"Wrote {target}"
         failed = (
@@ -2024,6 +2043,7 @@ def _write_display(op: ShellOp) -> ShellDisplay:
         event_kind="file",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=pending),
         active=_phase(headline=active),
         completed=_phase(headline=completed),
         failed=_phase(headline=failed),
@@ -2032,6 +2052,7 @@ def _write_display(op: ShellOp) -> ShellDisplay:
 
 
 def _search_display(op: ShellOp) -> ShellDisplay:
+    uses_query_as_target = op.path == "" and len(op.paths) == 0
     if op.path != "":
         target = op.path
         active = f"Searching {target}"
@@ -2065,6 +2086,13 @@ def _search_display(op: ShellOp) -> ShellDisplay:
         details=tuple(details),
         preview=_command_preview(command=op.command),
         coalesce_path=op.path,
+        pending=_phase(
+            headline=(
+                f"Preparing to search for {target}"
+                if uses_query_as_target
+                else f"Preparing to search {target}"
+            )
+        ),
         active=_phase(headline=active),
         completed=_phase(headline=completed),
         failed=_phase(headline=failed),
@@ -2095,6 +2123,17 @@ def _explore_display(op: ShellOp) -> ShellDisplay:
         path=op.path,
         preview=_command_preview(command=op.command),
         coalesce_path=op.path,
+        pending=_phase(
+            headline=(
+                f"Preparing to read {target}"
+                if op.mode == "read"
+                else (
+                    f"Preparing to list {target}"
+                    if op.mode == "list"
+                    else f"Preparing to explore {target}"
+                )
+            )
+        ),
         active=_phase(headline=active),
         completed=_phase(headline=completed),
         failed=_phase(headline=failed),
@@ -2108,6 +2147,7 @@ def _install_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to install packages in {target}"),
         active=_phase(headline=f"Installing packages in {target}"),
         completed=_phase(headline=f"Installed packages in {target}"),
         failed=_phase(headline=f"Attempted to install packages in {target}"),
@@ -2121,6 +2161,7 @@ def _build_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to build {target}"),
         active=_phase(headline=f"Building {target}"),
         completed=_phase(headline=f"Built {target}"),
         failed=_phase(headline=f"Attempted to build {target}"),
@@ -2134,6 +2175,7 @@ def _dev_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to start dev command in {target}"),
         active=_phase(headline=f"Starting dev command in {target}"),
         completed=_phase(headline=f"Ran dev command in {target}"),
         failed=_phase(headline=f"Attempted to start dev command in {target}"),
@@ -2147,6 +2189,7 @@ def _edit_display(op: ShellOp) -> ShellDisplay:
         event_kind="file",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to edit {target}"),
         active=_phase(headline=f"Editing {target}"),
         completed=_phase(headline=f"Edited {target}"),
         failed=_phase(headline=f"Attempted to edit file {target}"),
@@ -2160,6 +2203,7 @@ def _download_display(op: ShellOp) -> ShellDisplay:
         event_kind="file",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to download {target}"),
         active=_phase(headline=f"Downloading {target}"),
         completed=_phase(headline=f"Downloaded {target}"),
         failed=_phase(headline=f"Attempted to download {target}"),
@@ -2172,6 +2216,7 @@ def _request_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         details=(op.query,) if op.query != "" else (),
         preview=_command_preview(command=op.command),
+        pending=_phase(headline="Preparing web request"),
         active=_phase(headline="Making web request"),
         completed=_phase(headline="Made web request"),
         failed=_phase(headline="Web request failed"),
@@ -2186,6 +2231,7 @@ def _script_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to run {tool_name} script in {target}"),
         active=_phase(headline=f"Running {tool_name} script in {target}"),
         completed=_phase(headline=f"Ran {tool_name} script in {target}"),
         failed=_phase(headline=f"Attempted to run {tool_name} script in {target}"),
@@ -2199,6 +2245,7 @@ def _lint_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to check code in {target}"),
         active=_phase(headline=f"Checking code in {target}"),
         completed=_phase(headline=f"Checked code in {target}"),
         failed=_phase(headline=f"Attempted to check code in {target}"),
@@ -2212,6 +2259,7 @@ def _test_display(op: ShellOp) -> ShellDisplay:
         event_kind="exec",
         path=op.path,
         preview=_command_preview(command=op.command),
+        pending=_phase(headline=f"Preparing to run tests in {target}"),
         active=_phase(headline=f"Running tests in {target}"),
         completed=_phase(headline=f"Ran tests in {target}"),
         failed=_phase(headline=f"Attempted to run tests in {target}"),
@@ -2226,6 +2274,7 @@ def _run_display(*, command: str, cwd: str | None) -> ShellDisplay:
         return ShellDisplay(
             event_kind="exec",
             path=cwd or "",
+            pending=_phase(headline="Preparing Command"),
             active=_phase(headline="Running Command"),
             completed=_phase(headline="Ran Command"),
             failed=_phase(headline="Command Failed"),
@@ -2236,6 +2285,10 @@ def _run_display(*, command: str, cwd: str | None) -> ShellDisplay:
         event_kind="exec",
         path=cwd or "",
         preview=preview,
+        pending=_phase(
+            headline="Preparing Command",
+            summary=f"Prepare {normalized_command}",
+        ),
         active=_phase(headline="Running Command", summary=f"Run {normalized_command}"),
         completed=_phase(headline="Ran Command", summary=normalized_command),
         failed=_phase(headline="Command Failed", summary="Command Failed"),

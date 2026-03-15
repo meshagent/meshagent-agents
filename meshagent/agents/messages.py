@@ -28,7 +28,10 @@ AGENT_EVENT_TEXT_CONTENT_ENDED = "meshagent.agent.text_content.ended"
 AGENT_EVENT_FILE_CONTENT_STARTED = "meshagent.agent.file_content.started"
 AGENT_EVENT_FILE_CONTENT_DELTA = "meshagent.agent.file_content.delta"
 AGENT_EVENT_FILE_CONTENT_ENDED = "meshagent.agent.file_content.ended"
+AGENT_EVENT_TOOL_CALL_PENDING = "meshagent.agent.tool_call.pending"
+AGENT_EVENT_TOOL_CALL_IN_PROGRESS = "meshagent.agent.tool_call.in_progress"
 AGENT_EVENT_TOOL_CALL_STARTED = "meshagent.agent.tool_call.started"
+AGENT_EVENT_TOOL_CALL_LOG_DELTA = "meshagent.agent.tool_call.log_delta"
 AGENT_EVENT_TOOL_CALL_ENDED = "meshagent.agent.tool_call.ended"
 AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
     "meshagent.agent.tool_call.approval_requested"
@@ -206,6 +209,24 @@ class AgentFileContentEnded(AgentMessage):
     item_id: str
 
 
+class AgentToolCallPending(AgentMessage):
+    type: Literal[AGENT_EVENT_TOOL_CALL_PENDING]
+    turn_id: str
+    item_id: str
+    toolkit: str
+    tool: str
+    arguments: Optional[dict] = None
+
+
+class AgentToolCallInProgress(AgentMessage):
+    type: Literal[AGENT_EVENT_TOOL_CALL_IN_PROGRESS]
+    turn_id: str
+    item_id: str
+    toolkit: str
+    tool: str
+    arguments: Optional[dict] = None
+
+
 class AgentToolCallStarted(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_STARTED]
     turn_id: str
@@ -215,10 +236,16 @@ class AgentToolCallStarted(AgentMessage):
     arguments: Optional[dict] = None
 
 
-class AgentToolCallProgress(AgentMessage):
+class AgentToolCallLogLine(BaseModel):
+    source: Literal["stdout", "stderr"]
+    text: str
+
+
+class AgentToolCallLogDelta(AgentMessage):
+    type: Literal[AGENT_EVENT_TOOL_CALL_LOG_DELTA]
     turn_id: str
     item_id: str
-    type: str
+    lines: list[AgentToolCallLogLine]
 
 
 class AgentToolCallEnded(AgentMessage):
