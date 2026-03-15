@@ -3019,7 +3019,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
 
 
 @pytest.mark.asyncio
-async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_same_query(
+async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_and_appends_queries(
     monkeypatch,
 ) -> None:
     real_sleep = asyncio.sleep
@@ -3031,9 +3031,12 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_
 
     room = _ThreadRoom(document=_ThreadDocument())
     adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
-    query = (
+    first_query = (
         "auto research agent implementation python planning report generation "
         "official docs examples"
+    )
+    second_query = (
+        "openai deep research overview research agent browse synthesize report"
     )
 
     await adapter.start()
@@ -3056,7 +3059,7 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_
                 item_id="ws_1",
                 toolkit="openai",
                 tool="web_search",
-                arguments={"query": query},
+                arguments={"query": first_query},
             )
         )
         await real_sleep(0)
@@ -3072,7 +3075,7 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_
                 and web_event.get_attribute("headline") == "Searching the web"
             )
         )
-        assert web_event.get_attribute("details") == query
+        assert web_event.get_attribute("details") == first_query
         assert (
             len(
                 [
@@ -3101,7 +3104,7 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_
                 and web_event.get_attribute("headline") == "Searched the web"
             )
         )
-        assert web_event.get_attribute("details") == query
+        assert web_event.get_attribute("details") == first_query
 
         adapter.push_message(
             message=AgentToolCallStarted(
@@ -3111,7 +3114,7 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_
                 item_id="ws_2",
                 toolkit="openai",
                 tool="web_search",
-                arguments={"query": query},
+                arguments={"query": second_query},
             )
         )
         await real_sleep(0)
@@ -3123,7 +3126,7 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_for_
                 and web_event.get_attribute("headline") == "Searching the web"
             )
         )
-        assert web_event.get_attribute("details") == query
+        assert web_event.get_attribute("details") == (f"{first_query}\n{second_query}")
         assert (
             len(
                 [

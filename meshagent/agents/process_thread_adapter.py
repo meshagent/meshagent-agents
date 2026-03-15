@@ -231,6 +231,7 @@ class _NormalizedThreadEvent:
     correlation_key: str | None = None
     retain_correlation: bool = False
     drop_correlation_keys: tuple[str, ...] = ()
+    append_details: bool = False
 
 
 def _now_iso() -> str:
@@ -263,6 +264,19 @@ def _truncate_text(
     if len(text) <= resolved_limit:
         return text
     return text[:resolved_limit] + "..."
+
+
+def _merge_detail_lines(*, existing: str, new: str) -> str:
+    existing_lines = [
+        line.strip() for line in existing.splitlines() if line.strip() != ""
+    ]
+    merged = list(existing_lines)
+    for line in new.splitlines():
+        normalized_line = line.strip()
+        if normalized_line == "" or normalized_line in merged:
+            continue
+        merged.append(normalized_line)
+    return "\n".join(merged)
 
 
 class AgentProcessThreadAdapter(ThreadAdapter):
@@ -972,13 +986,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             keys=("query", "queries", "q"),
         )
 
-    def _web_tool_correlation_key(self, *, turn_id: str, query: str) -> str | None:
-        normalized_query = re.sub(r"\s+", " ", query.strip()).lower()
-        if normalized_query == "":
-            return None
-        return (
-            f"turn.web_search:{turn_id}:{_truncate_text(normalized_query, limit=512)}"
-        )
+    def _web_tool_correlation_key(self, *, turn_id: str) -> str:
+        return f"turn.web_search:{turn_id}"
 
     def _extract_apply_patch_text(
         self,
@@ -1362,12 +1371,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
 
         if kind == "web":
             query = self._extract_web_query(arguments=arguments)
-            if query != "":
-                correlation_key = (
-                    self._web_tool_correlation_key(turn_id=turn_id, query=query)
-                    or correlation_key
-                )
-                retain_correlation = True
+            correlation_key = self._web_tool_correlation_key(turn_id=turn_id)
+            retain_correlation = True
             if self._is_pending_state(state=state):
                 headline = "Preparing web search"
             elif self._is_active_state(state=state):
@@ -1401,6 +1406,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 data=data,
                 correlation_key=correlation_key,
                 retain_correlation=retain_correlation,
+                append_details=query != "",
             )
 
         if kind == "diff":
@@ -1766,7 +1772,15 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             event_element.set_attribute("summary", event.summary)
             event_element.set_attribute("headline", event.headline)
             details_text = self._details_text(details=event.details)
-            if details_text != "" or event_element.get_attribute("details") in (
+            if event.append_details and details_text != "":
+                existing_details = event_element.get_attribute("details")
+                if not isinstance(existing_details, str):
+                    existing_details = ""
+                event_element.set_attribute(
+                    "details",
+                    _merge_detail_lines(existing=existing_details, new=details_text),
+                )
+            elif details_text != "" or event_element.get_attribute("details") in (
                 None,
                 "",
             ):
