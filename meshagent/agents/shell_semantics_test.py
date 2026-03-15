@@ -174,6 +174,79 @@ def test_analyze_shell_command_treats_python_heredoc_file_generation_as_write() 
     )
 
 
+def test_analyze_shell_command_treats_if_guarded_heredoc_write_as_write() -> None:
+    analysis = analyze_shell_command(
+        command=(
+            "mkdir -p /website/docs && cd /website/docs && "
+            "if [ ! -f index.html ]; then cat > index.html <<'EOF'\n"
+            "<!doctype html>\n"
+            "EOF\n"
+            "fi"
+        )
+    )
+
+    assert analysis.operations[0].kind == "write"
+    assert analysis.operations[0].path == "/website/docs/index.html"
+    assert analysis.operations[0].paths == ("/website/docs/index.html",)
+    assert analysis.display.event_kind == "file"
+    assert analysis.display.path == "/website/docs/index.html"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to write /website/docs/index.html"
+    )
+    assert analysis.display.phase_for_state(state="in_progress").headline == (
+        "Writing /website/docs/index.html"
+    )
+    assert analysis.display.phase_for_state(state="completed").headline == (
+        "Wrote /website/docs/index.html"
+    )
+
+
+def test_analyze_shell_command_treats_for_loop_grep_as_search_in_cwd() -> None:
+    analysis = analyze_shell_command(
+        command=(
+            "cd /tmp/meshsite && for f in home.html meshagent-sdk.html "
+            "meshagent-server.html meshagent-studio.html powerboards.html "
+            "faqs.html; do echo '===== '$f; grep -oiE "
+            "'agent|sdk|server|studio|powerboards|room|api|monitor|orchestrat|"
+            "deploy|runtime|workflow|realtime|tool|memory|observ|trace|mcp|"
+            'integration|enterprise\' "$f" | sort | uniq -c | sort -nr | '
+            "head -40; done"
+        )
+    )
+
+    assert [op.kind for op in analysis.operations] == ["explore", "search"]
+    assert analysis.operations[-1].path == "/tmp/meshsite"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to search /tmp/meshsite"
+    )
+    assert analysis.display.phase_for_state(state="in_progress").headline == (
+        "Searching /tmp/meshsite"
+    )
+    assert analysis.display.phase_for_state(state="completed").headline == (
+        "Searched /tmp/meshsite"
+    )
+
+
+def test_analyze_shell_command_falls_back_to_shell_script_for_complex_parse_failures() -> (
+    None
+):
+    analysis = analyze_shell_command(
+        command="cd /tmp/meshsite && for f in a b; do echo $f"
+    )
+
+    assert [op.kind for op in analysis.operations] == ["script"]
+    assert analysis.operations[0].path == "/tmp/meshsite"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to run shell script in /tmp/meshsite"
+    )
+    assert analysis.display.phase_for_state(state="in_progress").headline == (
+        "Running shell script in /tmp/meshsite"
+    )
+    assert analysis.display.phase_for_state(state="completed").headline == (
+        "Ran shell script in /tmp/meshsite"
+    )
+
+
 def test_analyze_shell_command_tracks_install_build_and_exploration_sequence() -> None:
     analysis = analyze_shell_command(
         command=(

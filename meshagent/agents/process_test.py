@@ -3494,7 +3494,7 @@ async def test_agent_process_thread_adapter_renders_cd_prefixed_shell_heredoc_wr
             "cd /website && cat > public/index.html <<'EOF'\n"
             "<!doctype html>\n"
             "<html></html>\n"
-            "..."
+            "EOF"
         )
 
         adapter.push_message(
@@ -3512,6 +3512,83 @@ async def test_agent_process_thread_adapter_renders_cd_prefixed_shell_heredoc_wr
         assert (
             write_event.get_attribute("headline") == "Wrote /website/public/index.html"
         )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_renders_if_guarded_shell_heredoc_write_as_file_event(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="write-if-1",
+                toolkit="openai",
+                tool="shell",
+                arguments={
+                    "action": {
+                        "command": (
+                            "mkdir -p /website/docs && cd /website/docs && "
+                            "if [ ! -f index.html ]; then cat > index.html <<'EOF'\n"
+                            "<!doctype html>\n"
+                            "EOF\n"
+                            "fi"
+                        ),
+                    }
+                },
+            )
+        )
+        await real_sleep(0)
+
+        write_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "write-if-1"
+        )
+        assert write_event.get_attribute("kind") == "file"
+        assert (
+            write_event.get_attribute("headline") == "Writing /website/docs/index.html"
+        )
+        assert write_event.get_attribute("path") == "/website/docs/index.html"
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="write-if-1",
+                result=TextContent(text="ok"),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: write_event.get_attribute("state") == "completed")
+        assert write_event.get_attribute("headline") == "Wrote /website/docs/index.html"
     finally:
         await adapter.stop()
 
@@ -3572,6 +3649,8 @@ async def test_agent_process_thread_adapter_groups_multi_file_shell_heredoc_writ
             "cd /website && mkdir -p src public dist && cat > package.json <<'EOF'\n"
             "{}\n"
             "EOF\n"
+            "cat > tsconfig.json <<'EOF'\n"
+            "{}\n"
             "..."
         )
 

@@ -123,3 +123,41 @@ def test_extract_heredoc_bodies_returns_embedded_script_bodies_in_order() -> Non
     )
 
     assert bodies == ("print('one')", "hello")
+
+
+def test_parse_shell_script_supports_if_shell_command() -> None:
+    program = parse_shell_script(
+        script="if test -f app.py; then echo ok; else echo nope; fi"
+    )
+
+    assert len(program.items) == 1
+    command = program.items[0].pipeline.first_command
+    assert command.executable == "if"
+    assert "then" in command.text
+    assert "else" in command.text
+    assert "fi" in command.text
+
+
+def test_parse_shell_script_supports_if_test_command_with_bang() -> None:
+    program = parse_shell_script(
+        script="if [ ! -f index.html ]; then cat > index.html <<'EOF'\nhi\nEOF\nfi"
+    )
+
+    assert len(program.items) == 1
+    command = program.items[0].pipeline.first_command
+    assert command.executable == "if"
+    assert "[ ! -f index.html ]" in command.text
+    assert command.compound is not None
+    assert len(command.compound.programs) >= 1
+
+
+def test_parse_shell_script_supports_for_shell_command() -> None:
+    program = parse_shell_script(
+        script="for file in README.md app.py; do echo $file; done"
+    )
+
+    assert len(program.items) == 1
+    command = program.items[0].pipeline.first_command
+    assert command.executable == "for"
+    assert "in README.md app.py" in command.text
+    assert "done" in command.text

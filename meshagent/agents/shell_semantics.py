@@ -10,7 +10,6 @@ from typing import Literal
 
 from .shell_parser import (
     ShellCommand,
-    extract_heredoc_bodies,
     ShellParseError,
     ShellPipeline,
     ShellProgram,
@@ -186,6 +185,7 @@ _SCRIPT_TOOL_NAMES = {
     "python3": "Python",
     "ruby": "Ruby",
 }
+_MAX_COMPOUND_SEMANTIC_DEPTH = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,21 +285,25 @@ def analyze_shell_command(*, command: str) -> ShellCommandAnalysis:
     try:
         program = parse_shell_script(script=script)
     except ShellParseError:
-        display = _run_display(command=script, cwd=None)
+        fallback_cwd = _leading_cd_path(script=script)
+        fallback_op = _script_fallback_operation(command=script, cwd=fallback_cwd)
+        display = _display_for_operations(
+            command=script,
+            cwd=fallback_cwd,
+            operations=(fallback_op,),
+        )
         return ShellCommandAnalysis(
             command=command,
             script=script,
-            cwd=None,
-            operations=(),
+            cwd=fallback_cwd,
+            operations=(fallback_op,),
             display=display,
         )
 
     pipeline_contexts, cwd = _compile_pipeline_contexts(program=program)
     operations: list[ShellOp] = []
 
-    write_op = _collect_write_operation(
-        pipeline_contexts=pipeline_contexts, script=script
-    )
+    write_op = _collect_write_operation(program=program, script=script)
     if write_op is not None:
         operations.append(write_op)
 
@@ -319,9 +323,9 @@ def analyze_shell_command(*, command: str) -> ShellCommandAnalysis:
         for context in pipeline_contexts:
             if _pipeline_is_write(pipeline=context.pipeline, cwd=context.cwd):
                 continue
-            op = _classify_pipeline(pipeline=context.pipeline, cwd=context.cwd)
-            if op is not None:
-                operations.append(op)
+            operations.extend(
+                _classify_pipeline(pipeline=context.pipeline, cwd=context.cwd)
+            )
 
     normalized_operations = tuple(_dedupe_operations(operations=operations))
     display = _display_for_operations(
@@ -398,6 +402,37 @@ def _resolve_path(*, path: str, cwd: str | None) -> str:
     return posixpath.normpath(normalized)
 
 
+def _looks_dynamic_shell_path(*, path: str) -> bool:
+    return any(
+        marker in path for marker in ("$", "*", "?", "[", "]", "{", "}", "`", "~")
+    )
+
+
+def _leading_cd_path(*, script: str) -> str | None:
+    stripped = script.strip()
+    if stripped == "":
+        return None
+    if not stripped.startswith("cd "):
+        return None
+
+    tokens = stripped.split(None, 2)
+    if len(tokens) < 2:
+        return None
+    path = tokens[1]
+    if path in {"", "-", "--"}:
+        return None
+    return _resolve_path(path=path, cwd=None)
+
+
+def _script_fallback_operation(*, command: str, cwd: str | None) -> ShellOp:
+    return ShellOp(
+        kind="script",
+        path=cwd or "",
+        tool="shell",
+        command=command,
+    )
+
+
 def _unquote_shell_token(*, token: str) -> str:
     normalized = token.strip()
     if normalized == "":
@@ -418,8 +453,9 @@ def _unquote_shell_token(*, token: str) -> str:
 def _compile_pipeline_contexts(
     *,
     program: ShellProgram,
+    initial_cwd: str | None = None,
 ) -> tuple[list[_PipelineContext], str | None]:
-    current_cwd: str | None = None
+    current_cwd: str | None = initial_cwd
     pipeline_contexts: list[_PipelineContext] = []
 
     for item in program.items:
@@ -486,41 +522,22 @@ def _command_write_targets(*, command: ShellCommand) -> tuple[str, ...]:
 
 def _collect_write_operation(
     *,
-    pipeline_contexts: list[_PipelineContext],
+    program: ShellProgram,
     script: str,
 ) -> ShellOp | None:
     discovered_paths: list[str] = []
-    saw_append = False
-    saw_multi = False
-    heredoc_bodies = iter(extract_heredoc_bodies(script=script))
-
-    for context in pipeline_contexts:
-        for command in context.pipeline.commands:
-            paths, append = _command_write_paths(command=command, cwd=context.cwd)
-            if len(paths) == 0:
-                body = (
-                    next(heredoc_bodies, "")
-                    if _command_has_heredoc(command=command)
-                    else ""
-                )
-                embedded_paths, embedded_append, embedded_multi = (
-                    _embedded_script_write_paths(
-                        command=command,
-                        body=body,
-                        cwd=context.cwd,
-                    )
-                )
-                if len(embedded_paths) == 0:
-                    continue
-                discovered_paths.extend(embedded_paths)
-                saw_append = saw_append or embedded_append
-                saw_multi = saw_multi or embedded_multi
-                continue
-
-            discovered_paths.extend(paths)
-            saw_append = saw_append or append
-            if _command_has_heredoc(command=command):
-                next(heredoc_bodies, "")
+    saw_append_ref = [False]
+    saw_multi_ref = [False]
+    _collect_write_discovery(
+        program=program,
+        initial_cwd=None,
+        discovered_paths=discovered_paths,
+        saw_append_ref=saw_append_ref,
+        saw_multi_ref=saw_multi_ref,
+        depth=0,
+    )
+    saw_append = saw_append_ref[0]
+    saw_multi = saw_multi_ref[0]
 
     normalized_paths = tuple(
         dict.fromkeys(path for path in discovered_paths if path != "")
@@ -541,6 +558,59 @@ def _collect_write_operation(
         multi=saw_multi,
         command=script,
     )
+
+
+def _collect_write_discovery(
+    *,
+    program: ShellProgram,
+    initial_cwd: str | None,
+    discovered_paths: list[str],
+    saw_append_ref: list[bool],
+    saw_multi_ref: list[bool],
+    depth: int,
+) -> None:
+    if depth > _MAX_COMPOUND_SEMANTIC_DEPTH:
+        return
+    pipeline_contexts, _ = _compile_pipeline_contexts(
+        program=program,
+        initial_cwd=initial_cwd,
+    )
+
+    for context in pipeline_contexts:
+        for command in context.pipeline.commands:
+            paths, append = _command_write_paths(command=command, cwd=context.cwd)
+            if len(paths) > 0:
+                discovered_paths.extend(paths)
+                saw_append_ref[0] = saw_append_ref[0] or append
+                if len(paths) > 1:
+                    saw_multi_ref[0] = True
+                continue
+
+            body = _command_heredoc_body(command=command)
+            embedded_paths, embedded_append, embedded_multi = (
+                _embedded_script_write_paths(
+                    command=command,
+                    body=body,
+                    cwd=context.cwd,
+                )
+            )
+            if len(embedded_paths) > 0:
+                discovered_paths.extend(embedded_paths)
+                saw_append_ref[0] = saw_append_ref[0] or embedded_append
+                saw_multi_ref[0] = saw_multi_ref[0] or embedded_multi
+
+            compound = command.compound
+            if compound is None:
+                continue
+            for nested_program in compound.programs:
+                _collect_write_discovery(
+                    program=nested_program,
+                    initial_cwd=context.cwd,
+                    discovered_paths=discovered_paths,
+                    saw_append_ref=saw_append_ref,
+                    saw_multi_ref=saw_multi_ref,
+                    depth=depth + 1,
+                )
 
 
 def _command_write_paths(
@@ -587,6 +657,15 @@ def _command_has_heredoc(*, command: ShellCommand) -> bool:
     return any(
         redirection.operator in {"<<", "<<-"} for redirection in command.redirections
     )
+
+
+def _command_heredoc_body(*, command: ShellCommand) -> str:
+    for redirection in command.redirections:
+        if redirection.operator not in {"<<", "<<-"}:
+            continue
+        if redirection.heredoc_body is not None:
+            return redirection.heredoc_body
+    return ""
 
 
 def _embedded_script_write_paths(
@@ -748,7 +827,9 @@ def _tee_output_targets(*, command: ShellCommand) -> tuple[str, ...]:
     return tuple(targets)
 
 
-def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp | None:
+def _classify_pipeline(
+    *, pipeline: ShellPipeline, cwd: str | None, depth: int = 0
+) -> tuple[ShellOp, ...]:
     command = pipeline.first_command
     command_text = pipeline.text
     view = _command_view(command=command)
@@ -760,7 +841,7 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_build(
         command=command,
@@ -769,7 +850,7 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_dev(
         command=command,
@@ -778,7 +859,7 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_test(
         command=command,
@@ -787,7 +868,7 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_lint(
         command=command,
@@ -796,7 +877,7 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_install(
         command=command,
@@ -805,19 +886,19 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_edit(command=command, cwd=cwd, command_text=command_text)
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_download(command=command, cwd=cwd, command_text=command_text)
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_script(command=command, cwd=cwd, command_text=command_text)
     if op is not None:
-        return op
+        return (op,)
 
     op = _classify_exploration(
         command=command,
@@ -826,9 +907,13 @@ def _classify_pipeline(*, pipeline: ShellPipeline, cwd: str | None) -> ShellOp |
         command_text=command_text,
     )
     if op is not None:
-        return op
+        return (op,)
 
-    return ShellOp(kind="run", path=cwd or "", command=command_text.strip())
+    compound_ops = _classify_compound(command=command, cwd=cwd, depth=depth)
+    if len(compound_ops) > 0:
+        return compound_ops
+
+    return (ShellOp(kind="run", path=cwd or "", command=command_text.strip()),)
 
 
 def _classify_install(
@@ -1218,6 +1303,42 @@ def _classify_script(
     )
 
 
+def _classify_compound(
+    *,
+    command: ShellCommand,
+    cwd: str | None,
+    depth: int = 0,
+) -> tuple[ShellOp, ...]:
+    if depth > _MAX_COMPOUND_SEMANTIC_DEPTH:
+        return (_script_fallback_operation(command=command.text, cwd=cwd),)
+    compound = command.compound
+    if compound is None:
+        return ()
+
+    operations: list[ShellOp] = []
+    for nested_program in compound.programs:
+        pipeline_contexts, _ = _compile_pipeline_contexts(
+            program=nested_program,
+            initial_cwd=cwd,
+        )
+        for context in pipeline_contexts:
+            if _pipeline_is_write(pipeline=context.pipeline, cwd=context.cwd):
+                continue
+            operations.extend(
+                _classify_pipeline(
+                    pipeline=context.pipeline,
+                    cwd=context.cwd,
+                    depth=depth + 1,
+                )
+            )
+
+    normalized = tuple(_dedupe_operations(operations=operations))
+    if len(normalized) > 0:
+        return normalized
+
+    return (_script_fallback_operation(command=command.text, cwd=cwd),)
+
+
 def _download_url_from_tokens(*, tokens: tuple[str, ...]) -> str | None:
     for token in tokens[1:]:
         if token == "--":
@@ -1294,15 +1415,20 @@ def _classify_search(
         index += 1
 
     normalized_query = query.strip()
+    has_dynamic_path = any(_looks_dynamic_shell_path(path=path) for path in paths)
     normalized_paths = tuple(
         _resolve_path(path=path, cwd=cwd)
         for path in paths
-        if isinstance(path, str) and path.strip() != ""
+        if isinstance(path, str)
+        and path.strip() != ""
+        and not _looks_dynamic_shell_path(path=path)
     )
     if normalized_query == "":
         return None
 
     path = normalized_paths[0] if len(normalized_paths) == 1 else ""
+    if path == "" and has_dynamic_path and cwd not in {None, ""}:
+        path = cwd or ""
     return ShellOp(
         kind="search",
         path=path,
