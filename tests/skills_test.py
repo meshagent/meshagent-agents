@@ -107,3 +107,57 @@ async def test_to_prompt_keeps_valid_skill_entries_unchanged(tmp_path: Path) -> 
     assert "<name>\npdf-reader\n</name>" in prompt
     assert "<description>\nRead PDF files\n</description>" in prompt
     assert str(skill_md) in prompt
+
+
+@pytest.mark.asyncio
+async def test_discover_skill_folders_returns_immediate_skill_children(
+    tmp_path: Path,
+) -> None:
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    valid_skill = skills_root / "pdf-reader"
+    valid_skill.mkdir()
+    (valid_skill / "SKILL.md").write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+    empty_child = skills_root / "notes"
+    empty_child.mkdir()
+    (skills_root / "README.md").write_text("hello", encoding="utf-8")
+
+    discovered = await skills.discover_skill_folders(skills_root)
+
+    assert discovered == [valid_skill]
+
+
+@pytest.mark.asyncio
+async def test_to_prompt_discovers_subskills_when_parent_has_no_skill_md(
+    tmp_path: Path,
+) -> None:
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+
+    first_skill = skills_root / "pdf-reader"
+    first_skill.mkdir()
+    first_skill_md = first_skill / "SKILL.md"
+    first_skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    second_skill = skills_root / "csv-reader"
+    second_skill.mkdir()
+    second_skill_md = second_skill / "skill.md"
+    second_skill_md.write_text(
+        "---\nname: csv-reader\ndescription: Read CSV files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    prompt = await skills.to_prompt([skills_root])
+    resolved_second_skill_md = await skills.find_skill_md(second_skill)
+
+    assert "<name>\ncsv-reader\n</name>" in prompt
+    assert "<name>\npdf-reader\n</name>" in prompt
+    assert str(first_skill_md) in prompt
+    assert resolved_second_skill_md is not None
+    assert str(resolved_second_skill_md) in prompt

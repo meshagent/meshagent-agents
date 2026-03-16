@@ -93,6 +93,26 @@ async def find_skill_md(skill_dir: Path) -> Optional[Path]:
     return None
 
 
+async def discover_skill_folders(path: Path) -> list[Path]:
+    """Discover immediate child folders that contain a skill definition.
+
+    This allows callers to provide a parent directory containing multiple
+    skill folders instead of pointing at each skill directory individually.
+    """
+    skill_root = Path(path)
+    if not skill_root.is_dir():
+        return []
+
+    discovered: list[Path] = []
+    for child in sorted(skill_root.iterdir(), key=lambda entry: entry.name):
+        if not child.is_dir():
+            continue
+        if await find_skill_md(child) is not None:
+            discovered.append(child)
+
+    return discovered
+
+
 def parse_frontmatter(content: str) -> tuple[dict, str]:
     """Parse YAML frontmatter from SKILL.md content."""
     if not content.startswith("---"):
@@ -221,6 +241,23 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
         skill_dir = Path(skill_dir).resolve()
         skill_md_path = await find_skill_md(skill_dir)
         if skill_md_path is None:
+            discovered_skill_dirs = await discover_skill_folders(skill_dir)
+            if discovered_skill_dirs:
+                for discovered_skill_dir in discovered_skill_dirs:
+                    discovered_skill_md_path = await find_skill_md(discovered_skill_dir)
+                    if discovered_skill_md_path is None:
+                        continue
+                    props = await _read_properties_from_skill_md(
+                        discovered_skill_md_path
+                    )
+                    _append_prompt_skill(
+                        lines=lines,
+                        name=props.name,
+                        description=props.description,
+                        location=discovered_skill_md_path,
+                    )
+                continue
+
             if not missing_ok:
                 raise ParseError(f"SKILL.md not found in {skill_dir}")
 
