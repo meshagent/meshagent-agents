@@ -423,6 +423,10 @@ def _computer_action_type(*, event: dict) -> str:
 
 
 def _is_computer_call_event(*, event: dict) -> bool:
+    event_name = event.get("name")
+    if event_name == "computer.startup":
+        return True
+
     item = event.get("item")
     if isinstance(item, dict):
         item_type = item.get("type")
@@ -437,6 +441,18 @@ def _is_computer_call_event(*, event: dict) -> bool:
 
 
 def _computer_headline_for_state(*, event: dict, state: str) -> str:
+    event_name = event.get("name")
+    if event_name == "computer.startup":
+        if state in _ACTIVE_STATES:
+            return "Starting computer..."
+        if state == "completed":
+            return "Computer ready"
+        if state == "failed":
+            return "Failed to start computer"
+        if state == "cancelled":
+            return "Computer startup cancelled"
+        return "Computer startup update"
+
     action_type = _computer_action_type(event=event)
     active_headlines = {
         "click": "Clicking on page",

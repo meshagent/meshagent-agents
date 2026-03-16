@@ -1,6 +1,7 @@
 import pytest
 
 from meshagent.agents.responses_thread_adapter import (
+    _headline_for_response_event,
     ResponsesThreadAdapter,
     _extract_image_dimensions,
     response_event_to_agent_event,
@@ -139,3 +140,15 @@ def test_computer_call_scroll_event_uses_human_friendly_direction():
     assert normalized["kind"] == "tool"
     assert normalized["headline"] == "Scrolled page"
     assert normalized["details"] == ["Direction: up"]
+
+
+def test_computer_startup_event_uses_startup_specific_headline():
+    event = {
+        "type": "response.output_item.done",
+        "item_id": "startup_1",
+        "name": "computer.startup",
+        "state": "completed",
+    }
+
+    headline = _headline_for_response_event(event=event, kind="tool", state="completed")
+    assert headline == "Computer ready"
