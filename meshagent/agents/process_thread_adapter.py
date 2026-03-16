@@ -1529,23 +1529,29 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         if isinstance(message, TurnEnded):
             details: tuple[str, ...] = ()
             summary = "Turn completed"
+            headline = summary
+            kind = "turn"
             if message.error is not None:
-                details = (self._error_details(message.error),)
                 if message.error.code == "cancelled":
                     summary = "Turn cancelled"
+                    headline = summary
                 else:
-                    summary = "Turn failed"
+                    summary = "The model was not able to complete the request"
+                    headline = summary
+                    kind = "message"
+                    if message.error.message != "":
+                        details = (message.error.message,)
             return _NormalizedThreadEvent(
                 source="agent",
                 name=message.type,
-                kind="turn",
+                kind=kind,
                 state=_terminal_state_from_error(message.error),
                 method=message.type,
                 turn_id=message.turn_id,
                 item_id=message.turn_id,
                 item_type="turn",
                 summary=summary,
-                headline=summary,
+                headline=headline,
                 details=details,
                 data=data,
                 correlation_key=f"turn:{message.turn_id}",

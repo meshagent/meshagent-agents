@@ -2834,6 +2834,67 @@ async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messag
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_surfaces_failed_turns_in_feed(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="turn-start-1",
+            ),
+        )
+        adapter.push_message(
+            message=TurnEnded(
+                type=AGENT_EVENT_TURN_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                error=AgentError(
+                    message=(
+                        "Error from Anthropic: prompt is too long: 2368193 tokens > "
+                        "1000000 maximum"
+                    ),
+                    code="RoomException",
+                ),
+            ),
+        )
+
+        await real_sleep(0)
+        await _wait_for(lambda: len(room.sync.document.event_elements) == 1)
+
+        turn_event = room.sync.document.event_elements[0]
+        assert turn_event.get_attribute("item_id") == "turn-1"
+        assert turn_event.get_attribute("turn_id") == "turn-1"
+        assert turn_event.get_attribute("kind") == "message"
+        assert turn_event.get_attribute("state") == "failed"
+        assert (
+            turn_event.get_attribute("headline")
+            == "The model was not able to complete the request"
+        )
+        assert (
+            turn_event.get_attribute("details")
+            == "Error from Anthropic: prompt is too long: 2368193 tokens > "
+            "1000000 maximum"
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_and_updates_status(
     monkeypatch,
 ) -> None:
