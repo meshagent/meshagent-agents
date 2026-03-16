@@ -4192,6 +4192,63 @@ async def test_agent_process_thread_adapter_restores_thinking_status_on_turn_int
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_uses_computer_startup_details_for_status(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        await adapter.handle_custom_event(
+            messages=room.sync.document.root.messages,
+            event={
+                "type": "agent.event",
+                "source": "computer",
+                "name": "computer.startup",
+                "kind": "tool",
+                "state": "in_progress",
+                "method": "computer.startup",
+                "correlation_key": "computer:start",
+                "headline": "Starting computer...",
+                "details": [
+                    "Waiting for Playwright container to become ready.",
+                ],
+            },
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                (
+                    "thread.status./threads/test.thread",
+                    "Waiting for Playwright container to become ready.",
+                )
+                in room.local_participant.set_attribute_calls
+            )
+        )
+
+        startup_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("name") == "computer.startup"
+        )
+        assert (
+            startup_event.get_attribute("details")
+            == "Waiting for Playwright container to become ready."
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_queued_steer(
     monkeypatch,
 ) -> None:

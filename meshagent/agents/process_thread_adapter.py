@@ -862,6 +862,10 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             text = event.summary.strip()
         if text == "":
             text = event.name.strip()
+        if event.name == "computer.startup" and len(event.details) > 0:
+            detail_text = event.details[0].strip()
+            if detail_text != "":
+                text = detail_text
 
         return key, event.state, text or None
 
