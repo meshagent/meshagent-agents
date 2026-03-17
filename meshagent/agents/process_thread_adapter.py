@@ -1849,21 +1849,30 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         if event_element is None:
             return
 
-        for line in lines:
-            event_element.append_child(
-                "log",
-                {
-                    "source": line.source,
-                    "text": line.text,
-                    "created_at": _now_iso(),
-                },
-            )
-
         log_elements = event_element.get_children_by_tag_name("log")
-        overflow = len(log_elements) - EVENT_LOG_LINE_LIMIT
-        if overflow > 0:
-            for log_element in log_elements[:overflow]:
-                log_element.delete()
+        while len(log_elements) > EVENT_LOG_LINE_LIMIT:
+            log_elements.pop(0).delete()
+
+        retained_lines = (
+            lines[-EVENT_LOG_LINE_LIMIT:]
+            if len(lines) > EVENT_LOG_LINE_LIMIT
+            else lines
+        )
+
+        for line in retained_lines:
+            if len(log_elements) >= EVENT_LOG_LINE_LIMIT:
+                log_elements.pop(0).delete()
+
+            log_elements.append(
+                event_element.append_child(
+                    "log",
+                    {
+                        "source": line.source,
+                        "text": line.text,
+                        "created_at": _now_iso(),
+                    },
+                )
+            )
 
         event_element.set_attribute("updated_at", _now_iso())
 

@@ -3362,6 +3362,30 @@ async def test_agent_process_thread_adapter_appends_and_prunes_event_logs(
             "line-2",
         ]
 
+        inserted_texts: list[str] = []
+        log_counts_before_insert: list[int] = []
+        original_append_child = exec_event.append_child
+
+        def _tracking_append_child(
+            tag_name: str,
+            attributes: dict[str, Any] | None = None,
+        ) -> _ThreadElement:
+            if tag_name == "log":
+                log_counts_before_insert.append(
+                    len(exec_event.get_children_by_tag_name("log"))
+                )
+                if attributes is not None:
+                    text = attributes.get("text")
+                    if isinstance(text, str):
+                        inserted_texts.append(text)
+            return original_append_child(tag_name, attributes)
+
+        monkeypatch.setattr(exec_event, "append_child", _tracking_append_child)
+
+        batch_start = 3
+        batch_stop = (
+            batch_start + process_thread_adapter_module.EVENT_LOG_LINE_LIMIT + 5
+        )
         adapter.push_message(
             message=AgentToolCallLogDelta(
                 type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
@@ -3370,10 +3394,7 @@ async def test_agent_process_thread_adapter_appends_and_prunes_event_logs(
                 item_id="tool-logs-1",
                 lines=[
                     AgentToolCallLogLine(source="stdout", text=f"line-{index}")
-                    for index in range(
-                        3,
-                        3 + process_thread_adapter_module.EVENT_LOG_LINE_LIMIT,
-                    )
+                    for index in range(batch_start, batch_stop)
                 ],
             )
         )
@@ -3386,11 +3407,21 @@ async def test_agent_process_thread_adapter_appends_and_prunes_event_logs(
             )
         )
 
-        pruned_logs = exec_event.get_children_by_tag_name("log")
-        assert pruned_logs[0].get_attribute("text") == "line-3"
-        assert pruned_logs[-1].get_attribute("text") == (
-            f"line-{2 + process_thread_adapter_module.EVENT_LOG_LINE_LIMIT}"
+        expected_inserted_texts = [
+            f"line-{index}"
+            for index in range(
+                batch_stop - process_thread_adapter_module.EVENT_LOG_LINE_LIMIT,
+                batch_stop,
+            )
+        ]
+        assert inserted_texts == expected_inserted_texts
+        assert max(log_counts_before_insert) <= (
+            process_thread_adapter_module.EVENT_LOG_LINE_LIMIT - 1
         )
+
+        pruned_logs = exec_event.get_children_by_tag_name("log")
+        assert pruned_logs[0].get_attribute("text") == expected_inserted_texts[0]
+        assert pruned_logs[-1].get_attribute("text") == expected_inserted_texts[-1]
     finally:
         await adapter.stop()
 
