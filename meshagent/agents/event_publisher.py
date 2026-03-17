@@ -689,6 +689,7 @@ class _AgentMessageEmitter:
 class _OpenAIAgentEventPublisher:
     emitter: _AgentMessageEmitter
     function_tool_name_resolver: FunctionToolNameResolver | None = None
+    _active_response_id: str | None = None
     _output_item_ids: dict[int, str] = field(default_factory=dict)
     _pending_handler_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _finished_handler_tool_call_ids: set[str] = field(default_factory=set)
@@ -698,6 +699,25 @@ class _OpenAIAgentEventPublisher:
         resolver: FunctionToolNameResolver | None,
     ) -> None:
         self.function_tool_name_resolver = resolver
+
+    def _track_response_boundary(self, *, event: dict[str, Any]) -> None:
+        response = _as_dict(event.get("response"))
+        if response is None:
+            return
+
+        response_id = _as_str(response.get("id"))
+        if response_id is None:
+            return
+
+        if self._active_response_id is None:
+            self._active_response_id = response_id
+            return
+
+        if self._active_response_id == response_id:
+            return
+
+        self._active_response_id = response_id
+        self._output_item_ids.clear()
 
     def _item_id_from_event(self, *, event: dict[str, Any]) -> str | None:
         output_index = _as_int(event.get("output_index"))
@@ -904,6 +924,9 @@ class _OpenAIAgentEventPublisher:
         event_type = _as_str(event.get("type"))
         if event_type is None:
             return
+
+        if event_type.startswith("response."):
+            self._track_response_boundary(event=event)
 
         if event_type == "response.output_item.added":
             self._on_output_item(event=event, completed=False)
