@@ -2269,6 +2269,12 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 "meshagent.chatbot.threading", self._threading_mode
             )
 
+        thread_dir = self._thread_list_dir()
+        if thread_dir is not None:
+            await self.room.local_participant.set_attribute(
+                "meshagent.chatbot.thread-dir", thread_dir
+            )
+
         thread_list_path = self._thread_list_index_path()
         if thread_list_path is not None:
             await self.room.local_participant.set_attribute(

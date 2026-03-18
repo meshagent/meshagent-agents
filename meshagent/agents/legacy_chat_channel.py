@@ -30,6 +30,9 @@ from meshagent.tools.strict_schema import ensure_strict_json_schema
 
 from .messages import (
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_FILE_CONTENT_DELTA,
+    AGENT_EVENT_FILE_CONTENT_ENDED,
+    AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
@@ -43,6 +46,9 @@ from .messages import (
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
     AgentFileContent,
+    AgentFileContentDelta,
+    AgentFileContentEnded,
+    AgentFileContentStarted,
     AgentMessage,
     AgentTextContent,
     AgentTextContentDelta,
@@ -110,6 +116,7 @@ class LegacyChatChannel(Channel):
         self._pending_approval_turn_ids_by_thread: dict[str, dict[str, str]] = {}
         self._open_participant_ids_by_thread: dict[str, set[str]] = {}
         self._active_text_by_thread: dict[str, dict[str, str]] = {}
+        self._active_files_by_thread: dict[str, dict[str, str]] = {}
         self._thread_list_document: MeshDocument | None = None
         self._thread_list_path: str | None = None
 
@@ -119,6 +126,9 @@ class LegacyChatChannel(Channel):
 
     def handles(self, message: Message) -> bool:
         return message.data.type in {
+            AGENT_EVENT_FILE_CONTENT_STARTED,
+            AGENT_EVENT_FILE_CONTENT_DELTA,
+            AGENT_EVENT_FILE_CONTENT_ENDED,
             AGENT_EVENT_TEXT_CONTENT_STARTED,
             AGENT_EVENT_TEXT_CONTENT_DELTA,
             AGENT_EVENT_TEXT_CONTENT_ENDED,
@@ -134,6 +144,12 @@ class LegacyChatChannel(Channel):
             await self._room.local_participant.set_attribute(
                 "meshagent.chatbot.threading",
                 self._threading_mode,
+            )
+        thread_dir = self._thread_list_dir()
+        if thread_dir is not None:
+            await self._room.local_participant.set_attribute(
+                "meshagent.chatbot.thread-dir",
+                thread_dir,
             )
         thread_list_path = self._thread_list_index_path()
         if thread_list_path is not None:
@@ -156,6 +172,7 @@ class LegacyChatChannel(Channel):
         self._pending_approval_turn_ids_by_thread.clear()
         self._open_participant_ids_by_thread.clear()
         self._active_text_by_thread.clear()
+        self._active_files_by_thread.clear()
 
     async def on_message(self, message: Message) -> None:
         data = message.data
@@ -193,6 +210,39 @@ class LegacyChatChannel(Channel):
                 )
             return
 
+        if data.type == AGENT_EVENT_FILE_CONTENT_STARTED:
+            file_started = self._coerce_message(
+                data=data, model=AgentFileContentStarted
+            )
+            active_files = self._active_files_by_thread.setdefault(
+                file_started.thread_id,
+                {},
+            )
+            active_files[file_started.item_id] = ""
+            return
+
+        if data.type == AGENT_EVENT_FILE_CONTENT_DELTA:
+            file_delta = self._coerce_message(data=data, model=AgentFileContentDelta)
+            active_files = self._active_files_by_thread.setdefault(
+                file_delta.thread_id,
+                {},
+            )
+            active_files[file_delta.item_id] = file_delta.url
+            return
+
+        if data.type == AGENT_EVENT_FILE_CONTENT_ENDED:
+            file_ended = self._coerce_message(data=data, model=AgentFileContentEnded)
+            active_files = self._active_files_by_thread.get(file_ended.thread_id, {})
+            path = active_files.pop(file_ended.item_id, "")
+            if len(active_files) == 0:
+                self._active_files_by_thread.pop(file_ended.thread_id, None)
+            if path.strip() != "":
+                self._send_attachments_to_open_participants(
+                    thread_id=file_ended.thread_id,
+                    attachments=[path],
+                )
+            return
+
         if data.type == AGENT_EVENT_TURN_STARTED:
             turn_started = self._coerce_message(data=data, model=TurnStarted)
             self._active_turn_ids_by_thread[turn_started.thread_id] = (
@@ -212,6 +262,7 @@ class LegacyChatChannel(Channel):
             if tracked_turn_id == turn_ended.turn_id:
                 self._active_turn_ids_by_thread.pop(turn_ended.thread_id, None)
             self._active_text_by_thread.pop(turn_ended.thread_id, None)
+            self._active_files_by_thread.pop(turn_ended.thread_id, None)
 
             pending_approvals = self._pending_approval_turn_ids_by_thread.get(
                 turn_ended.thread_id
@@ -342,6 +393,30 @@ class LegacyChatChannel(Channel):
 
     def _active_turn_id(self, *, thread_id: str) -> str | None:
         return self._active_turn_ids_by_thread.get(thread_id)
+
+    def _thread_and_turn_id_from_tool_context(
+        self, *, context: ToolContext
+    ) -> tuple[str, str]:
+        caller_context = context.caller_context
+        if not isinstance(caller_context, dict):
+            raise RoomException(
+                "chat tool requires thread_id and turn_id in caller_context"
+            )
+
+        raw_thread_id = caller_context.get("thread_id")
+        if not isinstance(raw_thread_id, str) or raw_thread_id.strip() == "":
+            raise RoomException("chat tool requires a non-empty thread_id")
+        thread_id = raw_thread_id.strip()
+
+        raw_turn_id = caller_context.get("turn_id")
+        if isinstance(raw_turn_id, str) and raw_turn_id.strip() != "":
+            return thread_id, raw_turn_id.strip()
+
+        turn_id = self._active_turn_id(thread_id=thread_id)
+        if turn_id is None:
+            raise RoomException("attach_file requires an active turn")
+
+        return thread_id, turn_id
 
     @staticmethod
     def _thread_id_from_room_message(*, message: RoomMessage) -> str | None:
@@ -911,8 +986,60 @@ class LegacyChatChannel(Channel):
 
         return NewThreadTool()
 
+    def _make_attach_file_tool(self) -> FunctionTool:
+        outer = self
+
+        @tool(
+            name="attach_file",
+            description="attach a room file path or URL to the current thread so the user can see it",
+        )
+        async def attach_file(context: ToolContext, path: str) -> None:
+            thread_id, turn_id = outer._thread_and_turn_id_from_tool_context(
+                context=context
+            )
+            normalized_url = outer._normalize_attachment_url(path=path)
+            if normalized_url is None:
+                raise RoomException("attach_file requires a non-empty path")
+
+            item_id = str(uuid.uuid4())
+            sender = context.on_behalf_of or context.caller
+            outer.emit(
+                sender=sender,
+                payload=AgentFileContentStarted(
+                    type=AGENT_EVENT_FILE_CONTENT_STARTED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                ),
+            )
+            outer.emit(
+                sender=sender,
+                payload=AgentFileContentDelta(
+                    type=AGENT_EVENT_FILE_CONTENT_DELTA,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    url=normalized_url,
+                ),
+            )
+            outer.emit(
+                sender=sender,
+                payload=AgentFileContentEnded(
+                    type=AGENT_EVENT_FILE_CONTENT_ENDED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                ),
+            )
+
+        return attach_file
+
     def _build_chat_tools(self) -> list[FunctionTool]:
-        return [self._make_new_thread_tool(), *self._build_thread_list_tools()]
+        return [
+            self._make_new_thread_tool(),
+            self._make_attach_file_tool(),
+            *self._build_thread_list_tools(),
+        ]
 
     def get_agent_toolkits(self) -> list[Toolkit]:
         return [
@@ -1064,6 +1191,7 @@ class LegacyChatChannel(Channel):
         self._active_turn_ids_by_thread.pop(thread_id, None)
         self._pending_approval_turn_ids_by_thread.pop(thread_id, None)
         self._active_text_by_thread.pop(thread_id, None)
+        self._active_files_by_thread.pop(thread_id, None)
 
     def _send_chat_to_open_participants(self, *, thread_id: str, text: str) -> None:
         for participant in self._open_participants(thread_id=thread_id):
@@ -1076,6 +1204,33 @@ class LegacyChatChannel(Channel):
                 message={
                     "path": thread_id,
                     "text": text,
+                },
+            )
+
+    def _send_attachments_to_open_participants(
+        self,
+        *,
+        thread_id: str,
+        attachments: list[str],
+    ) -> None:
+        normalized_attachments = [
+            {"path": attachment}
+            for attachment in attachments
+            if isinstance(attachment, str) and attachment.strip() != ""
+        ]
+        if len(normalized_attachments) == 0:
+            return
+
+        for participant in self._open_participants(thread_id=thread_id):
+            if participant.id == self._room.local_participant.id:
+                continue
+
+            self._room.messaging.send_message_nowait(
+                to=participant,
+                type="chat",
+                message={
+                    "path": thread_id,
+                    "attachments": normalized_attachments,
                 },
             )
 

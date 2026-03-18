@@ -1296,6 +1296,12 @@ class LLMAgentProcess(AgentProcess):
         )
 
         self._active_turn_sender = sender
+        had_thread_id = "thread_id" in session.metadata
+        previous_thread_id = session.metadata.get("thread_id")
+        had_turn_id = "turn_id" in session.metadata
+        previous_turn_id = session.metadata.get("turn_id")
+        session.metadata["thread_id"] = thread_id
+        session.metadata["turn_id"] = turn_id
         try:
             next_task = asyncio.create_task(
                 self.llm_adapter.next(
@@ -1313,6 +1319,15 @@ class LLMAgentProcess(AgentProcess):
             self._active_next_task = next_task
             await next_task
         finally:
+            if had_thread_id:
+                session.metadata["thread_id"] = previous_thread_id
+            else:
+                session.metadata.pop("thread_id", None)
+
+            if had_turn_id:
+                session.metadata["turn_id"] = previous_turn_id
+            else:
+                session.metadata.pop("turn_id", None)
             self._active_next_task = None
             self._active_turn_sender = None
 

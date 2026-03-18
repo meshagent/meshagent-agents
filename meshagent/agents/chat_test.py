@@ -1252,7 +1252,7 @@ async def test_thread_list_document_open_close_uses_thread_dir_index_path() -> N
 
 
 @pytest.mark.asyncio
-async def test_chatbot_start_sets_thread_list_participant_attribute() -> None:
+async def test_chatbot_start_sets_thread_attributes_on_participant() -> None:
     adapter = _CaptureChatAdapter()
     sync = _FakeSync()
     room = _FakeRoom(sync=sync)
@@ -1269,6 +1269,13 @@ async def test_chatbot_start_sets_thread_list_participant_attribute() -> None:
     ):
         await bot.start(room=room)
 
+    assert (
+        room.local_participant.get_attribute("meshagent.chatbot.thread-dir") == "custom"
+    )
+    assert (
+        "meshagent.chatbot.thread-dir",
+        "custom",
+    ) in room.local_participant.set_attribute_calls
     assert (
         room.local_participant.get_attribute("meshagent.chatbot.thread-list")
         == "custom/index.threadl"

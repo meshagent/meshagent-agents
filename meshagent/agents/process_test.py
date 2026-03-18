@@ -2116,7 +2116,10 @@ async def test_llm_agent_process_continues_queued_steer_when_turn_is_interrupted
         {"role": "user", "content": "first"},
         {"role": "user", "content": "second"},
     ]
-    assert adapter.calls[1]["metadata"] == {}
+    assert adapter.calls[1]["metadata"] == {
+        "thread_id": "thread-1",
+        "turn_id": turn_id,
+    }
     steered_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STEERED)[0]
     assert steered_payload["source_message_id"] == steer_message_id
     assert steered_payload["turn_id"] == turn_id
@@ -2128,6 +2131,45 @@ async def test_llm_agent_process_continues_queued_steer_when_turn_is_interrupted
     ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
     assert ended_payload["turn_id"] == turn_id
     assert ended_payload["error"] is None
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_sets_thread_and_turn_metadata_during_adapter_call() -> (
+    None
+):
+    session = _LifecycleSession()
+    adapter = _RecordingLLMAdapter(session=session)
+    supervisor = _RecordingSupervisor()
+    process = LLMAgentProcess(
+        thread_id="thread-1",
+        room=object(),  # type: ignore[arg-type]
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
+    assert adapter.calls[0]["metadata"] == {
+        "thread_id": "thread-1",
+        "turn_id": started_payload["turn_id"],
+    }
+    assert session.metadata == {}
 
     await process.stop(supervisor)
 

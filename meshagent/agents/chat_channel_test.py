@@ -6,6 +6,9 @@ from pydantic import BaseModel
 from meshagent.agents.legacy_chat_channel import LegacyChatChannel as ChatChannel
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
+    AGENT_EVENT_FILE_CONTENT_DELTA,
+    AGENT_EVENT_FILE_CONTENT_ENDED,
+    AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
@@ -19,6 +22,9 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
     AgentFileContent,
+    AgentFileContentDelta,
+    AgentFileContentEnded,
+    AgentFileContentStarted,
     AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
@@ -35,7 +41,7 @@ from meshagent.agents.messages import (
 )
 from meshagent.agents.process import AgentSupervisor, Message
 from meshagent.api import Participant, RoomMessage
-from meshagent.api.messaging import JsonContent
+from meshagent.api.messaging import EmptyContent, JsonContent
 from meshagent.tools import ToolContext, ToolkitBuilder
 
 
@@ -250,6 +256,7 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         agent_tool_names = {tool.name for tool in agent_toolkits[0].tools}
         assert agent_tool_names == {
             "new_thread",
+            "attach_file",
             "list_threads",
             "grep_thread_list",
         }
@@ -322,6 +329,65 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_attach_file_emits_file_content_events() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        attach_file_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "attach_file"
+        )
+
+        result = await attach_file_tool.execute(
+            context=ToolContext(
+                room=room,
+                caller=caller,
+                caller_context={
+                    "thread_id": "/threads/test.thread",
+                    "turn_id": "turn-1",
+                },
+            ),
+            path="docs/report.pdf",
+        )
+
+        assert isinstance(result, EmptyContent)
+        assert len(supervisor.sent) == 3
+
+        started = supervisor.sent[0]
+        delta = supervisor.sent[1]
+        ended = supervisor.sent[2]
+        assert started.sender is caller
+        assert delta.sender is caller
+        assert ended.sender is caller
+
+        started_payload = started.data
+        delta_payload = delta.data
+        ended_payload = ended.data
+        assert isinstance(started_payload, AgentFileContentStarted)
+        assert started_payload.type == AGENT_EVENT_FILE_CONTENT_STARTED
+        assert started_payload.thread_id == "/threads/test.thread"
+        assert started_payload.turn_id == "turn-1"
+        assert isinstance(delta_payload, AgentFileContentDelta)
+        assert delta_payload.type == AGENT_EVENT_FILE_CONTENT_DELTA
+        assert delta_payload.thread_id == "/threads/test.thread"
+        assert delta_payload.turn_id == "turn-1"
+        assert delta_payload.url == "room:///docs/report.pdf"
+        assert isinstance(ended_payload, AgentFileContentEnded)
+        assert ended_payload.type == AGENT_EVENT_FILE_CONTENT_ENDED
+        assert ended_payload.thread_id == "/threads/test.thread"
+        assert ended_payload.turn_id == "turn-1"
+        assert started_payload.item_id == delta_payload.item_id
+        assert delta_payload.item_id == ended_payload.item_id
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_default_new_exposes_thread_list_tools_without_explicit_thread_dir() -> (
     None
 ):
@@ -333,11 +399,20 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
     await channel.start(supervisor)
     try:
         tool_names = {tool.name for tool in channel.get_agent_toolkits()[0].tools}
-        assert tool_names == {"new_thread", "list_threads", "grep_thread_list"}
+        assert tool_names == {
+            "new_thread",
+            "attach_file",
+            "list_threads",
+            "grep_thread_list",
+        }
         assert channel.make_remote_toolkit().validation_mode == "content_types"
         assert (
             "meshagent.chatbot.thread-list",
             ".threads/assistant/index.threadl",
+        ) in room.local_participant.set_attribute_calls
+        assert (
+            "meshagent.chatbot.thread-dir",
+            ".threads/assistant",
         ) in room.local_participant.set_attribute_calls
         assert sync.open_calls == [
             {
@@ -645,6 +720,69 @@ async def test_chat_channel_sends_completed_text_to_open_participants() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_sends_completed_file_to_open_participants() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="opened",
+                message={"path": "/threads/test.thread"},
+            )
+        )
+
+        await channel.on_message(
+            Message(
+                data=AgentFileContentStarted(
+                    type=AGENT_EVENT_FILE_CONTENT_STARTED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="assistant-file-1",
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentFileContentDelta(
+                    type=AGENT_EVENT_FILE_CONTENT_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="assistant-file-1",
+                    url="room:///docs/report.pdf",
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentFileContentEnded(
+                    type=AGENT_EVENT_FILE_CONTENT_ENDED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="assistant-file-1",
+                )
+            )
+        )
+
+        assert room.messaging.sent_messages == [
+            {
+                "to": caller,
+                "type": "chat",
+                "message": {
+                    "path": "/threads/test.thread",
+                    "attachments": [{"path": "room:///docs/report.pdf"}],
+                },
+            }
+        ]
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_translates_clear_messages() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
@@ -787,6 +925,7 @@ async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_rep
     try:
         assert room.local_participant.set_attribute_calls == [
             ("meshagent.chatbot.threading", "default-new"),
+            ("meshagent.chatbot.thread-dir", "/threads/chat"),
             ("meshagent.chatbot.thread-list", "/threads/chat/index.threadl"),
             ("empty_state_title", "How can I help you?"),
         ]
