@@ -418,6 +418,75 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         return {"ok": True}
 
 
+class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.retry_event_sent = asyncio.Event()
+        self.release_completion = asyncio.Event()
+        self.call_event = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        room,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+    ) -> Any:
+        del context
+        del room
+        del toolkits
+        del output_schema
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+
+        if event_handler is not None:
+            event_handler(
+                {
+                    "type": "agent.event",
+                    "source": "openai",
+                    "name": "openai.retry",
+                    "kind": "message",
+                    "state": "in_progress",
+                    "method": "openai.retry",
+                    "correlation_key": "llm.retry:test",
+                    "headline": "Reconnecting to the LLM (retry 1/10)",
+                    "details": ["Retry 1 of 10 in 1.00s."],
+                }
+            )
+        self.retry_event_sent.set()
+        await self.release_completion.wait()
+        if event_handler is not None:
+            event_handler(
+                {
+                    "type": "agent.event",
+                    "source": "openai",
+                    "name": "openai.retry",
+                    "kind": "message",
+                    "state": "completed",
+                    "method": "openai.retry",
+                    "correlation_key": "llm.retry:test",
+                    "headline": "Reconnected to the LLM",
+                    "details": ["Recovered after 1 retry."],
+                }
+            )
+        self.call_event.set()
+        return {"ok": True}
+
+
 class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(self) -> None:
         self.session = _LifecycleSession()
@@ -434,6 +503,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         turn_id: str,
         thread_id: str,
         callback,
+        custom_event_callback=None,
     ):
         def publish(event: dict[str, Any]) -> None:
             item_id = event["item_id"]
@@ -624,6 +694,7 @@ class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
         turn_id: str,
         thread_id: str,
         callback,
+        custom_event_callback=None,
     ):
         def publish(event: dict[str, Any]) -> None:
             event_type = event["type"]
@@ -956,6 +1027,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         turn_id: str,
         thread_id: str,
         callback,
+        custom_event_callback=None,
     ):
         def publish(event: dict[str, Any]) -> None:
             del event
@@ -1055,6 +1127,7 @@ class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
         turn_id: str,
         thread_id: str,
         callback,
+        custom_event_callback=None,
     ):
         def publish(event: dict[str, Any]) -> None:
             callback(
@@ -1778,6 +1851,67 @@ async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
     assert ended_payload["turn_id"] == started_payload["turn_id"]
 
     await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_forwards_custom_retry_events_to_thread_adapter(
+    monkeypatch,
+) -> None:
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    thread_adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    llm_adapter = _CustomEventLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = LLMAgentProcess(
+        thread_id="/threads/test.thread",
+        room=room,
+        llm_adapter=llm_adapter,
+        thread_adapter=thread_adapter,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/test.thread",
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+        await asyncio.wait_for(llm_adapter.retry_event_sent.wait(), timeout=1)
+        await _wait_for(
+            lambda: (
+                (
+                    "thread.status./threads/test.thread",
+                    "Reconnecting to the LLM (retry 1/10)",
+                )
+                in room.local_participant.set_attribute_calls
+            )
+        )
+        assert all(
+            event.get_attribute("name") != "openai.retry"
+            for event in room.sync.document.event_elements
+        )
+
+        llm_adapter.release_completion.set()
+        await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
+        await _wait_for(
+            lambda: (
+                room.local_participant.get_attribute(
+                    "thread.status./threads/test.thread"
+                )
+                == "Thinking"
+            )
+        )
+    finally:
+        await process.stop(supervisor)
 
 
 @pytest.mark.asyncio

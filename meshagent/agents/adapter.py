@@ -210,6 +210,7 @@ class LLMAdapter(Generic[TEvent]):
         turn_id: str,
         thread_id: str,
         callback: Callable[[AgentMessage], None],
+        custom_event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> Callable[[TEvent], None]:
         del turn_id
         del thread_id
@@ -217,6 +218,14 @@ class LLMAdapter(Generic[TEvent]):
         def publish(event: TEvent) -> None:
             if isinstance(event, AgentMessage):
                 callback(event)
+                return
+
+            if not isinstance(event, dict) or custom_event_callback is None:
+                return
+
+            event_type = event.get("type")
+            if event_type in ("agent.event", "codex.event"):
+                custom_event_callback(event)
 
         return publish
 

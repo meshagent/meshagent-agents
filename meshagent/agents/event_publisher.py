@@ -689,6 +689,7 @@ class _AgentMessageEmitter:
 class _OpenAIAgentEventPublisher:
     emitter: _AgentMessageEmitter
     function_tool_name_resolver: FunctionToolNameResolver | None = None
+    custom_event_callback: Callable[[dict[str, Any]], None] | None = None
     _active_response_id: str | None = None
     _output_item_ids: dict[int, str] = field(default_factory=dict)
     _pending_handler_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
@@ -925,6 +926,11 @@ class _OpenAIAgentEventPublisher:
         if event_type is None:
             return
 
+        if event_type in ("agent.event", "codex.event"):
+            if self.custom_event_callback is not None:
+                self.custom_event_callback(event)
+            return
+
         if event_type.startswith("response."):
             self._track_response_boundary(event=event)
 
@@ -1088,6 +1094,7 @@ class _AnthropicBlockState:
 class _AnthropicAgentEventPublisher:
     emitter: _AgentMessageEmitter
     function_tool_name_resolver: FunctionToolNameResolver | None = None
+    custom_event_callback: Callable[[dict[str, Any]], None] | None = None
     _openai_publisher: _OpenAIAgentEventPublisher = field(init=False)
     _message_id: str | None = None
     _blocks: dict[int, _AnthropicBlockState] = field(default_factory=dict)
@@ -1096,6 +1103,7 @@ class _AnthropicAgentEventPublisher:
         self._openai_publisher = _OpenAIAgentEventPublisher(
             emitter=self.emitter,
             function_tool_name_resolver=self.function_tool_name_resolver,
+            custom_event_callback=self.custom_event_callback,
         )
 
     def set_function_tool_name_resolver(
@@ -1112,6 +1120,11 @@ class _AnthropicAgentEventPublisher:
     def __call__(self, event: dict[str, Any]) -> None:
         event_type = _as_str(event.get("type"))
         if event_type is None:
+            return
+
+        if event_type in ("agent.event", "codex.event"):
+            if self.custom_event_callback is not None:
+                self.custom_event_callback(event)
             return
 
         if event_type.startswith("response."):
@@ -1295,6 +1308,7 @@ def make_openai_agent_event_publisher(
     thread_id: str,
     callback: AgentEventCallback,
     function_tool_name_resolver: FunctionToolNameResolver | None = None,
+    custom_event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Callable[[dict[str, Any]], None]:
     emitter = _AgentMessageEmitter(
         turn_id=turn_id,
@@ -1304,6 +1318,7 @@ def make_openai_agent_event_publisher(
     publisher = _OpenAIAgentEventPublisher(
         emitter=emitter,
         function_tool_name_resolver=function_tool_name_resolver,
+        custom_event_callback=custom_event_callback,
     )
     return publisher
 
@@ -1314,6 +1329,7 @@ def make_anthropic_agent_event_publisher(
     thread_id: str,
     callback: AgentEventCallback,
     function_tool_name_resolver: FunctionToolNameResolver | None = None,
+    custom_event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Callable[[dict[str, Any]], None]:
     emitter = _AgentMessageEmitter(
         turn_id=turn_id,
@@ -1323,5 +1339,6 @@ def make_anthropic_agent_event_publisher(
     publisher = _AnthropicAgentEventPublisher(
         emitter=emitter,
         function_tool_name_resolver=function_tool_name_resolver,
+        custom_event_callback=custom_event_callback,
     )
     return publisher

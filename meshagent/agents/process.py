@@ -57,6 +57,14 @@ from .messages import (
 )
 
 logger = logging.getLogger("agent-process")
+_THREAD_STATUS_ACTIVE_STATES = {
+    "queued",
+    "in_progress",
+    "running",
+    "pending",
+    "searching",
+}
+_THREAD_STATUS_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
 LifecycleState = Literal["stopped", "starting", "started", "stopping", "failed"]
 ChannelState = LifecycleState
@@ -1289,10 +1297,47 @@ class LLMAgentProcess(AgentProcess):
                 return
             self.emit(sender=sender, payload=message)
 
+        thread_adapter = self.thread_adapter
+
+        def publish_custom_event(event: dict[str, Any]) -> None:
+            if self._interrupt_requested_turn_id == turn_id:
+                return
+            if thread_adapter is None:
+                return
+
+            event_type = event.get("type")
+            if event_type not in ("agent.event", "codex.event"):
+                return
+
+            raw_state = event.get("state")
+            if not isinstance(raw_state, str):
+                return
+            state = raw_state.strip().lower()
+
+            headline = event.get("headline")
+            summary = event.get("summary")
+            status_text = None
+            if isinstance(headline, str) and headline.strip() != "":
+                status_text = headline.strip()
+            elif isinstance(summary, str) and summary.strip() != "":
+                status_text = summary.strip()
+
+            if state in _THREAD_STATUS_ACTIVE_STATES:
+                if status_text is None:
+                    return
+                asyncio.create_task(
+                    thread_adapter.set_thread_status(status=status_text)
+                )
+                return
+
+            if state in _THREAD_STATUS_TERMINAL_STATES:
+                asyncio.create_task(thread_adapter.set_thread_status(status="Thinking"))
+
         handle_event = self.llm_adapter.make_agent_event_publisher(
             turn_id=turn_id,
             thread_id=thread_id,
             callback=publish_event,
+            custom_event_callback=publish_custom_event,
         )
 
         self._active_turn_sender = sender
