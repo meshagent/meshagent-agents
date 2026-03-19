@@ -110,6 +110,29 @@ async def test_to_prompt_keeps_valid_skill_entries_unchanged(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_to_prompt_includes_unloadable_skill_error_when_frontmatter_is_invalid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    skill_dir = tmp_path / "broken-skill"
+    skill_dir.mkdir()
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: broken-skill\ndescription: [unterminated\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    caplog.set_level("WARNING")
+
+    prompt = await skills.to_prompt([skill_dir])
+
+    assert "<name>\nbroken-skill\n</name>" in prompt
+    assert "Configured skill could not be loaded:" in prompt
+    assert "Invalid YAML in frontmatter:" in prompt
+    assert str(skill_md) in prompt
+    assert f"unable to load skill from {skill_md}" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_discover_skill_folders_returns_immediate_skill_children(
     tmp_path: Path,
 ) -> None:
@@ -161,3 +184,39 @@ async def test_to_prompt_discovers_subskills_when_parent_has_no_skill_md(
     assert str(first_skill_md) in prompt
     assert resolved_second_skill_md is not None
     assert str(resolved_second_skill_md) in prompt
+
+
+@pytest.mark.asyncio
+async def test_to_prompt_keeps_discovered_valid_skills_when_one_subskill_is_invalid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+
+    valid_skill = skills_root / "pdf-reader"
+    valid_skill.mkdir()
+    valid_skill_md = valid_skill / "SKILL.md"
+    valid_skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    invalid_skill = skills_root / "broken-skill"
+    invalid_skill.mkdir()
+    invalid_skill_md = invalid_skill / "SKILL.md"
+    invalid_skill_md.write_text(
+        "---\nname: broken-skill\ndescription: [unterminated\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    caplog.set_level("WARNING")
+
+    prompt = await skills.to_prompt([skills_root])
+
+    assert "<name>\npdf-reader\n</name>" in prompt
+    assert str(valid_skill_md) in prompt
+    assert "<name>\nbroken-skill\n</name>" in prompt
+    assert "Configured skill could not be loaded:" in prompt
+    assert "Invalid YAML in frontmatter:" in prompt
+    assert str(invalid_skill_md) in prompt
+    assert f"unable to load skill from {invalid_skill_md}" in caplog.text

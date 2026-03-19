@@ -76,7 +76,7 @@ from meshagent.agents.process import (
     Message,
 )
 from meshagent.agents.thread_adapter import ThreadAdapter
-from meshagent.api import Participant
+from meshagent.api import Participant, RemoteParticipant
 from meshagent.api.messaging import FileContent
 from meshagent.api.messaging import JsonContent
 from meshagent.api.messaging import TextContent
@@ -831,14 +831,25 @@ class _DownloadRecordingRoom:
         self.storage = _DownloadRecordingStorage(files=files or {})
 
 
-class _ThreadParticipant(Participant):
-    def __init__(self, *, name: str, participant_id: str) -> None:
-        super().__init__(id=participant_id, attributes={"name": name})
+class _ThreadParticipant(RemoteParticipant):
+    def __init__(
+        self,
+        *,
+        name: str,
+        participant_id: str,
+        role: str = "user",
+    ) -> None:
+        super().__init__(
+            id=participant_id,
+            role=role,
+            attributes={"name": name},
+            online=True,
+        )
 
 
-class _ThreadLocalParticipant(_ThreadParticipant):
+class _ThreadLocalParticipant(Participant):
     def __init__(self) -> None:
-        super().__init__(name="assistant", participant_id="assistant-id")
+        super().__init__(id="assistant-id", attributes={"name": "assistant"})
         self._attributes: dict[str, str] = {"name": "assistant"}
         self.set_attribute_calls: list[tuple[str, str | None]] = []
 
@@ -2831,6 +2842,7 @@ async def test_agent_process_thread_adapter_persists_channel_emitted_file_events
 
         assistant_message = room.sync.document.message_elements[0]
         assert assistant_message.get_attribute("author_name") == "assistant"
+        assert assistant_message.get_attribute("role") == "agent"
         assert assistant_message.get_attribute("turn_id") == "turn-1"
         assert [
             child.get_attribute("path")
@@ -2906,6 +2918,7 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
 
         user_message = room.sync.document.message_elements[0]
         assert user_message.get_attribute("author_name") == "caller"
+        assert user_message.get_attribute("role") == "user"
         assert user_message.get_attribute("text") == "hello from caller"
         assert [
             child.get_attribute("path")
@@ -2914,6 +2927,7 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
 
         assistant_message = room.sync.document.message_elements[1]
         assert assistant_message.get_attribute("author_name") == "assistant"
+        assert assistant_message.get_attribute("role") == "agent"
         assert assistant_message.get_attribute("text") == "hello"
 
         tool_event = next(
@@ -4422,7 +4436,7 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
             write_event.get_attribute("headline")
             == "Attempted to write file src/app.py"
         )
-        assert write_event.get_attribute("details") == ""
+        assert write_event.get_attribute("details") == "'text' is a required property"
         assert write_event.get_attribute("preview") == ""
         assert (
             len(
@@ -4802,6 +4816,7 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
         assert (
             read_event.get_attribute("headline") == "Attempted to read file src/app.py"
         )
+        assert read_event.get_attribute("details") == "read failed"
         assert (
             len(
                 [
@@ -4900,7 +4915,7 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
             grep_event.get_attribute("headline")
             == "Attempted to search file src/app.py"
         )
-        assert grep_event.get_attribute("details") == "Pattern: hello"
+        assert grep_event.get_attribute("details") == "Pattern: hello\nsearch failed"
         assert (
             len(
                 [
@@ -4976,8 +4991,8 @@ async def test_agent_process_thread_adapter_omits_generic_tool_arguments_and_err
         await real_sleep(0)
 
         await _wait_for(lambda: tool_event.get_attribute("state") == "failed")
-        assert tool_event.get_attribute("headline") == "Lookup Failed"
-        assert tool_event.get_attribute("details") == ""
+        assert tool_event.get_attribute("headline") == "Attempted to call Lookup"
+        assert tool_event.get_attribute("details") == "bad call"
         assert (
             len(
                 [
@@ -5271,6 +5286,83 @@ async def test_agent_process_thread_adapter_strips_room_scheme_from_turn_attachm
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_renders_failed_apply_patch_as_attempt(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="patch-1",
+                toolkit="patch",
+                tool="apply_patch",
+                arguments={
+                    "patch": (
+                        "*** Begin Patch\n"
+                        "*** Update File: src/app.py\n"
+                        "@@\n"
+                        "-old\n"
+                        "+new\n"
+                        "*** End Patch\n"
+                    )
+                },
+            )
+        )
+        await real_sleep(0)
+
+        patch_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "patch-1"
+        )
+        assert patch_event.get_attribute("headline") == "Editing src/app.py"
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="patch-1",
+                error=AgentError(
+                    message="patch rejected",
+                    code="tool_call_failed",
+                ),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(lambda: patch_event.get_attribute("state") == "failed")
+        assert patch_event.get_attribute("headline") == "Attempted to patch src/app.py"
+        assert patch_event.get_attribute("details") == "patch rejected"
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_thread_adapter_restores_thread_state(
     monkeypatch,
 ) -> None:
@@ -5289,6 +5381,7 @@ async def test_llm_agent_process_thread_adapter_restores_thread_state(
             "text": "Earlier question",
             "created_at": "2026-03-11T00:00:00Z",
             "author_name": "caller",
+            "role": "user",
         },
     )
     earlier_user_message.append_child(
@@ -5301,6 +5394,7 @@ async def test_llm_agent_process_thread_adapter_restores_thread_state(
             "text": "Earlier answer",
             "created_at": "2026-03-11T00:01:00Z",
             "author_name": "assistant",
+            "role": "agent",
         },
     )
 
@@ -5344,6 +5438,71 @@ async def test_llm_agent_process_thread_adapter_restores_thread_state(
             {
                 "role": "assistant",
                 "content": "Earlier answer",
+            },
+            {
+                "role": "user",
+                "content": "current",
+            },
+        ]
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_thread_adapter_restore_prefers_message_role(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    document = _ThreadDocument()
+    document.root.messages.append_child(
+        "message",
+        {
+            "text": "External update",
+            "created_at": "2026-03-11T00:00:00Z",
+            "author_name": "assistant",
+            "role": "user",
+        },
+    )
+
+    room = _ThreadRoom(document=document)
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    process = LLMAgentProcess(
+        thread_id="/threads/test.thread",
+        room=room,
+        llm_adapter=llm_adapter,
+        thread_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/test.thread",
+                    content=[{"type": "text", "text": "current"}],
+                )
+            )
+        )
+
+        await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
+        await _wait_for(
+            lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+        )
+
+        assert llm_adapter.calls[0]["messages"] == [
+            {
+                "role": "user",
+                "content": "assistant said at 2026-03-11T00:00:00Z: External update",
             },
             {
                 "role": "user",

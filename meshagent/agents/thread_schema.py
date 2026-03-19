@@ -448,6 +448,11 @@ thread_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
+                    name="role",
+                    description="the role of the message author, such as user, agent, or tool",
+                    type="string",
+                ),
+                ValueProperty(
                     name="author_ref",
                     description="a reference to author identity in another system",
                     type="string",

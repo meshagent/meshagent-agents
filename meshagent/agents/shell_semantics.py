@@ -2403,7 +2403,7 @@ def _run_display(*, command: str, cwd: str | None) -> ShellDisplay:
             pending=_phase(headline="Preparing Command"),
             active=_phase(headline="Running Command"),
             completed=_phase(headline="Ran Command"),
-            failed=_phase(headline="Command Failed"),
+            failed=_phase(headline="Attempted to run command"),
             cancelled=_phase(headline="Command Cancelled"),
         )
 
@@ -2417,6 +2417,9 @@ def _run_display(*, command: str, cwd: str | None) -> ShellDisplay:
         ),
         active=_phase(headline="Running Command", summary=f"Run {normalized_command}"),
         completed=_phase(headline="Ran Command", summary=normalized_command),
-        failed=_phase(headline="Command Failed", summary="Command Failed"),
+        failed=_phase(
+            headline="Attempted to run command",
+            summary="Attempted to run command",
+        ),
         cancelled=_phase(headline="Command Cancelled", summary="Command Cancelled"),
     )

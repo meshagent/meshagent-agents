@@ -12,6 +12,7 @@ from meshagent.api import (
     Element,
     MeshDocument,
     Participant,
+    RemoteParticipant,
     RoomClient,
     RoomException,
 )
@@ -352,17 +353,33 @@ class ThreadAdapter(ABC):
         message_id: Optional[str] = None,
         turn_id: Optional[str] = None,
         attachments: Optional[list[dict[str, Any]]] = None,
+        role: Optional[str] = None,
     ) -> None:
         self.ensure_member(participant=participant)
         doc_messages = self._ensure_messages_element()
 
+        author_name = ""
+        if isinstance(participant, Participant):
+            participant_name = participant.get_attribute("name")
+            if isinstance(participant_name, str):
+                author_name = participant_name
+        else:
+            author_name = participant
+
         attributes: dict[str, Any] = {
             "text": text,
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "author_name": participant.get_attribute("name")
-            if isinstance(participant, Participant)
-            else participant,
+            "author_name": author_name,
         }
+
+        normalized_role = role.strip() if isinstance(role, str) else ""
+        if normalized_role == "" and isinstance(participant, RemoteParticipant):
+            normalized_role = participant.role.strip()
+        if normalized_role == "" and participant is self._room.local_participant:
+            normalized_role = "agent"
+        if normalized_role != "":
+            attributes["role"] = normalized_role
+
         if isinstance(message_id, str) and message_id.strip() != "":
             attributes["id"] = message_id.strip()
         if isinstance(turn_id, str) and turn_id.strip() != "":

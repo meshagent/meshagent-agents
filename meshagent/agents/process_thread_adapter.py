@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from meshagent.api import Element, Participant, RoomException
+from meshagent.api import Element, Participant, RemoteParticipant, RoomException
 from meshagent.api.chan import ChanClosed
 from meshagent.api.messaging import (
     Content,
@@ -279,6 +279,17 @@ def _merge_detail_lines(*, existing: str, new: str) -> str:
     return "\n".join(merged)
 
 
+def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
+    combined: list[str] = []
+    for detail_group in detail_groups:
+        for line in detail_group:
+            normalized_line = line.strip()
+            if normalized_line == "" or normalized_line in combined:
+                continue
+            combined.append(normalized_line)
+    return tuple(combined)
+
+
 class AgentProcessThreadAdapter(ThreadAdapter):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -355,15 +366,15 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 f"the index of the first message loaded is {first_message}"
             )
 
-        local_name = self._local_participant_name()
         for message in messages:
             author_name = self._attribute_as_str(message, "author_name")
             created_at = self._attribute_as_str(message, "created_at")
             text = self._attribute_as_str(message, "text")
-            is_local_author = author_name == local_name and author_name != ""
+            role = self._message_role(message=message, author_name=author_name)
+            is_agent_message = role in {"agent", "assistant"}
 
             if text != "":
-                if is_local_author:
+                if is_agent_message:
                     context.append_assistant_message(text)
                 else:
                     context.append_user_message(
@@ -382,7 +393,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 if path == "":
                     continue
 
-                if is_local_author:
+                if is_agent_message:
                     context.append_assistant_message(
                         f"assistant attached a file available at {path}"
                     )
@@ -576,6 +587,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             message_id=turn.message_id,
             turn_id=turn_id,
             attachments=attachments if len(attachments) > 0 else None,
+            role=self._sender_role(sender=sender),
         )
 
     @staticmethod
@@ -619,6 +631,29 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             return value
         return ""
 
+    def _message_role(self, *, message: Element, author_name: str) -> str:
+        role = self._attribute_as_str(message, "role").strip().lower()
+        if role != "":
+            return role
+
+        local_name = self._local_participant_name()
+        if author_name == local_name and author_name != "":
+            return "agent"
+
+        return ""
+
+    @staticmethod
+    def _sender_role(*, sender: Participant | None) -> str | None:
+        if sender is None:
+            return "user"
+
+        if isinstance(sender, RemoteParticipant):
+            role = sender.role.strip()
+            if role != "":
+                return role
+
+        return None
+
     @staticmethod
     def _attribute_as_str(element: Element, name: str) -> str:
         value = element.get_attribute(name)
@@ -640,6 +675,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     ) -> Element:
         existing = self._active_message_elements_by_key.get(key)
         if existing is not None:
+            existing.set_attribute("role", "agent")
             if isinstance(turn_id, str) and turn_id.strip() != "":
                 existing.set_attribute("turn_id", turn_id.strip())
             return existing
@@ -650,6 +686,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 continue
 
             if self._attribute_as_str(child, "id") == existing_id:
+                child.set_attribute("role", "agent")
                 if isinstance(turn_id, str) and turn_id.strip() != "":
                     child.set_attribute("turn_id", turn_id.strip())
                 self._active_message_elements_by_key[key] = child
@@ -660,6 +697,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             "text": "",
             "created_at": _now_iso(),
             "author_name": self._local_participant_name(),
+            "role": "agent",
         }
         if isinstance(turn_id, str) and turn_id.strip() != "":
             assistant_message_attributes["turn_id"] = turn_id.strip()
@@ -1104,7 +1142,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             if self._is_pending_state(state=status):
                 return f"Preparing to edit {path}"
             if status == "failed":
-                return f"Patch Failed: {path}"
+                return f"Attempted to patch {path}"
             if status == "cancelled":
                 return f"Patch Cancelled: {path}"
             if self._is_active_state(state=status):
@@ -1114,7 +1152,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         if self._is_pending_state(state=status):
             return "Preparing Patch"
         if status == "failed":
-            return "Patch Failed"
+            return "Attempted to patch"
         if status == "cancelled":
             return "Patch Cancelled"
         if self._is_active_state(state=status):
@@ -1135,6 +1173,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         tool: str,
         arguments: dict[str, Any] | None,
         state: str,
+        error: AgentError | None,
         data: str,
     ) -> _NormalizedThreadEvent | None:
         def _storage_tool_correlation_key(path: str) -> str:
@@ -1171,7 +1210,16 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 item_type="tool_call",
                 summary=_truncate_text(text=headline, limit=280),
                 headline=headline,
-                details=self._exec_search_details(search_preview=grep_preview),
+                details=_combine_detail_groups(
+                    self._exec_search_details(search_preview=grep_preview),
+                    self._tool_detail_lines(
+                        toolkit=toolkit,
+                        tool=tool,
+                        arguments=arguments,
+                        result=None,
+                        error=error,
+                    ),
+                ),
                 path=path,
                 data=data,
                 correlation_key=_storage_tool_correlation_key(path),
@@ -1209,6 +1257,13 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 item_type="tool_call",
                 summary=_truncate_text(text=headline, limit=280),
                 headline=headline,
+                details=self._tool_detail_lines(
+                    toolkit=toolkit,
+                    tool=tool,
+                    arguments=arguments,
+                    result=None,
+                    error=error,
+                ),
                 path=path,
                 data=data,
                 correlation_key=_storage_tool_correlation_key(path),
@@ -1240,6 +1295,13 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             item_type="tool_call",
             summary=_truncate_text(text=headline, limit=280),
             headline=headline,
+            details=self._tool_detail_lines(
+                toolkit=toolkit,
+                tool=tool,
+                arguments=arguments,
+                result=None,
+                error=error,
+            ),
             path=path,
             data=data,
             correlation_key=f"tool:{item_id}",
@@ -1271,7 +1333,21 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         del tool
         del arguments
         del result
-        del error
+        return self._tool_error_details(error=error)
+
+    @staticmethod
+    def _tool_error_details(*, error: AgentError | None) -> tuple[str, ...]:
+        if error is None:
+            return ()
+
+        message = error.message.strip()
+        if message != "":
+            return (message,)
+
+        code = (error.code or "").strip()
+        if code != "":
+            return (code,)
+
         return ()
 
     def _tool_event(
@@ -1318,11 +1394,19 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             tool=tool,
             arguments=arguments,
             state=state,
+            error=error,
             data=data,
         )
         if storage_event is not None:
             return storage_event
 
+        tool_details = self._tool_detail_lines(
+            toolkit=toolkit,
+            tool=tool,
+            arguments=arguments,
+            result=result,
+            error=error,
+        )
         kind = self._tool_event_kind(toolkit=toolkit, tool=tool)
         correlation_key = f"tool:{item_id}"
         retain_correlation = False
@@ -1346,6 +1430,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                     item_type="tool_call",
                     summary=shell_phase.summary,
                     headline=shell_phase.headline,
+                    details=tool_details,
                     path=shell_analysis.display.path,
                     preview=shell_analysis.display.preview,
                     data=data,
@@ -1368,7 +1453,10 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 item_type="tool_call",
                 summary=shell_phase.summary,
                 headline=shell_phase.headline,
-                details=shell_analysis.display.details,
+                details=_combine_detail_groups(
+                    shell_analysis.display.details,
+                    tool_details,
+                ),
                 preview=shell_analysis.display.preview,
                 path="",
                 data=data,
@@ -1385,12 +1473,15 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             elif self._is_active_state(state=state):
                 headline = "Searching the web"
             elif state == "failed":
-                headline = "Web Search Failed"
+                headline = "Attempted to search the web"
             elif state == "cancelled":
                 headline = "Web Search Cancelled"
             else:
                 headline = "Searched the web"
-            details = (query,) if query != "" else ()
+            details = _combine_detail_groups(
+                (query,) if query != "" else (),
+                tool_details,
+            )
             summary = (
                 _truncate_text(text=query, limit=280)
                 if query != ""
@@ -1427,13 +1518,9 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             )
             details = ()
             if patch == "":
-                details = self._tool_detail_lines(
-                    toolkit=toolkit,
-                    tool=tool,
-                    arguments=arguments,
-                    result=result,
-                    error=error,
-                )
+                details = tool_details
+            else:
+                details = tool_details
 
             return _NormalizedThreadEvent(
                 source="agent",
@@ -1459,7 +1546,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             elif self._is_active_state(state=state):
                 headline = "Generating image"
             elif state == "failed":
-                headline = "Image Generation Failed"
+                headline = "Attempted to generate image"
             elif state == "cancelled":
                 headline = "Image Generation Cancelled"
             else:
@@ -1471,9 +1558,15 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             elif self._is_active_state(state=state):
                 headline = f"Calling {humanized}"
             elif state == "failed":
-                headline = f"{humanized} Failed"
+                if humanized != "":
+                    headline = f"Attempted to call {humanized}"
+                else:
+                    headline = "Attempted to call tool"
             elif state == "cancelled":
-                headline = f"{humanized} Cancelled"
+                if humanized != "":
+                    headline = f"{humanized} Cancelled"
+                else:
+                    headline = "Tool call cancelled"
             else:
                 headline = f"Called {humanized}"
 
@@ -1488,13 +1581,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             item_type="tool_call",
             summary=_truncate_text(text=headline, limit=280),
             headline=headline,
-            details=self._tool_detail_lines(
-                toolkit=toolkit,
-                tool=tool,
-                arguments=arguments,
-                result=result,
-                error=error,
-            ),
+            details=tool_details,
             preview=self._tool_result_preview(result=result),
             data=data,
             correlation_key=correlation_key,

@@ -390,6 +390,9 @@ def test_analyze_shell_command_falls_back_to_run_display() -> None:
     assert analysis.display.phase_for_state(state="in_progress").headline == (
         "Running Command"
     )
+    assert analysis.display.phase_for_state(state="failed").headline == (
+        "Attempted to run command"
+    )
     assert analysis.display.preview == "node scripts/custom.js --flag"
 
 

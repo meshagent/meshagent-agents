@@ -207,6 +207,49 @@ def _append_prompt_skill(
     lines.append("</skill>")
 
 
+def _append_unavailable_prompt_skill(
+    *,
+    lines: list[str],
+    name: str,
+    location: Path,
+    error: str,
+) -> None:
+    _append_prompt_skill(
+        lines=lines,
+        name=name,
+        description=f"Configured skill could not be loaded: {error}",
+        location=location,
+    )
+
+
+async def _append_skill_prompt_entry(
+    *,
+    lines: list[str],
+    skill_md_path: Path,
+    missing_ok: bool,
+) -> None:
+    try:
+        props = await _read_properties_from_skill_md(skill_md_path)
+    except (OSError, ParseError, ValidationError, UnicodeError) as exc:
+        if not missing_ok:
+            raise
+        logger.warning("unable to load skill from %s: %s", skill_md_path, exc)
+        _append_unavailable_prompt_skill(
+            lines=lines,
+            name=skill_md_path.parent.name or str(skill_md_path.parent),
+            location=skill_md_path,
+            error=str(exc),
+        )
+        return
+
+    _append_prompt_skill(
+        lines=lines,
+        name=props.name,
+        description=props.description,
+        location=skill_md_path,
+    )
+
+
 async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
     """Generate the <available_skills> XML block for inclusion in agent prompts.
 
@@ -247,14 +290,10 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
                     discovered_skill_md_path = await find_skill_md(discovered_skill_dir)
                     if discovered_skill_md_path is None:
                         continue
-                    props = await _read_properties_from_skill_md(
-                        discovered_skill_md_path
-                    )
-                    _append_prompt_skill(
+                    await _append_skill_prompt_entry(
                         lines=lines,
-                        name=props.name,
-                        description=props.description,
-                        location=discovered_skill_md_path,
+                        skill_md_path=discovered_skill_md_path,
+                        missing_ok=missing_ok,
                     )
                 continue
 
@@ -273,12 +312,10 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
             )
             continue
 
-        props = await _read_properties_from_skill_md(skill_md_path)
-        _append_prompt_skill(
+        await _append_skill_prompt_entry(
             lines=lines,
-            name=props.name,
-            description=props.description,
-            location=skill_md_path,
+            skill_md_path=skill_md_path,
+            missing_ok=missing_ok,
         )
 
     lines.append("</available_skills>")
