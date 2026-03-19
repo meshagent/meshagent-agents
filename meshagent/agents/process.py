@@ -65,6 +65,16 @@ _THREAD_STATUS_ACTIVE_STATES = {
     "searching",
 }
 _THREAD_STATUS_TERMINAL_STATES = {"completed", "failed", "cancelled"}
+_THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
+    {
+        AGENT_MESSAGE_THREAD_CLEAR,
+        AGENT_MESSAGE_TOOL_CALL_APPROVE,
+        AGENT_MESSAGE_TOOL_CALL_REJECT,
+        AGENT_MESSAGE_TURN_INTERRUPT,
+        AGENT_MESSAGE_TURN_START,
+        AGENT_MESSAGE_TURN_STEER,
+    }
+)
 
 LifecycleState = Literal["stopped", "starting", "started", "stopping", "failed"]
 ChannelState = LifecycleState
@@ -547,6 +557,14 @@ class AgentProcess:
             logger.debug("dropping process message during shutdown")
             return
 
+        if self._should_mirror_to_thread_adapter(message=message):
+            thread_adapter = self._thread_adapter
+            if thread_adapter is not None:
+                thread_adapter.push_message(
+                    message=message.data,
+                    sender=message.sender,
+                )
+
         if self.handles(message):
             try:
                 self._queue.put_nowait(message)
@@ -555,6 +573,24 @@ class AgentProcess:
 
     def handles(self, message: Message) -> bool:
         return False
+
+    def _should_mirror_to_thread_adapter(self, *, message: Message) -> bool:
+        thread_adapter = self._thread_adapter
+        if thread_adapter is None:
+            return False
+
+        thread_id = self._thread_id
+        if thread_id is None or message.data.thread_id != thread_id:
+            return False
+
+        if message.source is self:
+            return False
+
+        message_type = message.data.type
+        if not message_type.startswith("meshagent.agent."):
+            return False
+
+        return message_type not in _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES
 
     @property
     def state(self) -> ProcessState:

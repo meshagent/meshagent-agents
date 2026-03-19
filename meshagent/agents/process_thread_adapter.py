@@ -484,7 +484,10 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 turn_id=message.turn_id,
             )
             file_element = self._ensure_file_element(message=assistant_message)
-            file_element.set_attribute("path", message.url)
+            file_element.set_attribute(
+                "path",
+                self._thread_attachment_path(url=message.url),
+            )
         elif isinstance(message, AgentFileContentEnded):
             self._active_message_elements_by_key.pop(
                 self._content_message_key(kind="file", item_id=message.item_id),

@@ -12,6 +12,9 @@ from meshagent.agents import AgentProcessThreadAdapter
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.messages import (
+    AGENT_EVENT_FILE_CONTENT_DELTA,
+    AGENT_EVENT_FILE_CONTENT_ENDED,
+    AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
@@ -40,6 +43,9 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_TURN_STEER,
     ApproveAgentToolCall,
     AgentError,
+    AgentFileContentDelta,
+    AgentFileContentEnded,
+    AgentFileContentStarted,
     AgentMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -2764,6 +2770,77 @@ def test_llm_agent_process_requires_agent_process_thread_adapter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_process_thread_adapter_persists_channel_emitted_file_events(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    channel = _LifecycleChannel()
+    process = AgentProcess(
+        thread_id="/threads/test.thread",
+        thread_adapter=AgentProcessThreadAdapter(
+            room=room,
+            path="/threads/test.thread",
+        ),
+    )
+    supervisor = AgentSupervisor()
+    supervisor.add_channel(channel)
+    supervisor.add_process(process)
+
+    await supervisor.start()
+    try:
+        await asyncio.wait_for(channel.start_event.wait(), timeout=1)
+
+        channel.emit(
+            sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+            payload=AgentFileContentStarted(
+                type=AGENT_EVENT_FILE_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="file-1",
+            ),
+        )
+        channel.emit(
+            sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+            payload=AgentFileContentDelta(
+                type=AGENT_EVENT_FILE_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="file-1",
+                url="room:///docs/report.pdf",
+            ),
+        )
+        channel.emit(
+            sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+            payload=AgentFileContentEnded(
+                type=AGENT_EVENT_FILE_CONTENT_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="file-1",
+            ),
+        )
+
+        await _wait_for(lambda: len(room.sync.document.message_elements) == 1)
+
+        assistant_message = room.sync.document.message_elements[0]
+        assert assistant_message.get_attribute("author_name") == "assistant"
+        assert assistant_message.get_attribute("turn_id") == "turn-1"
+        assert [
+            child.get_attribute("path")
+            for child in assistant_message.get_children_by_tag_name("file")
+        ] == ["docs/report.pdf"]
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_thread_adapter_persists_events_messages_and_status(
     monkeypatch,
 ) -> None:
@@ -5197,8 +5274,11 @@ async def test_agent_process_thread_adapter_strips_room_scheme_from_turn_attachm
 async def test_llm_agent_process_thread_adapter_restores_thread_state(
     monkeypatch,
 ) -> None:
+    real_sleep = asyncio.sleep
+
     async def _fast_sleep(delay: float) -> None:
         del delay
+        await real_sleep(0)
 
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
