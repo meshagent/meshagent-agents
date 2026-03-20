@@ -5,6 +5,7 @@ import posixpath
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
@@ -359,6 +360,25 @@ class LegacyChatChannel(Channel):
             return None
 
         return f"room:///{room_path}"
+
+    @staticmethod
+    def _room_storage_path_from_attachment_url(*, url: str) -> str | None:
+        parsed = urlparse(url)
+        if parsed.scheme == "":
+            raw_path = url.strip()
+        elif parsed.scheme == "room":
+            raw_path = f"{parsed.netloc}{parsed.path}"
+        else:
+            return None
+
+        normalized = PurePosixPath("/" + raw_path).as_posix().strip("/")
+        if normalized == "":
+            return None
+
+        if any(part in {".", ".."} for part in PurePosixPath(normalized).parts):
+            return None
+
+        return normalized
 
     @staticmethod
     def _content_from_chat_message(
@@ -1000,6 +1020,21 @@ class LegacyChatChannel(Channel):
             normalized_url = outer._normalize_attachment_url(path=path)
             if normalized_url is None:
                 raise RoomException("attach_file requires a non-empty path")
+
+            room_storage_path = outer._room_storage_path_from_attachment_url(
+                url=normalized_url
+            )
+            if room_storage_path is not None:
+                try:
+                    exists = await context.room.storage.exists(path=room_storage_path)
+                except Exception as exc:
+                    raise RoomException(
+                        f"attach_file could not verify room file {room_storage_path}: {exc}"
+                    ) from exc
+                if not exists:
+                    raise RoomException(
+                        f"attach_file could not find a room file at {room_storage_path}"
+                    )
 
             item_id = str(uuid.uuid4())
             sender = context.on_behalf_of or context.caller

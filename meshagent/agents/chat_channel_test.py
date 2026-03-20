@@ -40,7 +40,7 @@ from meshagent.agents.messages import (
     TurnSteer,
 )
 from meshagent.agents.process import AgentSupervisor, Message
-from meshagent.api import Participant, RoomMessage
+from meshagent.api import Participant, RoomException, RoomMessage
 from meshagent.api.messaging import EmptyContent, JsonContent
 from meshagent.tools import ToolContext, ToolkitBuilder
 
@@ -119,7 +119,7 @@ class _FakeStorage:
         self._existing_paths = set(existing_paths or [])
         self.exists_calls: list[str] = []
 
-    async def exists(self, path: str) -> bool:
+    async def exists(self, *, path: str) -> bool:
         self.exists_calls.append(path)
         return path in self._existing_paths
 
@@ -331,7 +331,11 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
 @pytest.mark.asyncio
 async def test_chat_channel_attach_file_emits_file_content_events() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
-    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        storage=_FakeStorage(existing_paths={"docs/report.pdf"}),
+    )
     channel = ChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
@@ -356,6 +360,7 @@ async def test_chat_channel_attach_file_emits_file_content_events() -> None:
         )
 
         assert isinstance(result, EmptyContent)
+        assert room.storage.exists_calls == ["docs/report.pdf"]
         assert len(supervisor.sent) == 3
 
         started = supervisor.sent[0]
@@ -383,6 +388,43 @@ async def test_chat_channel_attach_file_emits_file_content_events() -> None:
         assert ended_payload.turn_id == "turn-1"
         assert started_payload.item_id == delta_payload.item_id
         assert delta_payload.item_id == ended_payload.item_id
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        attach_file_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "attach_file"
+        )
+
+        with pytest.raises(
+            RoomException,
+            match=r"attach_file could not find a room file at docs/missing\.pdf",
+        ):
+            await attach_file_tool.execute(
+                context=ToolContext(
+                    room=room,
+                    caller=caller,
+                    caller_context={
+                        "thread_id": "/threads/test.thread",
+                        "turn_id": "turn-1",
+                    },
+                ),
+                path="docs/missing.pdf",
+            )
+
+        assert room.storage.exists_calls == ["docs/missing.pdf"]
+        assert supervisor.sent == []
     finally:
         await channel.stop(supervisor)
 
