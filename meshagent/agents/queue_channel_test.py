@@ -1,19 +1,23 @@
 import asyncio
+import uuid
 
 import pytest
 
 from meshagent.agents.messages import TurnStart
 from meshagent.agents.process import Message
 from meshagent.agents.queue_channel import QueueChannel
+from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api import Participant
 
 
 class _FakeLocalParticipant(Participant):
     def __init__(self) -> None:
         super().__init__(id="assistant-id", attributes={"name": "assistant"})
+        self.set_attribute_calls: list[tuple[str, object]] = []
 
     async def set_attribute(self, name: str, value) -> None:
         self._attributes[name] = value
+        self.set_attribute_calls.append((name, value))
 
 
 class _FakeQueues:
@@ -29,10 +33,71 @@ class _FakeQueues:
         await self._queue.put(payload)
 
 
+class _FakeThreadListElement:
+    def __init__(self, *, tag_name: str, attributes: dict[str, str]) -> None:
+        self.tag_name = tag_name
+        self._attributes = dict(attributes)
+
+    def get_attribute(self, name: str):
+        return self._attributes.get(name)
+
+    def set_attribute(self, name: str, value) -> None:
+        self._attributes[name] = value
+
+
+class _FakeThreadListRoot:
+    def __init__(self) -> None:
+        self._children: list[_FakeThreadListElement] = []
+
+    def get_children(self) -> list[_FakeThreadListElement]:
+        return [*self._children]
+
+    def append_child(
+        self,
+        *,
+        tag_name: str,
+        attributes: dict[str, str],
+    ) -> _FakeThreadListElement:
+        element = _FakeThreadListElement(tag_name=tag_name, attributes=attributes)
+        self._children.append(element)
+        return element
+
+
+class _FakeThreadListDocument:
+    def __init__(self) -> None:
+        self.root = _FakeThreadListRoot()
+
+
+class _FakeSync:
+    def __init__(self) -> None:
+        self.document = _FakeThreadListDocument()
+        self.open_calls: list[dict[str, object]] = []
+        self.close_calls: list[str] = []
+
+    async def open(self, *, path: str, schema=None) -> _FakeThreadListDocument:
+        self.open_calls.append({"path": path, "schema": schema})
+        return self.document
+
+    async def close(self, *, path: str) -> None:
+        self.close_calls.append(path)
+
+
+class _FakeStorage:
+    def __init__(self, *, existing_paths: set[str] | None = None) -> None:
+        self._existing_paths = set(existing_paths or [])
+        self.exists_calls: list[str] = []
+
+    async def exists(self, *, path: str) -> bool:
+        self.exists_calls.append(path)
+        return path in self._existing_paths
+
+
 class _FakeRoom:
     def __init__(self) -> None:
         self.local_participant = _FakeLocalParticipant()
         self.queues = _FakeQueues()
+        self.sync = _FakeSync()
+        self.storage = _FakeStorage()
 
 
 class _RecordingSupervisor:
@@ -121,3 +186,58 @@ async def test_queue_channel_supports_string_messages() -> None:
         assert outbound.data.thread_id.startswith(".threads/queue/")
     finally:
         await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_queue_channel_default_new_indexes_new_threads_from_prompt() -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = QueueChannel(
+        room=room,
+        queue_name="jobs",
+        threading_mode="default-new",
+    )
+    expected_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+    original_uuid4 = uuid.uuid4
+    uuid.uuid4 = lambda: expected_uuid
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push("follow up on billing issue")
+        await _drain()
+
+        assert room.local_participant.set_attribute_calls == [
+            ("meshagent.chatbot.threading", "default-new"),
+            ("meshagent.chatbot.thread-dir", ".threads/assistant"),
+            ("meshagent.chatbot.thread-list", ".threads/assistant/index.threadl"),
+        ]
+        assert room.sync.open_calls == [
+            {
+                "path": ".threads/assistant/index.threadl",
+                "schema": thread_list_schema,
+            }
+        ]
+        assert room.storage.exists_calls == [
+            ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
+        ]
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert (
+            outbound.data.thread_id
+            == ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
+        )
+
+        entries = room.sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("name") == "Follow Up On Billing Issue"
+        assert (
+            entries[0].get_attribute("path")
+            == ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
+        )
+    finally:
+        uuid.uuid4 = original_uuid4
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+    assert room.sync.close_calls == [".threads/assistant/index.threadl"]
