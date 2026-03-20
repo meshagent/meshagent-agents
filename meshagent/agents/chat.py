@@ -56,7 +56,7 @@ from meshagent.tools.strict_schema import ensure_strict_json_schema
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 from meshagent.agents.toolkit_schema import build_tools_property_schema
-from meshagent.agents.thread_schema import thread_list_schema
+from meshagent.agents.thread_schema import thread_list_schema, thread_schema
 
 
 tracer = trace.get_tracer("meshagent.chatbot")
@@ -1743,6 +1743,54 @@ class ChatBotBase(SingleRoomAgent, ABC):
             return await qm.result
         return None
 
+    async def _seed_new_thread_members(
+        self,
+        *,
+        path: str,
+        members: list[Participant | str],
+    ) -> None:
+        thread = await self.room.sync.open(path=path, schema=thread_schema)
+        try:
+            members_elements = thread.root.get_children_by_tag_name("members")
+            members_element = (
+                members_elements[0]
+                if len(members_elements) > 0
+                else thread.root.append_child(tag_name="members")
+            )
+
+            existing_members: set[str] = set()
+            for child in members_element.get_children():
+                if child.tag_name != "member":
+                    continue
+                member_name = child.get_attribute("name")
+                if not isinstance(member_name, str):
+                    continue
+                normalized_name = member_name.strip()
+                if normalized_name == "":
+                    continue
+                existing_members.add(normalized_name)
+
+            for participant in members:
+                participant_name = (
+                    participant.get_attribute("name")
+                    if isinstance(participant, Participant)
+                    else participant
+                )
+                if not isinstance(participant_name, str):
+                    continue
+
+                normalized_name = participant_name.strip()
+                if normalized_name == "" or normalized_name in existing_members:
+                    continue
+
+                members_element.append_child(
+                    tag_name="member",
+                    attributes={"name": normalized_name},
+                )
+                existing_members.add(normalized_name)
+        finally:
+            await self.room.sync.close(path=path)
+
     def _build_thread_list_tools(self) -> list[FunctionTool]:
         if self._thread_list_dir() is None:
             return []
@@ -2002,6 +2050,13 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 path, friendly_name = await outer._generate_new_thread_info(
                     context=context,
                     text=text,
+                )
+                await outer._seed_new_thread_members(
+                    path=path,
+                    members=[
+                        outer.room.local_participant,
+                        context.on_behalf_of or context.caller,
+                    ],
                 )
                 outer._record_new_thread_in_index(path=path, name=friendly_name)
                 await outer._queue_chat_message(

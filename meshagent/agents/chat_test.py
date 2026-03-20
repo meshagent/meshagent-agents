@@ -13,7 +13,7 @@ from yarl import URL
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.chat import ChatBot, ChatBotClient, ChatThreadContext
 from meshagent.agents.context import AgentSessionContext
-from meshagent.agents.thread_schema import thread_list_schema
+from meshagent.agents.thread_schema import thread_list_schema, thread_schema
 from meshagent.api import RoomException
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
@@ -90,6 +90,45 @@ class _FakeThreadListElement:
 
     def set_attribute(self, name: str, value):
         self._attributes[name] = value
+
+
+class _FakeThreadElement:
+    def __init__(
+        self,
+        *,
+        tag_name: str,
+        attributes: Optional[dict[str, object]] = None,
+    ):
+        self.tag_name = tag_name
+        self._attributes = dict(attributes or {})
+        self._children: list["_FakeThreadElement"] = []
+
+    def get_attribute(self, name: str):
+        return self._attributes.get(name)
+
+    def set_attribute(self, name: str, value) -> None:
+        self._attributes[name] = value
+
+    def get_children(self) -> list["_FakeThreadElement"]:
+        return [*self._children]
+
+    def get_children_by_tag_name(self, tag_name: str) -> list["_FakeThreadElement"]:
+        return [child for child in self._children if child.tag_name == tag_name]
+
+    def append_child(
+        self,
+        *,
+        tag_name: str,
+        attributes: Optional[dict[str, object]] = None,
+    ) -> "_FakeThreadElement":
+        element = _FakeThreadElement(tag_name=tag_name, attributes=attributes)
+        self._children.append(element)
+        return element
+
+
+class _FakeThreadDocument:
+    def __init__(self):
+        self.root = _FakeThreadElement(tag_name="thread")
 
 
 class _FakeThreadListRoot:
@@ -474,6 +513,12 @@ async def _new_thread_tool(bot: ChatBot):
     return next(tool for tool in chatbot_toolkit.tools if tool.name == "new_thread")
 
 
+def _stub_new_thread_member_seed(bot: ChatBot) -> mock.AsyncMock:
+    stub = mock.AsyncMock()
+    bot._seed_new_thread_members = stub  # type: ignore[method-assign]
+    return stub
+
+
 async def _chat_toolkit(bot: ChatBot):
     toolkits = await bot.get_exposed_toolkits()
     return next(toolkit for toolkit in toolkits if toolkit.name == "chat")
@@ -493,6 +538,7 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     bot = ChatBot(llm_adapter=adapter)
     room = _FakeRoom()
     bot._room = room
+    seeded_members = _stub_new_thread_member_seed(bot)
 
     queue = _FakeQueue()
 
@@ -537,6 +583,11 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     assert queued.message["store"] is True
     assert not queued.result.done()
 
+    seeded_members.assert_awaited_once()
+    assert seeded_members.await_args.kwargs["path"] == result_path
+    assert seeded_members.await_args.kwargs["members"][0] is room.local_participant
+    assert seeded_members.await_args.kwargs["members"][1] is context.caller
+
     assert len(adapter.calls) == 1
     assert adapter.calls[0]["output_schema"] is not None
 
@@ -547,6 +598,7 @@ async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
     bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
     room = _FakeRoom()
     bot._room = room
+    _stub_new_thread_member_seed(bot)
 
     queue = _FakeQueue()
 
@@ -591,6 +643,7 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     bot = ChatBot(llm_adapter=adapter)
     room = _FakeRoom()
     bot._room = room
+    _stub_new_thread_member_seed(bot)
 
     queue = _FakeQueue()
 
@@ -659,6 +712,7 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     bot = _ChatBotWithToolBuilders(llm_adapter=adapter)
     room = _FakeRoom()
     bot._room = room
+    _stub_new_thread_member_seed(bot)
 
     queue = _FakeQueue()
 
@@ -705,6 +759,7 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     bot = ChatBot(llm_adapter=adapter)
     room = _FakeRoom()
     bot._room = room
+    _stub_new_thread_member_seed(bot)
 
     queue = _FakeQueue()
 
@@ -751,6 +806,7 @@ async def test_new_thread_tool_records_friendly_name_in_thread_list() -> None:
     bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
     room = _FakeRoom()
     bot._room = room
+    _stub_new_thread_member_seed(bot)
 
     doc = _FakeThreadListDocument()
     bot._thread_list_document = doc
@@ -781,6 +837,41 @@ async def test_new_thread_tool_records_friendly_name_in_thread_list() -> None:
     assert len(entries) == 1
     assert entries[0].get_attribute("name") == "Friendly Plan Name"
     assert entries[0].get_attribute("path") == path
+
+
+@pytest.mark.asyncio
+async def test_seed_new_thread_members_adds_agent_and_sender_without_duplicates() -> (
+    None
+):
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    thread = _FakeThreadDocument()
+    members = thread.root.append_child(tag_name="members")
+    members.append_child(tag_name="member", attributes={"name": "assistant"})
+
+    sync = mock.Mock()
+    sync.open = mock.AsyncMock(return_value=thread)
+    sync.close = mock.AsyncMock()
+
+    room = _FakeRoom(sync=sync)
+    bot._room = room
+
+    sender = Participant(id="caller-id", attributes={"name": "alice"})
+
+    await bot._seed_new_thread_members(
+        path=".threads/assistant/test.thread",
+        members=[room.local_participant, sender, sender],
+    )
+
+    assert sync.open.await_args.kwargs == {
+        "path": ".threads/assistant/test.thread",
+        "schema": thread_schema,
+    }
+    sync.close.assert_awaited_once_with(path=".threads/assistant/test.thread")
+    assert [child.get_attribute("name") for child in members.get_children()] == [
+        "assistant",
+        "alice",
+    ]
 
 
 @pytest.mark.asyncio
