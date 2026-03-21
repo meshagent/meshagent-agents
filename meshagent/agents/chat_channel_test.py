@@ -3,6 +3,7 @@ import uuid
 import pytest
 from pydantic import BaseModel
 
+from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.legacy_chat_channel import LegacyChatChannel as ChatChannel
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
@@ -223,6 +224,43 @@ class _RecordingSupervisor(AgentSupervisor):
         self.sent.append(message)
 
 
+class _FakeThreadNameAdapter(LLMAdapter):
+    def __init__(self, *, generated_thread_name: str) -> None:
+        self.generated_thread_name = generated_thread_name
+        self.prompts: list[str] = []
+
+    def default_model(self) -> str:
+        return "thread-name-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        output_schema=None,
+        event_handler=None,
+        steering_callback=None,
+        model=None,
+        on_behalf_of=None,
+        options=None,
+    ):
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        self.prompts = [
+            message["content"]
+            for message in context.messages
+            if isinstance(message, dict) and isinstance(message.get("content"), str)
+        ]
+        return {"thread_name": self.generated_thread_name}
+
+
 def _assert_uuid_thread_path(*, path: str, prefix: str) -> None:
     assert path.startswith(prefix)
     assert path.endswith(".thread")
@@ -324,6 +362,56 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         assert isinstance(list_result, JsonContent)
         assert list_result.json["total"] == 1
         assert list_result.json["threads"][0]["path"] == result_path
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_for_llm_naming() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    adapter = _FakeThreadNameAdapter(generated_thread_name="Release Plan")
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = ChatChannel(
+        room=room,
+        thread_dir="/threads/chat",
+        llm_adapter=adapter,
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        new_thread_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "new_thread"
+        )
+        result = await new_thread_tool.execute(
+            context=ToolContext(room=room, caller=caller),
+            message={
+                "text": "Plan the release work",
+                "attachments": [
+                    {"path": "uploads/release-plan.md"},
+                    {"path": "uploads/screenshot.png"},
+                ],
+            },
+        )
+
+        assert isinstance(result, JsonContent)
+        assert result.json["name"] == "Release Plan"
+        assert adapter.prompts == [
+            "Message:\nPlan the release work\n\nAttachments:\n- release-plan.md\n- screenshot.png"
+        ]
+
+        entries = sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("name") == "Release Plan"
     finally:
         await channel.stop(supervisor)
 

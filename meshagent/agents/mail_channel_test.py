@@ -1,9 +1,11 @@
 import asyncio
 import base64
 from email.message import EmailMessage
+import uuid
 
 import pytest
 
+from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.mail_channel import MailChannel
 from meshagent.agents.messages import (
     AgentTextContentDelta,
@@ -14,6 +16,7 @@ from meshagent.agents.messages import (
     TurnStarted,
 )
 from meshagent.agents.process import Message
+from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api import Participant
 from meshagent.api.messaging import FileContent
 from meshagent.api.room_server_client import RoomException
@@ -23,9 +26,11 @@ from meshagent.tools import ToolContext
 class _FakeLocalParticipant(Participant):
     def __init__(self) -> None:
         super().__init__(id="assistant-id", attributes={"name": "assistant"})
+        self.set_attribute_calls: list[tuple[str, object]] = []
 
     async def set_attribute(self, name: str, value) -> None:
         self._attributes[name] = value
+        self.set_attribute_calls.append((name, value))
 
 
 class _FakeProtocol:
@@ -49,11 +54,13 @@ class _FakeQueues:
 class _FakeStorage:
     def __init__(self) -> None:
         self.uploaded: dict[str, bytes] = {}
+        self.exists_calls: list[str] = []
 
     async def upload(self, *, path: str, data: bytes) -> None:
         self.uploaded[path] = data
 
     async def exists(self, *, path: str) -> bool:
+        self.exists_calls.append(path)
         return path in self.uploaded
 
     async def download(self, *, path: str) -> FileContent:
@@ -136,6 +143,55 @@ class _NamespaceRejectingDatabase(_FakeDatabase):
         self.tables.setdefault(self._key(table=name, namespace=namespace), [])
 
 
+class _FakeThreadListElement:
+    def __init__(self, *, tag_name: str, attributes: dict[str, str]) -> None:
+        self.tag_name = tag_name
+        self._attributes = dict(attributes)
+
+    def get_attribute(self, name: str):
+        return self._attributes.get(name)
+
+    def set_attribute(self, name: str, value) -> None:
+        self._attributes[name] = value
+
+
+class _FakeThreadListRoot:
+    def __init__(self) -> None:
+        self._children: list[_FakeThreadListElement] = []
+
+    def get_children(self) -> list[_FakeThreadListElement]:
+        return [*self._children]
+
+    def append_child(
+        self,
+        *,
+        tag_name: str,
+        attributes: dict[str, str],
+    ) -> _FakeThreadListElement:
+        element = _FakeThreadListElement(tag_name=tag_name, attributes=attributes)
+        self._children.append(element)
+        return element
+
+
+class _FakeThreadListDocument:
+    def __init__(self) -> None:
+        self.root = _FakeThreadListRoot()
+
+
+class _FakeSync:
+    def __init__(self) -> None:
+        self.document = _FakeThreadListDocument()
+        self.open_calls: list[dict[str, object]] = []
+        self.close_calls: list[str] = []
+
+    async def open(self, *, path: str, schema=None) -> _FakeThreadListDocument:
+        self.open_calls.append({"path": path, "schema": schema})
+        return self.document
+
+    async def close(self, *, path: str) -> None:
+        self.close_calls.append(path)
+
+
 class _FakeRoom:
     def __init__(self, *, database: _FakeDatabase | None = None) -> None:
         self.local_participant = _FakeLocalParticipant()
@@ -143,6 +199,7 @@ class _FakeRoom:
         self.queues = _FakeQueues()
         self.storage = _FakeStorage()
         self.database = database if database is not None else _FakeDatabase()
+        self.sync = _FakeSync()
 
 
 class _RecordingSupervisor:
@@ -151,6 +208,51 @@ class _RecordingSupervisor:
 
     def send(self, message: Message) -> None:
         self.sent.append(message)
+
+
+class _FakeThreadNameAdapter(LLMAdapter):
+    def __init__(self, *, generated_thread_name: str) -> None:
+        self.generated_thread_name = generated_thread_name
+        self.prompts: list[str] = []
+
+    def default_model(self) -> str:
+        return "thread-name-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        output_schema=None,
+        event_handler=None,
+        steering_callback=None,
+        model=None,
+        on_behalf_of=None,
+        options=None,
+    ):
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        self.prompts = [
+            message["content"]
+            for message in context.messages
+            if isinstance(message, dict) and isinstance(message.get("content"), str)
+        ]
+        return {"thread_name": self.generated_thread_name}
+
+
+def _assert_uuid_thread_path(*, path: str, prefix: str) -> None:
+    assert path.startswith(prefix)
+    assert path.endswith(".thread")
+    basename = path[len(prefix) : -len(".thread")]
+    parsed = uuid.UUID(basename)
+    assert str(parsed) == basename
 
 
 def _email_bytes(
@@ -210,7 +312,10 @@ async def test_mail_channel_creates_new_thread_and_persists_thread_mapping() -> 
         assert len(supervisor.sent) == 1
         outbound = supervisor.sent[0]
         assert isinstance(outbound.data, TurnStart)
-        assert outbound.data.thread_id == ".threads/assistant/Quarterly update.thread"
+        _assert_uuid_thread_path(
+            path=outbound.data.thread_id,
+            prefix=".threads/assistant/",
+        )
         assert outbound.sender is not None
         assert outbound.sender.get_attribute("name") == "Alice"
         assert room.database.create_calls == [
@@ -222,9 +327,7 @@ async def test_mail_channel_creates_new_thread_and_persists_thread_mapping() -> 
         ]
         stored_rows = room.database.tables[(((".threads", "assistant")), "emails")]
         assert len(stored_rows) == 1
-        assert (
-            stored_rows[0]["thread_id"] == ".threads/assistant/Quarterly update.thread"
-        )
+        assert stored_rows[0]["thread_id"] == outbound.data.thread_id
         assert any(
             path.endswith("/attachments/report.txt") for path in room.storage.uploaded
         )
@@ -280,6 +383,153 @@ async def test_mail_channel_maps_reply_to_existing_thread(
 
 
 @pytest.mark.asyncio
+async def test_mail_channel_default_new_indexes_new_threads_from_subject() -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = MailChannel(
+        room=room,
+        queue_name="mailbox@mail.meshagent.com",
+        email_address="mailbox@mail.meshagent.com",
+        threading_mode="default-new",
+    )
+    expected_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+    original_uuid4 = uuid.uuid4
+    uuid.uuid4 = lambda: expected_uuid
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        raw_message = _email_bytes(
+            from_address="Alice <alice@example.com>",
+            to_address="mailbox@mail.meshagent.com",
+            subject="Quarterly update",
+            body="hello from email",
+        )
+        await room.queues.push(
+            {"base64": base64.b64encode(raw_message).decode("ascii")}
+        )
+        await _drain()
+
+        assert room.local_participant.set_attribute_calls == [
+            ("meshagent.chatbot.threading", "default-new"),
+            ("meshagent.chatbot.thread-dir", ".threads/assistant"),
+            ("meshagent.chatbot.thread-list", ".threads/assistant/index.threadl"),
+        ]
+        assert room.sync.open_calls == [
+            {
+                "path": ".threads/assistant/index.threadl",
+                "schema": thread_list_schema,
+            }
+        ]
+        assert room.storage.exists_calls == [
+            ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
+        ]
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert (
+            outbound.data.thread_id
+            == ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
+        )
+
+        entries = room.sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("name") == "Quarterly update"
+        assert (
+            entries[0].get_attribute("path")
+            == ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
+        )
+    finally:
+        uuid.uuid4 = original_uuid4
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+    assert room.sync.close_calls == [".threads/assistant/index.threadl"]
+
+
+@pytest.mark.asyncio
+async def test_mail_channel_default_new_uses_attachment_names_for_llm_thread_naming() -> (
+    None
+):
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    adapter = _FakeThreadNameAdapter(generated_thread_name="Quarterly Files")
+    channel = MailChannel(
+        room=room,
+        queue_name="mailbox@mail.meshagent.com",
+        email_address="mailbox@mail.meshagent.com",
+        threading_mode="default-new",
+        llm_adapter=adapter,
+    )
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        raw_message = _email_bytes(
+            from_address="Alice <alice@example.com>",
+            to_address="mailbox@mail.meshagent.com",
+            subject="",
+            body="See the files",
+            attachments=[("quarterly-report.pdf", b"pdf-bytes")],
+        )
+        await room.queues.push(
+            {"base64": base64.b64encode(raw_message).decode("ascii")}
+        )
+        await _drain()
+
+        assert adapter.prompts == [
+            "Message:\nSee the files\n\nAttachments:\n- quarterly-report.pdf"
+        ]
+        entries = room.sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("name") == "Quarterly Files"
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_mail_channel_default_new_reply_keeps_existing_thread_list_name() -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = MailChannel(
+        room=room,
+        queue_name="mailbox@mail.meshagent.com",
+        email_address="mailbox@mail.meshagent.com",
+        threading_mode="default-new",
+    )
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        original_message = _email_bytes(
+            from_address="Alice <alice@example.com>",
+            to_address="mailbox@mail.meshagent.com",
+            subject="Quarterly update",
+            body="hello from email",
+        )
+        await room.queues.push(
+            {"base64": base64.b64encode(original_message).decode("ascii")}
+        )
+        await _drain()
+
+        stored_rows = room.database.tables[(((".threads", "assistant")), "emails")]
+        reply_message = _email_bytes(
+            from_address="Alice <alice@example.com>",
+            to_address="mailbox@mail.meshagent.com",
+            subject="Re: Quarterly update",
+            body="following up",
+            in_reply_to=stored_rows[0]["id"],
+        )
+        await room.queues.push(
+            {"base64": base64.b64encode(reply_message).decode("ascii")}
+        )
+        await _drain()
+
+        entries = room.sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("name") == "Quarterly update"
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_mail_channel_falls_back_to_flat_table_when_namespace_create_is_rejected() -> (
     None
 ):
@@ -319,7 +569,9 @@ async def test_mail_channel_falls_back_to_flat_table_when_namespace_create_is_re
         ]
         stored_rows = database.tables[((), "emails__threads__helpdesk")]
         assert len(stored_rows) == 1
-        assert stored_rows[0]["thread_id"] == ".threads/helpdesk/Fallback path.thread"
+        thread_id = stored_rows[0]["thread_id"]
+        assert isinstance(thread_id, str)
+        _assert_uuid_thread_path(path=thread_id, prefix=".threads/helpdesk/")
     finally:
         await channel.stop(supervisor)  # type: ignore[arg-type]
 

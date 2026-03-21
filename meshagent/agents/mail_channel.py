@@ -19,7 +19,7 @@ from meshagent.api.room_server_client import TextDataType
 from meshagent.tools import FileContent, FunctionTool, ToolContext, Toolkit
 from email.policy import default
 
-from .legacy_chat_channel import LegacyChatChannel
+from .adapter import LLMAdapter
 from .mail_common import (
     SmtpConfiguration,
     create_email_message,
@@ -46,7 +46,8 @@ from .messages import (
     TurnStart,
     TurnStarted,
 )
-from .process import Channel, Message
+from .process import Message
+from .threaded_channel import ThreadedChannel
 
 logger = logging.getLogger("mail-channel")
 
@@ -83,21 +84,28 @@ class _ActiveMailTurn:
     completed_text_parts: list[str] = field(default_factory=list)
 
 
-class MailChannel(Channel):
+class MailChannel(ThreadedChannel):
     def __init__(
         self,
         *,
         room: RoomClient,
         queue_name: str,
         email_address: str,
+        threading_mode: str | None = None,
         thread_dir: str | None = None,
+        llm_adapter: LLMAdapter | None = None,
         domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
         smtp: SmtpConfiguration | None = None,
         whitelist: list[str] | None = None,
         reply_all: bool = False,
         enable_attachments: bool = True,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            room=room,
+            threading_mode=threading_mode,
+            thread_dir=thread_dir,
+            llm_adapter=llm_adapter,
+        )
         normalized_queue = queue_name.strip()
         if normalized_queue == "":
             raise ValueError("queue_name must not be empty")
@@ -106,12 +114,8 @@ class MailChannel(Channel):
         if normalized_email == "":
             raise ValueError("email_address must not be empty")
 
-        self._room = room
         self._queue_name = normalized_queue
         self._email_address = normalized_email
-        self._thread_dir = LegacyChatChannel._normalize_thread_dir(
-            thread_dir=thread_dir
-        )
         self._domain = domain
         self._smtp = smtp if smtp is not None else SmtpConfiguration()
         self._whitelist = list(whitelist) if whitelist is not None else None
@@ -122,9 +126,11 @@ class MailChannel(Channel):
         self._active_turns_by_turn_id: dict[str, _ActiveMailTurn] = {}
         self._database_namespace_supported: bool = True
 
-    @property
-    def room(self) -> RoomClient:
-        return self._room
+    def _default_thread_dir_fallback_name(self) -> str:
+        return "mail"
+
+    def _default_thread_name(self) -> str:
+        return "New Mail"
 
     def handles(self, message: Message) -> bool:
         return message.data.type in {
@@ -140,6 +146,8 @@ class MailChannel(Channel):
         return [Toolkit(name="mail", tools=[self._make_new_email_thread_tool()])]
 
     async def on_start(self) -> None:
+        await self.publish_thread_attributes()
+        await self.open_thread_list_document()
         await self._ensure_database_table()
         self._receive_task = asyncio.create_task(self._receive_loop())
 
@@ -150,6 +158,7 @@ class MailChannel(Channel):
             receive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await receive_task
+        await self.close_thread_list_document()
         self._pending_messages_by_source_id.clear()
         self._active_turns_by_turn_id.clear()
 
@@ -322,6 +331,9 @@ class MailChannel(Channel):
         raw_bytes = base64.b64decode(encoded_message)
         email_message = message_from_bytes(raw_bytes, policy=default)
         parsed_message = message_to_json(message=email_message, role="user")
+        attachment_names = [
+            file_name for file_name, _ in iter_message_attachments(email_message)
+        ]
 
         should_reply, reason = should_reply_to_message(
             message=parsed_message,
@@ -336,7 +348,15 @@ class MailChannel(Channel):
             )
             return
 
-        thread_id = await self._resolve_thread_id(message=parsed_message)
+        thread_id = await self._resolve_thread_id(
+            message=parsed_message,
+            attachments=attachment_names,
+        )
+        self._record_inbound_thread_activity(
+            thread_id=thread_id,
+            message=parsed_message,
+            attachments=attachment_names,
+        )
         saved_message = await self._save_email_message(
             content=raw_bytes,
             role="user",
@@ -415,7 +435,12 @@ class MailChannel(Channel):
             return None
         return json.loads(raw_json)
 
-    async def _resolve_thread_id(self, *, message: dict[str, Any]) -> str:
+    async def _resolve_thread_id(
+        self,
+        *,
+        message: dict[str, Any],
+        attachments: list[str] | None = None,
+    ) -> str:
         in_reply_to = message.get("in_reply_to")
         if isinstance(in_reply_to, str) and in_reply_to.strip() != "":
             parent_message = await self._load_message(message_id=in_reply_to.strip())
@@ -424,18 +449,17 @@ class MailChannel(Channel):
                 if isinstance(thread_id, str) and thread_id.strip() != "":
                     return thread_id
 
-        thread_name_source = (
-            str(message.get("subject") or "").strip()
-            or str(message.get("from") or "").strip()
-            or str(message.get("body") or "").strip()
-            or "New Mail"
+        path, _ = await self.new_thread(
+            message_text=self._thread_name_message_text(message=message),
+            attachments=attachments,
         )
-        thread_name = LegacyChatChannel._sanitize_thread_name(value=thread_name_source)
-        thread_path = LegacyChatChannel._thread_path_for_name(
-            thread_name=thread_name,
-            thread_dir=self._get_thread_dir(),
-        )
-        return await self._next_available_thread_path(base_path=thread_path)
+        return path
+
+    def _thread_name_message_text(self, *, message: dict[str, Any]) -> str:
+        subject = str(message.get("subject") or "").strip()
+        body = str(message.get("body") or "").strip()
+        sender = str(message.get("from") or "").strip()
+        return subject or body or sender
 
     async def _save_email_message(
         self,
@@ -576,24 +600,23 @@ class MailChannel(Channel):
             password=password,
         )
 
-    def _default_thread_dir(self) -> str:
-        local_name_value = self._room.local_participant.get_attribute("name")
-        local_name = (
-            local_name_value.strip()
-            if isinstance(local_name_value, str) and local_name_value.strip() != ""
-            else "mail"
+    def _record_inbound_thread_activity(
+        self,
+        *,
+        thread_id: str,
+        message: dict[str, Any],
+        attachments: list[str] | None = None,
+    ) -> None:
+        self.bump_thread(
+            path=thread_id,
+            name=self.fallback_thread_name(
+                message_text=self._thread_name_message_text(message=message),
+                attachments=attachments,
+            ),
         )
-        return LegacyChatChannel._normalize_thread_dir(
-            thread_dir=posixpath.join(".threads", local_name)
-        )
-
-    def _get_thread_dir(self) -> str:
-        if self._thread_dir is not None:
-            return self._thread_dir
-        return self._default_thread_dir()
 
     def _database_namespace(self) -> list[str]:
-        return [part for part in self._get_thread_dir().split("/") if part != ""]
+        return [part for part in self.get_thread_dir().split("/") if part != ""]
 
     @staticmethod
     def _is_namespace_location_error(*, exc: RoomException) -> bool:
@@ -622,31 +645,6 @@ class MailChannel(Channel):
         if self._database_namespace_supported:
             return _MAIL_TABLE_NAME, namespace
         return self._flat_mail_table_name(), None
-
-    async def _next_available_thread_path(self, *, base_path: str) -> str:
-        try:
-            exists = await self._room.storage.exists(path=base_path)
-        except Exception:
-            return base_path
-
-        if not exists:
-            return base_path
-
-        thread_dir, filename = posixpath.split(base_path)
-        if filename.endswith(".thread"):
-            base_name = filename[: -len(".thread")]
-        else:
-            base_name = filename
-
-        for index in range(2, 1000):
-            candidate = posixpath.join(thread_dir, f"{base_name} {index}.thread")
-            try:
-                if not await self._room.storage.exists(path=candidate):
-                    return candidate
-            except Exception:
-                return candidate
-
-        return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}.thread")
 
     def _thread_id_from_tool_context(self, *, context: ToolContext) -> str:
         caller_context = context.caller_context

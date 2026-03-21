@@ -3,6 +3,7 @@ import uuid
 
 import pytest
 
+from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.messages import TurnStart
 from meshagent.agents.process import Message
 from meshagent.agents.queue_channel import QueueChannel
@@ -106,6 +107,43 @@ class _RecordingSupervisor:
 
     def send(self, message: Message) -> None:
         self.sent.append(message)
+
+
+class _FakeThreadNameAdapter(LLMAdapter):
+    def __init__(self, *, generated_thread_name: str) -> None:
+        self.generated_thread_name = generated_thread_name
+        self.prompts: list[str] = []
+
+    def default_model(self) -> str:
+        return "thread-name-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        output_schema=None,
+        event_handler=None,
+        steering_callback=None,
+        model=None,
+        on_behalf_of=None,
+        options=None,
+    ):
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        self.prompts = [
+            message["content"]
+            for message in context.messages
+            if isinstance(message, dict) and isinstance(message.get("content"), str)
+        ]
+        return {"thread_name": self.generated_thread_name}
 
 
 async def _drain() -> None:
@@ -241,3 +279,28 @@ async def test_queue_channel_default_new_indexes_new_threads_from_prompt() -> No
         await channel.stop(supervisor)  # type: ignore[arg-type]
 
     assert room.sync.close_calls == [".threads/assistant/index.threadl"]
+
+
+@pytest.mark.asyncio
+async def test_queue_channel_default_new_uses_llm_thread_name() -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    adapter = _FakeThreadNameAdapter(generated_thread_name="Billing Follow Up")
+    channel = QueueChannel(
+        room=room,
+        queue_name="jobs",
+        threading_mode="default-new",
+        llm_adapter=adapter,
+    )
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push("follow up on billing issue")
+        await _drain()
+
+        assert adapter.prompts == ["Message:\nfollow up on billing issue"]
+        entries = room.sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("name") == "Billing Follow Up"
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]

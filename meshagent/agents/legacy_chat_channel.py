@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import logging
-import posixpath
 import re
 import uuid
-from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 from meshagent.api import (
     Element,
-    MeshDocument,
     Participant,
     RoomClient,
     RoomException,
@@ -29,6 +26,7 @@ from meshagent.tools import (
 )
 from meshagent.tools.strict_schema import ensure_strict_json_schema
 
+from .adapter import LLMAdapter
 from .messages import (
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -66,8 +64,8 @@ from .messages import (
     TurnStarted,
     TurnSteer,
 )
-from .process import Channel, Message
-from .thread_schema import thread_list_schema
+from .process import Message
+from .threaded_channel import ThreadedChannel
 from .toolkit_schema import build_tools_property_schema
 
 logger = logging.getLogger("legacy-chat-channel")
@@ -95,22 +93,23 @@ class _ApprovalDecisionPayload(BaseModel):
     approval_id: str
 
 
-class LegacyChatChannel(Channel):
+class LegacyChatChannel(ThreadedChannel):
     def __init__(
         self,
         *,
         room: RoomClient,
         threading_mode: str | None = None,
         thread_dir: str | None = None,
+        llm_adapter: LLMAdapter | None = None,
         empty_state_title: str = "How can I help you?",
         toolkit_builders: list[ToolkitBuilder] | None = None,
     ) -> None:
-        super().__init__()
-        self._room = room
-        self._threading_mode = self._normalize_threading_mode(
-            threading_mode=threading_mode
+        super().__init__(
+            room=room,
+            threading_mode=threading_mode,
+            thread_dir=thread_dir,
+            llm_adapter=llm_adapter,
         )
-        self._thread_dir = self._normalize_thread_dir(thread_dir=thread_dir)
         self._empty_state_title = empty_state_title
         self._toolkit_builders = list(toolkit_builders or [])
         self._active_turn_ids_by_thread: dict[str, str] = {}
@@ -118,12 +117,9 @@ class LegacyChatChannel(Channel):
         self._open_participant_ids_by_thread: dict[str, set[str]] = {}
         self._active_text_by_thread: dict[str, dict[str, str]] = {}
         self._active_files_by_thread: dict[str, dict[str, str]] = {}
-        self._thread_list_document: MeshDocument | None = None
-        self._thread_list_path: str | None = None
 
-    @property
-    def room(self) -> RoomClient:
-        return self._room
+    def _uses_explicit_thread_dir_for_thread_list(self) -> bool:
+        return True
 
     def handles(self, message: Message) -> bool:
         return message.data.type in {
@@ -141,34 +137,18 @@ class LegacyChatChannel(Channel):
 
     async def on_start(self) -> None:
         self._room.messaging.on("message", self._on_room_message)
-        if self._threading_mode is not None:
-            await self._room.local_participant.set_attribute(
-                "meshagent.chatbot.threading",
-                self._threading_mode,
-            )
-        thread_dir = self._thread_list_dir()
-        if thread_dir is not None:
-            await self._room.local_participant.set_attribute(
-                "meshagent.chatbot.thread-dir",
-                thread_dir,
-            )
-        thread_list_path = self._thread_list_index_path()
-        if thread_list_path is not None:
-            await self._room.local_participant.set_attribute(
-                "meshagent.chatbot.thread-list",
-                thread_list_path,
-            )
+        await self.publish_thread_attributes()
         await self._room.local_participant.set_attribute(
             "empty_state_title",
             self._empty_state_title,
         )
-        await self._open_thread_list_document()
+        await self.open_thread_list_document()
         if not self._room.messaging.is_enabled:
             await self._room.messaging.enable()
 
     async def on_stop(self) -> None:
         self._room.messaging.off("message", self._on_room_message)
-        await self._close_thread_list_document()
+        await self.close_thread_list_document()
         self._active_turn_ids_by_thread.clear()
         self._pending_approval_turn_ids_by_thread.clear()
         self._open_participant_ids_by_thread.clear()
@@ -319,7 +299,7 @@ class LegacyChatChannel(Channel):
             if self._should_touch_thread_index_for_room_message(
                 message_type=message.type
             ):
-                self._touch_thread_in_index(path=thread_id)
+                self.bump_thread(path=thread_id)
 
         try:
             agent_message = self._agent_message_from_room_message(message=message)
@@ -453,297 +433,6 @@ class LegacyChatChannel(Channel):
             return None
 
         return normalized_path
-
-    @staticmethod
-    def _normalize_threading_mode(*, threading_mode: str | None) -> str | None:
-        if threading_mode is None:
-            return None
-
-        normalized = threading_mode.strip()
-        if normalized == "" or normalized == "none":
-            return None
-        return normalized
-
-    @staticmethod
-    def _normalize_thread_dir(*, thread_dir: str | None) -> str | None:
-        if thread_dir is None:
-            return None
-
-        normalized = thread_dir.strip().rstrip("/")
-        if normalized == "":
-            raise ValueError("thread_dir must not be empty")
-        return normalized
-
-    def _utc_now_iso(self) -> str:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-    def _thread_list_index_path(self) -> str | None:
-        thread_dir = self._thread_list_dir()
-        if thread_dir is None:
-            return None
-        return posixpath.join(thread_dir, "index.threadl")
-
-    def _thread_list_entry_name_for_path(self, *, path: str) -> str:
-        filename = posixpath.basename(path.strip())
-        if filename.endswith(".thread"):
-            filename = filename[: -len(".thread")]
-        raw_name = filename.strip()
-        if raw_name != "":
-            try:
-                parsed_uuid = uuid.UUID(raw_name)
-            except ValueError:
-                parsed_uuid = None
-            if parsed_uuid is not None and str(parsed_uuid) == raw_name.lower():
-                return "New Chat"
-
-        normalized = re.sub(r"[-_/]+", " ", filename)
-        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
-        if normalized == "":
-            return "New Chat"
-        if normalized == normalized.lower() or normalized == normalized.upper():
-            normalized = normalized.title()
-        return normalized[:64].strip() or "New Chat"
-
-    def _default_thread_dir(self) -> str:
-        local_name = "chat"
-        participant_name = self._room.local_participant.get_attribute("name")
-        if isinstance(participant_name, str) and participant_name.strip() != "":
-            local_name = participant_name.strip()
-
-        return self._normalize_thread_dir(
-            thread_dir=posixpath.join(".threads", local_name)
-        )
-
-    def _thread_list_dir(self) -> str | None:
-        if self._thread_dir is not None:
-            return self._thread_dir
-        if self._threading_mode == "default-new":
-            return self._default_thread_dir()
-        return None
-
-    def _get_thread_dir(self) -> str:
-        if self._thread_dir is not None:
-            return self._thread_dir
-        return self._default_thread_dir()
-
-    @staticmethod
-    def _sanitize_thread_name(*, value: str) -> str:
-        normalized = value.strip()
-        if normalized.endswith(".thread"):
-            normalized = normalized[: -len(".thread")]
-
-        normalized = re.sub(r"[-_/]+", " ", normalized)
-        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
-        normalized = re.sub(r"[^A-Za-z0-9 .,!?':()&]+", "", normalized)
-        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
-        if normalized == "":
-            return "New Chat"
-        if normalized == normalized.lower() or normalized == normalized.upper():
-            normalized = normalized.title()
-        return normalized[:64].strip() or "New Chat"
-
-    def _fallback_thread_name(self, *, text: str) -> str:
-        normalized_text = text.strip()
-        if normalized_text != "":
-            return self._sanitize_thread_name(value=normalized_text)
-        return "New Chat"
-
-    @staticmethod
-    def _thread_path_for_name(*, thread_name: str, thread_dir: str) -> str:
-        return posixpath.join(thread_dir, f"{thread_name}.thread")
-
-    def _find_thread_list_entry(self, *, path: str) -> Element | None:
-        if self._thread_list_document is None:
-            return None
-
-        for child in self._thread_list_document.root.get_children():
-            if child.tag_name != "thread":
-                continue
-            if child.get_attribute("path") == path:
-                return child
-
-        return None
-
-    def _is_index_managed_path(self, *, path: str) -> bool:
-        thread_dir = self._thread_list_dir()
-        if thread_dir is None:
-            return False
-
-        normalized_path = path.strip().strip("/")
-        normalized_dir = thread_dir.strip().strip("/")
-        if normalized_path == "" or normalized_dir == "":
-            return False
-        return normalized_path == normalized_dir or normalized_path.startswith(
-            f"{normalized_dir}/"
-        )
-
-    def _upsert_thread_list_entry(
-        self,
-        *,
-        path: str,
-        name: str | None = None,
-        created_at: str | None = None,
-        modified_at: str | None = None,
-    ) -> None:
-        if self._thread_list_document is None or not self._is_index_managed_path(
-            path=path
-        ):
-            return
-
-        now = self._utc_now_iso()
-        provided_name = name.strip() if isinstance(name, str) else ""
-        entry = self._find_thread_list_entry(path=path)
-        if entry is None:
-            resolved_created_at = (
-                created_at.strip()
-                if isinstance(created_at, str) and created_at.strip() != ""
-                else now
-            )
-            resolved_modified_at = (
-                modified_at.strip()
-                if isinstance(modified_at, str) and modified_at.strip() != ""
-                else resolved_created_at
-            )
-            self._thread_list_document.root.append_child(
-                tag_name="thread",
-                attributes={
-                    "name": (
-                        provided_name
-                        if provided_name != ""
-                        else self._thread_list_entry_name_for_path(path=path)
-                    ),
-                    "path": path,
-                    "created_at": resolved_created_at,
-                    "modified_at": resolved_modified_at,
-                },
-            )
-            return
-
-        entry.set_attribute("path", path)
-        if provided_name != "":
-            entry.set_attribute("name", provided_name)
-        else:
-            existing_name = entry.get_attribute("name")
-            if isinstance(existing_name, str) and existing_name.strip() != "":
-                pass
-            else:
-                entry.set_attribute(
-                    "name", self._thread_list_entry_name_for_path(path=path)
-                )
-
-        existing_created_at = entry.get_attribute("created_at")
-        resolved_created_at = (
-            existing_created_at.strip()
-            if isinstance(existing_created_at, str)
-            and existing_created_at.strip() != ""
-            else (
-                created_at.strip()
-                if isinstance(created_at, str) and created_at.strip() != ""
-                else now
-            )
-        )
-        entry.set_attribute("created_at", resolved_created_at)
-        resolved_modified_at = (
-            modified_at.strip()
-            if isinstance(modified_at, str) and modified_at.strip() != ""
-            else now
-        )
-        entry.set_attribute("modified_at", resolved_modified_at)
-
-    def _record_new_thread_in_index(
-        self,
-        *,
-        path: str,
-        name: str | None = None,
-    ) -> None:
-        now = self._utc_now_iso()
-        self._upsert_thread_list_entry(
-            path=path,
-            name=name,
-            created_at=now,
-            modified_at=now,
-        )
-
-    def _thread_list_entries(self) -> list[Element]:
-        if self._thread_list_dir() is None or self._thread_list_document is None:
-            return []
-
-        return [
-            child
-            for child in self._thread_list_document.root.get_children()
-            if child.tag_name == "thread"
-        ]
-
-    @staticmethod
-    def _parse_iso_datetime(*, value: Any) -> datetime | None:
-        if not isinstance(value, str):
-            return None
-
-        raw = value.strip()
-        if raw == "":
-            return None
-
-        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed
-
-    def _thread_sort_datetime(self, *, entry: Element) -> datetime:
-        modified_at = self._parse_iso_datetime(value=entry.get_attribute("modified_at"))
-        if modified_at is not None:
-            return modified_at
-        created_at = self._parse_iso_datetime(value=entry.get_attribute("created_at"))
-        if created_at is not None:
-            return created_at
-        return datetime.min.replace(tzinfo=timezone.utc)
-
-    def _sorted_thread_list_entries(self) -> list[Element]:
-        return sorted(
-            self._thread_list_entries(),
-            key=lambda entry: self._thread_sort_datetime(entry=entry),
-            reverse=True,
-        )
-
-    @staticmethod
-    def _thread_list_slice(
-        *,
-        entries: list[Element],
-        limit: int,
-        offset: int,
-    ) -> list[Element]:
-        normalized_offset = max(0, int(offset))
-        normalized_limit = max(1, min(200, int(limit)))
-        return entries[normalized_offset : normalized_offset + normalized_limit]
-
-    async def _next_available_thread_path(self, *, base_path: str) -> str:
-        try:
-            exists = await self._room.storage.exists(path=base_path)
-        except Exception:
-            return base_path
-
-        if not exists:
-            return base_path
-
-        thread_dir, filename = posixpath.split(base_path)
-        if filename.endswith(".thread"):
-            base_name = filename[: -len(".thread")]
-        else:
-            base_name = filename
-
-        for index in range(2, 1000):
-            candidate = posixpath.join(thread_dir, f"{base_name} {index}.thread")
-            try:
-                if not await self._room.storage.exists(path=candidate):
-                    return candidate
-            except Exception:
-                return candidate
-
-        return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}.thread")
 
     def _build_thread_list_tools(self) -> list[FunctionTool]:
         if self._thread_list_dir() is None:
@@ -973,16 +662,27 @@ class LegacyChatChannel(Channel):
                 text_value = message.get("text")
                 text = text_value if isinstance(text_value, str) else ""
                 payload = {**message, "text": text}
+                attachment_paths = [
+                    attachment.path
+                    for attachment in payload.get("attachments") or []
+                    if isinstance(attachment, _ChatAttachmentPayload)
+                ]
+                if len(attachment_paths) == 0:
+                    raw_attachments = payload.get("attachments")
+                    if isinstance(raw_attachments, list):
+                        attachment_paths = [
+                            attachment_value["path"]
+                            for attachment_value in raw_attachments
+                            if isinstance(attachment_value, dict)
+                            and isinstance(attachment_value.get("path"), str)
+                            and attachment_value.get("path", "").strip() != ""
+                        ]
 
-                path = outer._thread_path_for_name(
-                    thread_name=str(uuid.uuid4()),
-                    thread_dir=outer._get_thread_dir(),
-                )
-                path = await outer._next_available_thread_path(base_path=path)
-                friendly_name = outer._fallback_thread_name(text=text)
-                outer._record_new_thread_in_index(
-                    path=path,
-                    name=friendly_name,
+                path, friendly_name = await outer.new_thread(
+                    message_text=text,
+                    attachments=attachment_paths,
+                    caller_context=context.caller_context,
+                    on_behalf_of=context.on_behalf_of or context.caller,
                 )
 
                 chat_message = _ChatMessagePayload.model_validate(
@@ -1093,38 +793,6 @@ class LegacyChatChannel(Channel):
             tools=self._build_chat_tools(),
             validation_mode="content_types",
         )
-
-    def _touch_thread_in_index(self, *, path: str) -> None:
-        self._upsert_thread_list_entry(
-            path=path,
-            modified_at=self._utc_now_iso(),
-        )
-
-    async def _open_thread_list_document(self) -> None:
-        index_path = self._thread_list_index_path()
-        if index_path is None:
-            return
-
-        if (
-            self._thread_list_document is not None
-            and self._thread_list_path == index_path
-        ):
-            return
-
-        self._thread_list_document = await self._room.sync.open(
-            path=index_path,
-            schema=thread_list_schema,
-        )
-        self._thread_list_path = index_path
-
-    async def _close_thread_list_document(self) -> None:
-        thread_list_path = self._thread_list_path
-        if self._thread_list_document is None or thread_list_path is None:
-            return
-
-        self._thread_list_document = None
-        self._thread_list_path = None
-        await self._room.sync.close(path=thread_list_path)
 
     def _send_thread_tool_providers(
         self,

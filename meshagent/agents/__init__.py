@@ -13,6 +13,7 @@ from .listener import Listener, ListenerContext
 from .adapter import ToolResponseAdapter, LLMAdapter
 from .image_captioner import ImageCaptioner, LLMImageCaptioner
 from .process_thread_adapter import AgentProcessThreadAdapter
+from .threaded_channel import ThreadedChannel
 from .chat_channel import ChatChannel
 from .legacy_chat_channel import LegacyChatChannel
 from .mail_channel import MailChannel
@@ -39,6 +40,7 @@ __all__ = [
     ImageCaptioner,
     LLMImageCaptioner,
     AgentProcessThreadAdapter,
+    ThreadedChannel,
     ChatChannel,
     LegacyChatChannel,
     MailChannel,
