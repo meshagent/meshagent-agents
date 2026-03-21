@@ -105,6 +105,7 @@ class QueueChannel(Channel):
                 continue
 
             try:
+                logger.info(f"processing message from queue {self._queue_name}")
                 payload = self._payload_from_queue_message(message=queued_message)
                 prompt = self._prompt_from_payload(payload=payload)
                 self.emit(
