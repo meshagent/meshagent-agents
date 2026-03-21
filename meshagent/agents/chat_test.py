@@ -1276,6 +1276,36 @@ def test_touch_thread_in_index_updates_modified_at() -> None:
     assert entry.get_attribute("modified_at") != "2024-01-01T00:00:00Z"
 
 
+def test_touch_thread_in_index_forces_modified_at_forward_when_clock_does_not_advance() -> (
+    None
+):
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    doc = _FakeThreadListDocument()
+    path = "custom/main.thread"
+    existing_modified_at = "2024-01-01T00:00:00Z"
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "main",
+            "path": path,
+            "created_at": existing_modified_at,
+            "modified_at": existing_modified_at,
+        },
+    )
+    bot._thread_list_document = doc
+
+    with mock.patch.object(bot, "_utc_now_iso", return_value=existing_modified_at):
+        bot._touch_thread_in_index(path=path)
+
+    entry = doc.root.get_children()[0]
+    updated_modified_at = entry.get_attribute("modified_at")
+    assert isinstance(updated_modified_at, str)
+    assert bot._parse_iso_datetime(value=updated_modified_at) > bot._parse_iso_datetime(
+        value=existing_modified_at
+    )
+
+
 def test_record_new_thread_in_index_is_noop_without_explicit_thread_dir() -> None:
     adapter = _CaptureChatAdapter()
     bot = ChatBot(llm_adapter=adapter)

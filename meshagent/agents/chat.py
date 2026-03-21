@@ -39,7 +39,7 @@ import uuid
 import posixpath
 import re
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import asyncio
 from typing import Any, Optional, Callable, AsyncIterator, Awaitable, Literal
 import logging
@@ -621,10 +621,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
         )
         entry.set_attribute("created_at", created_value)
 
-        modified_value = (
-            modified_at.strip()
-            if isinstance(modified_at, str) and modified_at.strip() != ""
-            else now
+        modified_value = self._next_thread_list_modified_at(
+            entry=entry,
+            modified_at=modified_at,
         )
         entry.set_attribute("modified_at", modified_value)
 
@@ -643,6 +642,40 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._upsert_thread_list_entry(
             path=path,
             modified_at=self._utc_now_iso(),
+        )
+
+    def _next_thread_list_modified_at(
+        self,
+        *,
+        entry: Element | None,
+        modified_at: str | None = None,
+    ) -> str:
+        candidate = (
+            modified_at.strip()
+            if isinstance(modified_at, str) and modified_at.strip() != ""
+            else self._utc_now_iso()
+        )
+        if entry is None:
+            return candidate
+
+        existing_modified_at = self._parse_iso_datetime(
+            value=entry.get_attribute("modified_at")
+        )
+        candidate_modified_at = self._parse_iso_datetime(value=candidate)
+        if (
+            existing_modified_at is None
+            or candidate_modified_at is None
+            or candidate_modified_at > existing_modified_at
+        ):
+            return candidate
+
+        return (
+            (existing_modified_at + timedelta(microseconds=1))
+            .isoformat()
+            .replace(
+                "+00:00",
+                "Z",
+            )
         )
 
     def _thread_list_entries(self) -> list[Element]:

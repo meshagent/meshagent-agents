@@ -1,4 +1,5 @@
 import uuid
+from unittest import mock
 
 import pytest
 from pydantic import BaseModel
@@ -1151,3 +1152,35 @@ async def test_chat_channel_does_not_bump_thread_index_on_open_or_tool_provider_
         assert existing_entry.get_attribute("modified_at") == "2024-01-01T00:00:00Z"
     finally:
         await channel.stop(supervisor)
+
+
+def test_chat_channel_bump_thread_forces_modified_at_forward_when_clock_does_not_advance() -> (
+    None
+):
+    existing_modified_at = "2024-01-01T00:00:00Z"
+    sync = _FakeSync()
+    existing_entry = sync.document.root.append_child(
+        tag_name="thread",
+        attributes={
+            "path": "/threads/chat/example.thread",
+            "name": "Example",
+            "created_at": existing_modified_at,
+            "modified_at": existing_modified_at,
+        },
+    )
+    room = _FakeRoom(sync=sync)
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    channel._thread_list_document = sync.document
+
+    with mock.patch.object(channel, "_utc_now_iso", return_value=existing_modified_at):
+        channel.bump_thread(path="/threads/chat/example.thread")
+
+    updated_modified_at = existing_entry.get_attribute("modified_at")
+    assert isinstance(updated_modified_at, str)
+    assert channel._parse_iso_datetime(
+        value=updated_modified_at
+    ) > channel._parse_iso_datetime(value=existing_modified_at)
