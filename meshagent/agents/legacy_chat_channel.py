@@ -681,7 +681,6 @@ class LegacyChatChannel(ThreadedChannel):
                 path, friendly_name = await outer.new_thread(
                     message_text=text,
                     attachments=attachment_paths,
-                    caller_context=context.caller_context,
                     on_behalf_of=context.on_behalf_of or context.caller,
                 )
 

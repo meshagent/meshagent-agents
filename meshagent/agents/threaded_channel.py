@@ -4,7 +4,6 @@ import logging
 import posixpath
 import re
 import uuid
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Sequence
@@ -13,7 +12,6 @@ from urllib.parse import urlparse
 from meshagent.api import Element, MeshDocument, Participant, RoomClient
 
 from .adapter import LLMAdapter
-from .context import AgentSessionContext
 from .process import Channel
 from .thread_schema import thread_list_schema
 
@@ -497,7 +495,6 @@ class ThreadedChannel(Channel):
         *,
         message_text: str,
         attachments: Sequence[str] | None = None,
-        caller_context: dict[str, Any] | None = None,
         on_behalf_of: Participant | None = None,
     ) -> str:
         generated_name = self._fallback_thread_name(
@@ -508,19 +505,7 @@ class ThreadedChannel(Channel):
         if adapter is None:
             return generated_name
 
-        chat_context_json = None
-        if isinstance(caller_context, dict):
-            candidate = caller_context.get("chat")
-            if isinstance(candidate, dict):
-                chat_context_json = candidate
-
         session = adapter.create_session()
-        if chat_context_json is not None:
-            prior_context = AgentSessionContext.from_json(chat_context_json)
-            session.messages.extend(deepcopy(prior_context.messages))
-            session.previous_messages.extend(deepcopy(prior_context.previous_messages))
-            session.previous_response_id = prior_context.previous_response_id
-
         cloned_context = session.copy()
         async with cloned_context:
             cloned_context.replace_rules(rules=self._thread_name_rules)
@@ -575,13 +560,11 @@ class ThreadedChannel(Channel):
         *,
         message_text: str,
         attachments: Sequence[str] | None = None,
-        caller_context: dict[str, Any] | None = None,
         on_behalf_of: Participant | None = None,
     ) -> tuple[str, str]:
         friendly_name = await self._determine_thread_name(
             message_text=message_text,
             attachments=attachments,
-            caller_context=caller_context,
             on_behalf_of=on_behalf_of,
         )
         path = await self._new_thread_path()
