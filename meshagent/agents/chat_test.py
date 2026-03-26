@@ -15,6 +15,7 @@ from meshagent.agents.chat import ChatBot, ChatBotClient, ChatThreadContext
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.thread_schema import thread_list_schema, thread_schema
 from meshagent.api import RoomException
+from meshagent.api.chan import Chan
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
 from meshagent.openai.tools.responses_adapter import MCPToolkitBuilder
@@ -215,6 +216,11 @@ class _ExplodingMessageChannel:
 
     async def recv(self):
         raise self._error
+
+
+class _BlockingMessageChannel:
+    async def recv(self):
+        await asyncio.Future()
 
 
 class _TrackedThreadContext:
@@ -1462,3 +1468,45 @@ async def test_spawn_thread_waits_for_cleanup_before_returning() -> None:
 
     with pytest.raises(RuntimeError, match="thread ended"):
         await task
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_thread_cleanup_before_returning() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+    bot._exposed_toolkits = []
+
+    path = ".threads/assistant/main.thread"
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    async def _close_thread(*, path: str) -> None:
+        del path
+        close_started.set()
+        await allow_close.wait()
+
+    bot.close_thread = mock.AsyncMock(side_effect=_close_thread)  # type: ignore[method-assign]
+    bot._close_thread_list_document = mock.AsyncMock()  # type: ignore[method-assign]
+    bot._clear_all_thread_statuses = mock.AsyncMock()  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        bot._spawn_thread(
+            path=path,
+            messages=_BlockingMessageChannel(),  # type: ignore[arg-type]
+        )
+    )
+    bot._thread_tasks[path] = task
+    bot._message_channels[path] = mock.Mock(spec=Chan)
+
+    stop_task = asyncio.create_task(bot.stop())
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.05)
+
+    assert close_started.is_set()
+
+    allow_close.set()
+    await stop_task
+    assert task.done()

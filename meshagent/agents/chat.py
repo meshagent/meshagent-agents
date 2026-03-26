@@ -1696,15 +1696,23 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
     async def stop(self):
         room = self._room
-        await super().stop()
-        await self._close_thread_list_document(room=room)
+        message_channels = list(self._message_channels.values())
+        for channel in message_channels:
+            channel.close()
 
-        await self._clear_all_thread_statuses()
-
-        for thread in self._thread_tasks.values():
+        thread_tasks = list(self._thread_tasks.values())
+        for thread in thread_tasks:
             thread.cancel()
 
+        if len(thread_tasks) > 0:
+            await asyncio.gather(*thread_tasks, return_exceptions=True)
+
         self._thread_tasks.clear()
+        self._message_channels.clear()
+
+        await self._clear_all_thread_statuses()
+        await self._close_thread_list_document(room=room)
+        await super().stop()
 
     async def _on_get_thread_toolkits_message(self, *, message: RoomMessage):
         path = message.message["path"]
