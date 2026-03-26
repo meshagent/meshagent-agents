@@ -1,4 +1,5 @@
 import asyncio
+import re
 import uuid
 from typing import Any, Literal
 
@@ -2929,6 +2930,15 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         assert assistant_message.get_attribute("author_name") == "assistant"
         assert assistant_message.get_attribute("role") == "agent"
         assert assistant_message.get_attribute("text") == "hello"
+        assert llm_adapter.calls[0]["messages"][0]["role"] == "user"
+        assert re.fullmatch(
+            r"caller said at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z: hello from caller",
+            llm_adapter.calls[0]["messages"][0]["content"],
+        )
+        assert llm_adapter.calls[0]["messages"][1] == {
+            "role": "user",
+            "content": "caller attached a file available at https://example.com/report.pdf",
+        }
 
         tool_event = next(
             event

@@ -67,6 +67,19 @@ class ThreadAdapter(ABC):
     def path(self) -> str:
         return self._thread_path
 
+    def format_message(
+        self,
+        *,
+        user_name: str,
+        message: str,
+        iso_timestamp: str,
+    ) -> str:
+        return self._format_message(
+            user_name=user_name,
+            message=message,
+            iso_timestamp=iso_timestamp,
+        )
+
     async def stop(self) -> None:
         if self._processor_task is not None and not self._processor_task.done():
             # Give the processor a bounded window to consume pending events

@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable, Literal, Optional, TypeVar
 from urllib.parse import urlparse
@@ -16,7 +17,7 @@ from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.tools import RemoteToolkit, ToolContext, Toolkit, ToolkitBuilder
 from .process_thread_adapter import AgentProcessThreadAdapter
-from .thread_adapter import ThreadAdapter
+from .thread_adapter import ThreadAdapter, default_format_message
 from .messages import (
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
@@ -865,6 +866,43 @@ class LLMAgentProcess(AgentProcess):
 
         return name
 
+    def _format_live_turn_message(
+        self,
+        *,
+        sender: Participant | None,
+        message: str,
+    ) -> str:
+        sender_name = self._sender_name(sender)
+        if sender_name is None or message == "":
+            return message
+
+        iso_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        thread_adapter = self.thread_adapter
+        if thread_adapter is not None:
+            return thread_adapter.format_message(
+                user_name=sender_name,
+                message=message,
+                iso_timestamp=iso_timestamp,
+            )
+
+        return default_format_message(
+            user_name=sender_name,
+            message=message,
+            iso_timestamp=iso_timestamp,
+        )
+
+    def _file_attachment_message(
+        self,
+        *,
+        sender: Participant | None,
+        url: str,
+    ) -> str:
+        sender_name = self._sender_name(sender)
+        if sender_name is None:
+            return f"the user attached a file available at {url}"
+
+        return f"{sender_name} attached a file available at {url}"
+
     @classmethod
     def _pending_status_message_payload(
         cls,
@@ -1068,6 +1106,7 @@ class LLMAgentProcess(AgentProcess):
         session: AgentSessionContext,
         file_content: FileContent,
         url: str,
+        sender: Participant | None,
     ) -> None:
         mime_type = file_content.mime_type or "application/octet-stream"
         if mime_type.startswith("image/") and session.supports_images:
@@ -1085,13 +1124,16 @@ class LLMAgentProcess(AgentProcess):
             )
             return
 
-        session.append_user_message(f"the user attached a file available at {url}")
+        session.append_user_message(
+            self._file_attachment_message(sender=sender, url=url)
+        )
 
     def _append_remote_file_content(
         self,
         *,
         session: AgentSessionContext,
         url: str,
+        sender: Participant | None,
     ) -> None:
         guessed_mime_type = self._guess_url_mime_type(url=url)
         if (
@@ -1106,13 +1148,16 @@ class LLMAgentProcess(AgentProcess):
             session.append_file_url(url=url)
             return
 
-        session.append_user_message(f"the user attached a file available at {url}")
+        session.append_user_message(
+            self._file_attachment_message(sender=sender, url=url)
+        )
 
     async def _append_file_content(
         self,
         *,
         session: AgentSessionContext,
         url: str,
+        sender: Participant | None,
     ) -> None:
         if urlparse(url).scheme == "room":
             room_path = self._normalize_room_storage_path(url=url)
@@ -1121,23 +1166,38 @@ class LLMAgentProcess(AgentProcess):
                 session=session,
                 file_content=file_content,
                 url=url,
+                sender=sender,
             )
             return
 
-        self._append_remote_file_content(session=session, url=url)
+        self._append_remote_file_content(
+            session=session,
+            url=url,
+            sender=sender,
+        )
 
     async def _append_turn_content(
         self,
         *,
         session: AgentSessionContext,
+        sender: Participant | None,
         turns: list[TurnStart | TurnSteer],
     ) -> None:
         for turn in turns:
             for item in turn.content:
                 if isinstance(item, AgentTextContent):
-                    session.append_user_message(item.text)
+                    session.append_user_message(
+                        self._format_live_turn_message(
+                            sender=sender,
+                            message=item.text,
+                        )
+                    )
                 elif isinstance(item, AgentFileContent):
-                    await self._append_file_content(session=session, url=item.url)
+                    await self._append_file_content(
+                        session=session,
+                        url=item.url,
+                        sender=sender,
+                    )
 
     async def _append_queued_turn_messages(
         self,
@@ -1148,6 +1208,7 @@ class LLMAgentProcess(AgentProcess):
         for queued_message in queued_messages:
             await self._append_turn_content(
                 session=session,
+                sender=queued_message.sender,
                 turns=[queued_message.request],
             )
 
