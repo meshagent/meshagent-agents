@@ -2628,7 +2628,7 @@ class ChatBot(ChatBotBase):
         toolkits: list[Toolkit],
         from_user: RemoteParticipant,
         online: list[Participant],
-    ):
+    ) -> bool:
         if not has_more_than_one_other_user or self._always_reply:
             return True
 
@@ -2703,7 +2703,31 @@ class ChatBot(ChatBotBase):
 
         logger.info(f"should reply check returned {response}")
 
-        return response["expecting_assistant_reply"]
+        parsed_response = response
+        if isinstance(parsed_response, str):
+            try:
+                parsed_response = json.loads(parsed_response)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "should reply check returned unstructured text, defaulting to reply"
+                )
+                return True
+
+        if not isinstance(parsed_response, dict):
+            logger.warning(
+                "should reply check returned %s, defaulting to reply",
+                type(parsed_response).__name__,
+            )
+            return True
+
+        expecting_assistant_reply = parsed_response.get("expecting_assistant_reply")
+        if isinstance(expecting_assistant_reply, bool):
+            return expecting_assistant_reply
+
+        logger.warning(
+            "should reply check returned payload without a boolean expecting_assistant_reply, defaulting to reply"
+        )
+        return True
 
     async def on_thread_open(self, *, thread_context: ChatThreadContext):
         await self.clear_thread_status(path=thread_context.path)

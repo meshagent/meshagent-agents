@@ -367,6 +367,38 @@ class _CaptureChatAdapter(LLMAdapter):
         return "ok"
 
 
+class _ShouldReplyAdapter(LLMAdapter):
+    def __init__(self, *, response):
+        self.response = response
+
+    def default_model(self) -> str:
+        return "decision-model"
+
+    async def next(
+        self,
+        *,
+        context,
+        room,
+        toolkits,
+        output_schema=None,
+        event_handler=None,
+        steering_callback=None,
+        model=None,
+        on_behalf_of=None,
+        options: Optional[dict] = None,
+    ):
+        del context
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        return self.response
+
+
 class _ExampleToolkitConfig(BaseModel):
     name: Literal["example"] = "example"
     enabled: bool = False
@@ -1219,6 +1251,76 @@ async def test_on_chat_received_updates_thread_index_modified_at() -> None:
     entry = doc.root.get_children()[0]
     assert entry.get_attribute("created_at") == "2024-01-01T00:00:00Z"
     assert entry.get_attribute("modified_at") != "2024-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_should_reply_defaults_true_for_unstructured_decision_response() -> None:
+    adapter = _ShouldReplyAdapter(response="Indexed reply")
+    bot = ChatBot(llm_adapter=adapter)
+    bot._room = _FakeRoom()
+
+    thread = _FakeThreadDocument()
+    members = thread.root.append_child(tag_name="members")
+    members.append_child(tag_name="member", attributes={"name": "assistant"})
+    members.append_child(tag_name="member", attributes={"name": "alice"})
+    members.append_child(tag_name="member", attributes={"name": "bob"})
+
+    context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=".threads/main.thread",
+    )
+    from_user = Participant(id="alice-id", attributes={"name": "alice"})
+    online = [
+        from_user,
+        Participant(id="bob-id", attributes={"name": "bob"}),
+    ]
+
+    should_reply = await bot.should_reply(
+        context=context,
+        has_more_than_one_other_user=True,
+        toolkits=[],
+        from_user=from_user,
+        online=online,
+    )
+
+    assert should_reply is True
+
+
+@pytest.mark.asyncio
+async def test_should_reply_parses_json_string_decision_response() -> None:
+    adapter = _ShouldReplyAdapter(
+        response='{"reasoning":"waiting on bob","expecting_assistant_reply":false,"next_user":"bob"}'
+    )
+    bot = ChatBot(llm_adapter=adapter)
+    bot._room = _FakeRoom()
+
+    thread = _FakeThreadDocument()
+    members = thread.root.append_child(tag_name="members")
+    members.append_child(tag_name="member", attributes={"name": "assistant"})
+    members.append_child(tag_name="member", attributes={"name": "alice"})
+    members.append_child(tag_name="member", attributes={"name": "bob"})
+
+    context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=".threads/main.thread",
+    )
+    from_user = Participant(id="alice-id", attributes={"name": "alice"})
+    online = [
+        from_user,
+        Participant(id="bob-id", attributes={"name": "bob"}),
+    ]
+
+    should_reply = await bot.should_reply(
+        context=context,
+        has_more_than_one_other_user=True,
+        toolkits=[],
+        from_user=from_user,
+        online=online,
+    )
+
+    assert should_reply is False
 
 
 def test_record_new_thread_in_index_adds_entry() -> None:
