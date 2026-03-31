@@ -5,6 +5,7 @@ from typing import Any, Iterable, Iterator, Literal
 import email.utils
 import os
 import re
+import socket
 import uuid
 
 import mistune
@@ -22,6 +23,7 @@ class SmtpConfiguration:
         password: str | None = None,
         port: int | None = None,
         hostname: str | None = None,
+        local_hostname: str | None = None,
     ) -> None:
         if username is None:
             username = os.getenv("SMTP_USERNAME")
@@ -35,10 +37,31 @@ class SmtpConfiguration:
         if hostname is None:
             hostname = os.getenv("SMTP_HOSTNAME")
 
+        if local_hostname is None:
+            local_hostname = os.getenv("SMTP_LOCAL_HOSTNAME")
+
         self.username = username
         self.password = password
         self.port = port
         self.hostname = hostname
+        self.local_hostname = local_hostname
+
+    def effective_local_hostname(self) -> str:
+        candidates = [
+            self.local_hostname,
+            socket.getfqdn(),
+            socket.gethostname(),
+            os.getenv("HOSTNAME"),
+            "localhost",
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            normalized = candidate.strip()
+            if normalized != "":
+                return normalized
+
+        return "localhost"
 
 
 def _parse_addrs(values: Any) -> set[str]:

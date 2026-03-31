@@ -598,6 +598,7 @@ class MailChannel(ThreadedChannel):
             port=self._smtp.port,
             username=username,
             password=password,
+            local_hostname=self._smtp.effective_local_hostname(),
         )
 
     def _record_inbound_thread_activity(

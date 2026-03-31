@@ -536,6 +536,7 @@ class MailBot(Worker):
             port=port,
             username=username,
             password=password,
+            local_hostname=self._smtp.effective_local_hostname(),
         )
 
     def create_reply_email_message(
@@ -608,6 +609,7 @@ class MailBot(Worker):
             port=port,
             username=username,
             password=password,
+            local_hostname=self._smtp.effective_local_hostname(),
         )
 
     async def get_thread_toolkits(

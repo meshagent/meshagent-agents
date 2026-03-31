@@ -7,6 +7,7 @@ import pytest
 
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.mail_channel import MailChannel
+from meshagent.agents.mail_common import SmtpConfiguration
 from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
@@ -348,12 +349,13 @@ async def test_mail_channel_maps_reply_to_existing_thread(
         thread_dir=".threads/helpdesk",
     )
 
-    async def fake_send(message, *, hostname, port, username, password):
+    async def fake_send(message, *, hostname, port, username, password, local_hostname):
         del message
         del hostname
         del port
         del username
         del password
+        del local_hostname
 
     monkeypatch.setattr("meshagent.agents.mail_channel.aiosmtplib.send", fake_send)
     await channel.start(supervisor)  # type: ignore[arg-type]
@@ -589,11 +591,12 @@ async def test_mail_channel_sends_reply_when_turn_ends(
     )
     sent_messages: list[EmailMessage] = []
 
-    async def fake_send(message, *, hostname, port, username, password):
+    async def fake_send(message, *, hostname, port, username, password, local_hostname):
         del hostname
         del port
         del username
         del password
+        del local_hostname
         sent_messages.append(message)
 
     monkeypatch.setattr("meshagent.agents.mail_channel.aiosmtplib.send", fake_send)
@@ -692,11 +695,12 @@ async def test_new_email_thread_tool_uses_current_thread_id(
     )
     sent_messages: list[EmailMessage] = []
 
-    async def fake_send(message, *, hostname, port, username, password):
+    async def fake_send(message, *, hostname, port, username, password, local_hostname):
         del hostname
         del port
         del username
         del password
+        del local_hostname
         sent_messages.append(message)
 
     monkeypatch.setattr("meshagent.agents.mail_channel.aiosmtplib.send", fake_send)
@@ -725,3 +729,64 @@ async def test_new_email_thread_tool_uses_current_thread_id(
         assert rows[0]["thread_id"] == ".threads/assistant/customer.thread"
     finally:
         await channel.stop(channel.supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_mail_channel_uses_roompool_hostname_fallback_for_smtp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SMTP_USERNAME", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    monkeypatch.delenv("SMTP_PORT", raising=False)
+    monkeypatch.delenv("SMTP_HOSTNAME", raising=False)
+    monkeypatch.delenv("SMTP_LOCAL_HOSTNAME", raising=False)
+    monkeypatch.setenv("HOSTNAME", "roompool-rpt6h-r2677")
+    monkeypatch.setattr("meshagent.agents.mail_common.socket.getfqdn", lambda: "")
+    monkeypatch.setattr("meshagent.agents.mail_common.socket.gethostname", lambda: "")
+
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = MailChannel(
+        room=room,
+        queue_name="mailbox@mail.meshagent.com",
+        email_address="mailbox@mail.meshagent.com",
+        domain="mail.meshagent.com",
+        smtp=SmtpConfiguration(),
+    )
+    sent: dict[str, object] = {}
+
+    async def fake_send(
+        message,
+        *,
+        hostname,
+        port,
+        username,
+        password,
+        local_hostname,
+    ):
+        del message
+        sent["hostname"] = hostname
+        sent["port"] = port
+        sent["username"] = username
+        sent["password"] = password
+        sent["local_hostname"] = local_hostname
+
+    monkeypatch.setattr("meshagent.agents.mail_channel.aiosmtplib.send", fake_send)
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await channel.start_thread(
+            thread_id=".threads/assistant/customer.thread",
+            to_address="customer@example.com",
+            subject="Follow up",
+            body="Here is the update.",
+        )
+        assert sent == {
+            "hostname": "mail.meshagent.com",
+            "port": 587,
+            "username": "assistant",
+            "password": "token",
+            "local_hostname": "roompool-rpt6h-r2677",
+        }
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
