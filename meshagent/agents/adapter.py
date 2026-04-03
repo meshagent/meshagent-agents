@@ -295,49 +295,18 @@ class MessageStreamLLMAdapter(LLMAdapter):
         on_behalf_of: Optional[RemoteParticipant] = None,
         options: Optional[dict] = None,
     ) -> Any:
+        del context
+        del room
+        del toolkits
+        del output_schema
+        del event_handler
         del steering_callback
-        participant = room.messaging.get_participant_by_name(self.participant_name)
-        if participant is None:
-            raise RoomException("participant is not currently connected")
-
-        stream = await room.messaging.create_stream(
-            to=participant,
-            header={
-                "context": context.to_json(),
-                "model": model,
-                "output_schema": output_schema,
-                "on_behalf_of_id": on_behalf_of.id if on_behalf_of else None,
-                "metadata": context.metadata,
-            },
+        del model
+        del on_behalf_of
+        del options
+        raise RoomException(
+            "MessageStreamLLMAdapter has been removed; use streaming toolkits instead"
         )
-
-        error = None
-        output = None
-        try:
-            async for chunk in stream.read_chunks():
-                event = chunk.header.get("event")
-                if event is not None and event_handler is not None:
-                    event_handler(event)
-
-                output = chunk.header.get("output")
-                if output is not None:
-                    output.append(output)
-
-                if chunk.header.get("done"):
-                    break
-
-        except Exception as ex:
-            error = ex
-
-        await stream.close()
-
-        if self.context_mode == "diff":
-            context.messages.clear()
-
-        if error:
-            raise error
-
-        return output
 
     def validate(response: dict, output_schema: dict):
         validate(response, output_schema)
