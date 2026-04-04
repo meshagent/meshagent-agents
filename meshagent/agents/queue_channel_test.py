@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import uuid
 
 import pytest
@@ -9,6 +10,7 @@ from meshagent.agents.process import Message
 from meshagent.agents.queue_channel import QueueChannel
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api import Participant
+from meshagent.api.messaging import FileContent
 
 
 class _FakeLocalParticipant(Participant):
@@ -84,21 +86,30 @@ class _FakeSync:
 
 
 class _FakeStorage:
-    def __init__(self, *, existing_paths: set[str] | None = None) -> None:
-        self._existing_paths = set(existing_paths or [])
+    def __init__(self, *, files: dict[str, bytes] | None = None) -> None:
+        self._files = dict(files or {})
         self.exists_calls: list[str] = []
+        self.download_calls: list[str] = []
 
     async def exists(self, *, path: str) -> bool:
         self.exists_calls.append(path)
-        return path in self._existing_paths
+        return path in self._files
+
+    async def download(self, *, path: str) -> FileContent:
+        self.download_calls.append(path)
+        return FileContent(
+            data=self._files[path],
+            name=path.rsplit("/", 1)[-1],
+            mime_type="text/plain",
+        )
 
 
 class _FakeRoom:
-    def __init__(self) -> None:
+    def __init__(self, *, files: dict[str, bytes] | None = None) -> None:
         self.local_participant = _FakeLocalParticipant()
         self.queues = _FakeQueues()
         self.sync = _FakeSync()
-        self.storage = _FakeStorage()
+        self.storage = _FakeStorage(files=files)
 
 
 class _RecordingSupervisor:
@@ -222,6 +233,96 @@ async def test_queue_channel_supports_string_messages() -> None:
         assert isinstance(outbound.data, TurnStart)
         assert outbound.data.content[0].text == "Do the thing"
         assert outbound.data.thread_id.startswith(".threads/queue/")
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_queue_channel_supports_structured_prompt_with_room_file_include() -> (
+    None
+):
+    room = _FakeRoom(files={"prompts/heartbeat.md": b"Heartbeat instructions"})
+    supervisor = _RecordingSupervisor()
+    channel = QueueChannel(room=room, queue_name="jobs")
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push(
+            {
+                "thread_id": "/threads/heartbeats/current.thread",
+                "prompt": [
+                    {"type": "file", "url": "room:///prompts/heartbeat.md"},
+                    {"type": "text", "text": "Summarize the room status"},
+                    {"type": "file", "url": "https://example.com/docs/report.md"},
+                ],
+            }
+        )
+        await _drain()
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert outbound.data.thread_id == "/threads/heartbeats/current.thread"
+        assert [item.type for item in outbound.data.content] == ["text", "text", "file"]
+        assert outbound.data.content[0].text == "Heartbeat instructions"
+        assert outbound.data.content[1].text == "Summarize the room status"
+        assert outbound.data.content[2].url == "https://example.com/docs/report.md"
+        assert room.storage.exists_calls == ["prompts/heartbeat.md"]
+        assert room.storage.download_calls == ["prompts/heartbeat.md"]
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_queue_channel_preserves_structured_content_room_files() -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = QueueChannel(room=room, queue_name="jobs")
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push(
+            {
+                "thread_id": "/threads/uploads/current.thread",
+                "content": [
+                    {"type": "file", "url": "room:///docs/report.md"},
+                ],
+            }
+        )
+        await _drain()
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert outbound.data.content[0].url == "room:///docs/report.md"
+        assert room.storage.exists_calls == []
+        assert room.storage.download_calls == []
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_queue_channel_expands_datetime_tokens_in_thread_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = QueueChannel(room=room, queue_name="jobs")
+    fixed_now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(QueueChannel, "_now", lambda self: fixed_now)
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push(
+            {
+                "prompt": "Run the hourly heartbeat",
+                "thread_id": "/threads/{YYYY}/{MM}/{DD}/{HH}/{mm}/heartbeat.thread",
+            }
+        )
+        await _drain()
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert outbound.data.thread_id == "/threads/2026/01/02/03/04/heartbeat.thread"
     finally:
         await channel.stop(supervisor)  # type: ignore[arg-type]
 

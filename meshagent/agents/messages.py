@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any, Literal, Optional, TypeAlias
+from typing import Any, Literal, Optional
 
+from meshagent.api.agent_content import (
+    AgentContent,
+    AgentFileContent,
+    AgentInputContent,
+    AgentTextContent,
+)
 from meshagent.api.messaging import Content
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
+
+__all__ = [
+    "AgentContent",
+    "AgentFileContent",
+    "AgentInputContent",
+    "AgentTextContent",
+]
 
 AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
@@ -44,30 +57,6 @@ class AgentMessage(BaseModel):
     type: str
     thread_id: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-
-
-AGENT_CONTENT_TYPE_TEXT = "text"
-AGENT_CONTENT_TYPE_FILE = "file"
-
-
-class AgentContent(BaseModel):
-    pass
-
-
-class AgentTextContent(AgentContent):
-    type: Literal[AGENT_CONTENT_TYPE_TEXT]
-    text: str
-
-
-class AgentFileContent(AgentContent):
-    type: Literal[AGENT_CONTENT_TYPE_FILE]
-    url: str
-
-
-AgentInputContent: TypeAlias = Annotated[
-    AgentTextContent | AgentFileContent,
-    Field(discriminator="type"),
-]
 
 
 class TurnStart(AgentMessage):
