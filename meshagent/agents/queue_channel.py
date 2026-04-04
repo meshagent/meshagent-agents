@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import PurePosixPath
+import re
 from typing import Any
 from urllib.parse import urlparse
 import uuid
@@ -25,6 +26,7 @@ from .threaded_channel import ThreadedChannel
 logger = logging.getLogger("queue-channel")
 
 _agent_input_content_list_adapter = TypeAdapter(list[AgentInputContent])
+_thread_id_template_pattern = re.compile(r"\{([^{}]+)\}")
 
 
 class QueueChannel(ThreadedChannel):
@@ -385,21 +387,57 @@ class QueueChannel(ThreadedChannel):
 
     def _expand_thread_id_template(self, *, value: str) -> str:
         now = self._now()
-        replacements = (
-            ("{YYYY}", now.strftime("%Y")),
-            ("{YY}", now.strftime("%y")),
-            ("{MM}", now.strftime("%m")),
-            ("{DD}", now.strftime("%d")),
-            ("{HH}", now.strftime("%H")),
-            ("{mm}", now.strftime("%M")),
-            ("{SS}", now.strftime("%S")),
-            ("{ss}", now.strftime("%S")),
-        )
+        year = now.strftime("%Y")
+        short_year = now.strftime("%y")
+        month = now.strftime("%m")
+        day = now.strftime("%d")
+        hour = now.strftime("%H")
+        minute = now.strftime("%M")
+        second = now.strftime("%S")
 
-        output = value
-        for token, replacement in replacements:
-            output = output.replace(token, replacement)
-        return output
+        # Keep the legacy short month/minute forms exact-case to avoid the
+        # MM/mm ambiguity, and offer unambiguous aliases that are matched
+        # case-insensitively.
+        legacy_exact_replacements = {
+            "YYYY": year,
+            "YY": short_year,
+            "MM": month,
+            "DD": day,
+            "HH": hour,
+            "mm": minute,
+            "SS": second,
+            "ss": second,
+        }
+        case_insensitive_replacements = {
+            "YYYY": year,
+            "YEAR": year,
+            "YY": short_year,
+            "YR": short_year,
+            "DD": day,
+            "DAY": day,
+            "HH": hour,
+            "HOUR": hour,
+            "SS": second,
+            "SECOND": second,
+            "SEC": second,
+            "MONTH": month,
+            "MON": month,
+            "MINUTE": minute,
+            "MIN": minute,
+        }
+
+        def replace_match(match: re.Match[str]) -> str:
+            token = match.group(1)
+            exact_replacement = legacy_exact_replacements.get(token)
+            if exact_replacement is not None:
+                return exact_replacement
+
+            return case_insensitive_replacements.get(
+                token.upper(),
+                match.group(0),
+            )
+
+        return _thread_id_template_pattern.sub(replace_match, value)
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)

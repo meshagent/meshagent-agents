@@ -328,6 +328,36 @@ async def test_queue_channel_expands_datetime_tokens_in_thread_id(
 
 
 @pytest.mark.asyncio
+async def test_queue_channel_expands_case_insensitive_datetime_aliases_in_thread_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = QueueChannel(room=room, queue_name="jobs")
+    fixed_now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(QueueChannel, "_now", lambda self: fixed_now)
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push(
+            {
+                "prompt": "Run the hourly heartbeat",
+                "thread_id": "/threads/{yEaR}/{mOnTh}/{DaY}/{hOuR}/{mInUtE}/{sEcOnD}/heartbeat.thread",
+            }
+        )
+        await _drain()
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert (
+            outbound.data.thread_id == "/threads/2026/01/02/03/04/05/heartbeat.thread"
+        )
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_queue_channel_default_new_indexes_new_threads_from_prompt() -> None:
     room = _FakeRoom()
     supervisor = _RecordingSupervisor()
