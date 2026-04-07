@@ -46,6 +46,11 @@ transcript_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
+                    name="participant_role",
+                    description="Participant role for the segment, such as user or agent.",
+                    type="string",
+                ),
+                ValueProperty(
                     name="time",
                     description="Segment start time as an ISO-8601 UTC timestamp.",
                     type="string",
