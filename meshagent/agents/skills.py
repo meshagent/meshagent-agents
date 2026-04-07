@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 import html
@@ -16,6 +17,8 @@ import unicodedata
 
 
 logger = logging.getLogger(__name__)
+
+type SkillLocationMapper = Callable[[Path], str]
 
 
 @dataclass
@@ -192,7 +195,7 @@ def _append_prompt_skill(
     lines: list[str],
     name: str,
     description: str,
-    location: Path,
+    location: str,
 ) -> None:
     lines.append("<skill>")
     lines.append("<name>")
@@ -211,7 +214,7 @@ def _append_unavailable_prompt_skill(
     *,
     lines: list[str],
     name: str,
-    location: Path,
+    location: str,
     error: str,
 ) -> None:
     _append_prompt_skill(
@@ -227,6 +230,7 @@ async def _append_skill_prompt_entry(
     lines: list[str],
     skill_md_path: Path,
     missing_ok: bool,
+    location_mapper: SkillLocationMapper | None,
 ) -> None:
     try:
         props = await _read_properties_from_skill_md(skill_md_path)
@@ -237,7 +241,10 @@ async def _append_skill_prompt_entry(
         _append_unavailable_prompt_skill(
             lines=lines,
             name=skill_md_path.parent.name or str(skill_md_path.parent),
-            location=skill_md_path,
+            location=_render_prompt_location(
+                location=skill_md_path,
+                location_mapper=location_mapper,
+            ),
             error=str(exc),
         )
         return
@@ -246,11 +253,29 @@ async def _append_skill_prompt_entry(
         lines=lines,
         name=props.name,
         description=props.description,
-        location=skill_md_path,
+        location=_render_prompt_location(
+            location=skill_md_path,
+            location_mapper=location_mapper,
+        ),
     )
 
 
-async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
+def _render_prompt_location(
+    *,
+    location: Path,
+    location_mapper: SkillLocationMapper | None,
+) -> str:
+    if location_mapper is None:
+        return str(location)
+    return location_mapper(location)
+
+
+async def to_prompt(
+    skill_dirs: list[Path],
+    *,
+    missing_ok: bool = True,
+    location_mapper: SkillLocationMapper | None = None,
+) -> str:
     """Generate the <available_skills> XML block for inclusion in agent prompts.
 
     This XML format is what Anthropic uses and recommends for Claude models.
@@ -261,6 +286,7 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
         skill_dirs: List of paths to skill directories
         missing_ok: When True, include a prompt entry for missing SKILL.md files
             instead of failing.
+        location_mapper: Optional path remapper for emitted <location> values.
 
     Returns:
         XML string with <available_skills> block containing each skill's
@@ -294,6 +320,7 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
                         lines=lines,
                         skill_md_path=discovered_skill_md_path,
                         missing_ok=missing_ok,
+                        location_mapper=location_mapper,
                     )
                 continue
 
@@ -308,7 +335,10 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
                     "Configured skill directory is missing SKILL.md and cannot be "
                     "loaded until the file is added."
                 ),
-                location=skill_dir,
+                location=_render_prompt_location(
+                    location=skill_dir,
+                    location_mapper=location_mapper,
+                ),
             )
             continue
 
@@ -316,6 +346,7 @@ async def to_prompt(skill_dirs: list[Path], *, missing_ok: bool = True) -> str:
             lines=lines,
             skill_md_path=skill_md_path,
             missing_ok=missing_ok,
+            location_mapper=location_mapper,
         )
 
     lines.append("</available_skills>")

@@ -110,6 +110,31 @@ async def test_to_prompt_keeps_valid_skill_entries_unchanged(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_to_prompt_can_retarget_skill_locations(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "pdf-reader"
+    skill_dir.mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    prompt = await skills.to_prompt(
+        [skills_root],
+        location_mapper=lambda location: location.as_posix().replace(
+            skills_root.as_posix(),
+            "/skills",
+            1,
+        ),
+    )
+
+    assert "<name>\npdf-reader\n</name>" in prompt
+    assert "/skills/pdf-reader/SKILL.md" in prompt
+    assert str(skill_md) not in prompt
+
+
+@pytest.mark.asyncio
 async def test_to_prompt_includes_unloadable_skill_error_when_frontmatter_is_invalid(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
