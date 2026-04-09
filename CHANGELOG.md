@@ -1,3 +1,16 @@
+## [0.36.3]
+- Storage client now supports move operations and emits `file.moved` events.
+- Secrets client now supports existence checks.
+- Project user add calls now omit permission fields unless explicitly set.
+- CLI image deploy now supports `--env-secret` and `--meshagent-token` with `--identity` validation, plus Dockerfile `VOLUME` mount and secret existence checks.
+- CLI room connect now supports `--env` and `--env-secret` with optional local token minting; API key list and room list outputs now surface active keys and table views.
+
+## [0.36.2]
+- Breaking: Removed share-connect API from the Python client (`connect_share` / RoomShareConnectionInfo).
+- Added full OAuth scope constants (FULL_OAUTH_SCOPE/FULL_OAUTH_SCOPES) and CLI auth now defaults to requesting the full scope set.
+- Added `meshagent room connect` to run local commands with room auth, exporting MeshAgent/OpenAI/Anthropic env vars.
+- Default container image for shell/script tools and OpenAI/Slack integrations switched to `python:3.13`.
+
 ## [0.36.1]
 - Breaking: room internal API port standardized to `8078` with `ROOM_INTERNAL_API_PORT`/`room_api_base_url`, and service port specs now reject reserved room ports.
 - Participant container grants now include `ContainerRegistryGrant` for registry list/pull/run/write patterns.
