@@ -11,7 +11,12 @@ from pydantic import BaseModel
 from yarl import URL
 
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.chat import ChatBot, ChatBotClient, ChatThreadContext
+from meshagent.agents.chat import (
+    ChatBot,
+    ChatBotClient,
+    ChatMessageInput,
+    ChatThreadContext,
+)
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.thread_schema import thread_list_schema, thread_schema
 from meshagent.api import RoomException
@@ -557,6 +562,12 @@ def _stub_new_thread_member_seed(bot: ChatBot) -> mock.AsyncMock:
     return stub
 
 
+def _stub_new_thread_message_seed(bot: ChatBot) -> mock.AsyncMock:
+    stub = mock.AsyncMock()
+    bot._seed_new_thread_message = stub  # type: ignore[method-assign]
+    return stub
+
+
 async def _chat_toolkit(bot: ChatBot):
     toolkits = await bot.get_exposed_toolkits()
     return next(toolkit for toolkit in toolkits if toolkit.name == "chat")
@@ -577,6 +588,7 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     room = _FakeRoom()
     bot._room = room
     seeded_members = _stub_new_thread_member_seed(bot)
+    seeded_message = _stub_new_thread_message_seed(bot)
 
     queue = _FakeQueue()
 
@@ -618,13 +630,24 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     assert queued.message["path"] == result_path
     assert queued.message["text"] == "Plan the Q1 release milestones"
     assert queued.message["attachments"] == [{"path": "uploads/plan.md"}]
-    assert queued.message["store"] is True
+    assert queued.message["pre_stored"] is True
+    assert queued.message["store"] is False
     assert not queued.result.done()
 
     seeded_members.assert_awaited_once()
     assert seeded_members.await_args.kwargs["path"] == result_path
     assert seeded_members.await_args.kwargs["members"][0] is room.local_participant
     assert seeded_members.await_args.kwargs["members"][1] is context.caller
+    seeded_message.assert_awaited_once()
+    assert seeded_message.await_args.kwargs["path"] == result_path
+    assert seeded_message.await_args.kwargs["participant"] is context.caller
+    assert seeded_message.await_args.kwargs["message"].text == (
+        "Plan the Q1 release milestones"
+    )
+    assert [
+        attachment.path
+        for attachment in seeded_message.await_args.kwargs["message"].attachments or []
+    ] == ["uploads/plan.md"]
 
     assert len(adapter.calls) == 1
     assert adapter.calls[0]["output_schema"] is not None
@@ -637,6 +660,7 @@ async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
     room = _FakeRoom()
     bot._room = room
     _stub_new_thread_member_seed(bot)
+    _stub_new_thread_message_seed(bot)
 
     queue = _FakeQueue()
 
@@ -672,7 +696,8 @@ async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
     assert queued.message["path"] == result_path
     assert queued.message["text"] == "Plan the release"
     assert queued.message["attachments"] == []
-    assert queued.message["store"] is True
+    assert queued.message["pre_stored"] is True
+    assert queued.message["store"] is False
 
 
 @pytest.mark.asyncio
@@ -682,6 +707,7 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     room = _FakeRoom()
     bot._room = room
     _stub_new_thread_member_seed(bot)
+    _stub_new_thread_message_seed(bot)
 
     queue = _FakeQueue()
 
@@ -722,7 +748,8 @@ async def test_new_thread_tool_accepts_empty_tools_without_builder_schema() -> N
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == []
-    assert queued.message["store"] is True
+    assert queued.message["pre_stored"] is True
+    assert queued.message["store"] is False
 
 
 @pytest.mark.asyncio
@@ -751,6 +778,7 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     room = _FakeRoom()
     bot._room = room
     _stub_new_thread_member_seed(bot)
+    _stub_new_thread_message_seed(bot)
 
     queue = _FakeQueue()
 
@@ -788,7 +816,8 @@ async def test_new_thread_tool_accepts_tools_with_toolkit_builder_schema() -> No
     assert len(queue.items) == 1
     queued = queue.items[0]
     assert queued.message["tools"] == [{"name": "example", "enabled": True}]
-    assert queued.message["store"] is True
+    assert queued.message["pre_stored"] is True
+    assert queued.message["store"] is False
 
 
 @pytest.mark.asyncio
@@ -798,6 +827,7 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     room = _FakeRoom()
     bot._room = room
     _stub_new_thread_member_seed(bot)
+    _stub_new_thread_message_seed(bot)
 
     queue = _FakeQueue()
 
@@ -845,6 +875,7 @@ async def test_new_thread_tool_records_friendly_name_in_thread_list() -> None:
     room = _FakeRoom()
     bot._room = room
     _stub_new_thread_member_seed(bot)
+    _stub_new_thread_message_seed(bot)
 
     doc = _FakeThreadListDocument()
     bot._thread_list_document = doc
@@ -910,6 +941,50 @@ async def test_seed_new_thread_members_adds_agent_and_sender_without_duplicates(
         "assistant",
         "alice",
     ]
+
+
+@pytest.mark.asyncio
+async def test_seed_new_thread_message_adds_first_message_and_attachments() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter)
+    thread = _FakeThreadDocument()
+
+    sync = mock.Mock()
+    sync.open = mock.AsyncMock(return_value=thread)
+    sync.close = mock.AsyncMock()
+
+    room = _FakeRoom(sync=sync)
+    bot._room = room
+
+    sender = Participant(id="caller-id", attributes={"name": "alice"})
+
+    await bot._seed_new_thread_message(
+        path=".threads/assistant/test.thread",
+        participant=sender,
+        message=ChatMessageInput.model_validate(
+            {
+                "text": "Plan the Q1 release milestones",
+                "attachments": [{"path": "uploads/plan.md"}],
+            }
+        ),
+    )
+
+    assert sync.open.await_args.kwargs == {
+        "path": ".threads/assistant/test.thread",
+        "schema": thread_schema,
+    }
+    sync.close.assert_awaited_once_with(path=".threads/assistant/test.thread")
+
+    messages = thread.root.get_children_by_tag_name("messages")
+    assert len(messages) == 1
+    message_elements = messages[0].get_children_by_tag_name("message")
+    assert len(message_elements) == 1
+    assert message_elements[0].get_attribute("text") == "Plan the Q1 release milestones"
+    assert message_elements[0].get_attribute("author_name") == "alice"
+    assert isinstance(message_elements[0].get_attribute("created_at"), str)
+    files = message_elements[0].get_children_by_tag_name("file")
+    assert len(files) == 1
+    assert files[0].get_attribute("path") == "uploads/plan.md"
 
 
 @pytest.mark.asyncio
@@ -1251,6 +1326,64 @@ async def test_on_chat_received_updates_thread_index_modified_at() -> None:
     entry = doc.root.get_children()[0]
     assert entry.get_attribute("created_at") == "2024-01-01T00:00:00Z"
     assert entry.get_attribute("modified_at") != "2024-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_on_chat_received_does_not_duplicate_pre_stored_message_context() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = _ChatBotAlwaysReplies(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+    bot._open_threads[".threads/main.thread"] = _FakeOpenThreadAdapter()
+
+    thread = mock.Mock()
+    thread.root = mock.Mock()
+    thread.root.get_children.return_value = []
+
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,
+        path=".threads/main.thread",
+    )
+    thread_context.session.append_assistant_message(
+        "the user attached a file at the path 'uploads/plan.md'"
+    )
+    thread_context.session.append_user_message(
+        "alice said at 2024-01-01T00:00:00Z: Summarize this"
+    )
+
+    from_participant = Participant(
+        id="caller-id",
+        attributes={"name": "alice"},
+    )
+
+    result = await bot.on_chat_received(
+        thread_context=thread_context,
+        from_participant=from_participant,
+        message={
+            "text": "Summarize this",
+            "attachments": [{"path": "uploads/plan.md"}],
+            "pre_stored": True,
+        },
+    )
+
+    assert result == "ok"
+    attachment_messages = [
+        message.get("content")
+        for message in adapter.last_messages
+        if message.get("role") == "assistant"
+        and isinstance(message.get("content"), str)
+        and message.get("content").startswith("the user attached a file at the path")
+    ]
+    assert attachment_messages == [
+        "the user attached a file at the path 'uploads/plan.md'"
+    ]
+    user_messages = [
+        message.get("content")
+        for message in adapter.last_messages
+        if message.get("role") == "user"
+    ]
+    assert user_messages == ["alice said at 2024-01-01T00:00:00Z: Summarize this"]
 
 
 @pytest.mark.asyncio

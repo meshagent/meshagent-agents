@@ -304,7 +304,7 @@ class ThreadAdapter(ABC):
                         for child in element.get_children():
                             if child.tag_name == "file":
                                 context.append_assistant_message(
-                                    f"the user attached a file with the path '{child.get_attribute('path')}'"
+                                    f"the user attached a file at the path '{child.get_attribute('path')}'"
                                 )
 
                 break

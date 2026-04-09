@@ -1594,6 +1594,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
                             and self._should_store_received_chat_message(
                                 message=received.message
                             )
+                            and not self._is_pre_stored_chat_message(
+                                message=received.message
+                            )
                         ):
                             thread_adapter.write_text_message(
                                 text=text,
@@ -1784,6 +1787,22 @@ class ChatBotBase(SingleRoomAgent, ABC):
             return await qm.result
         return None
 
+    @staticmethod
+    def _is_pre_stored_chat_message(*, message: dict[str, Any]) -> bool:
+        pre_stored = message.get("pre_stored")
+        return isinstance(pre_stored, bool) and pre_stored
+
+    @staticmethod
+    def _ensure_thread_document_element(
+        *,
+        thread: MeshDocument,
+        tag_name: str,
+    ) -> Element:
+        elements = thread.root.get_children_by_tag_name(tag_name)
+        if len(elements) > 0:
+            return elements[0]
+        return thread.root.append_child(tag_name=tag_name)
+
     async def _seed_new_thread_members(
         self,
         *,
@@ -1792,11 +1811,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
     ) -> None:
         thread = await self.room.sync.open(path=path, schema=thread_schema)
         try:
-            members_elements = thread.root.get_children_by_tag_name("members")
-            members_element = (
-                members_elements[0]
-                if len(members_elements) > 0
-                else thread.root.append_child(tag_name="members")
+            members_element = self._ensure_thread_document_element(
+                thread=thread,
+                tag_name="members",
             )
 
             existing_members: set[str] = set()
@@ -1829,6 +1846,58 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     attributes={"name": normalized_name},
                 )
                 existing_members.add(normalized_name)
+        finally:
+            await self.room.sync.close(path=path)
+
+    async def _seed_new_thread_message(
+        self,
+        *,
+        path: str,
+        participant: Participant | str,
+        message: ChatMessageInput,
+    ) -> None:
+        thread = await self.room.sync.open(path=path, schema=thread_schema)
+        try:
+            messages_element = self._ensure_thread_document_element(
+                thread=thread,
+                tag_name="messages",
+            )
+
+            author_name = ""
+            normalized_role = ""
+            if isinstance(participant, Participant):
+                participant_name = participant.get_attribute("name")
+                if isinstance(participant_name, str):
+                    author_name = participant_name
+                if isinstance(participant, RemoteParticipant):
+                    participant_role = participant.role.strip()
+                    if participant_role != "":
+                        normalized_role = participant_role
+                if normalized_role == "" and participant is self.room.local_participant:
+                    normalized_role = "agent"
+            else:
+                author_name = participant
+
+            attributes: dict[str, str] = {
+                "text": message.text,
+                "created_at": self._utc_now_iso(),
+                "author_name": author_name,
+            }
+            if normalized_role != "":
+                attributes["role"] = normalized_role
+
+            message_element = messages_element.append_child(
+                tag_name="message",
+                attributes=attributes,
+            )
+            for attachment in message.attachments or []:
+                normalized_path = attachment.path.strip()
+                if normalized_path == "":
+                    continue
+                message_element.append_child(
+                    tag_name="file",
+                    attributes={"path": normalized_path},
+                )
         finally:
             await self.room.sync.close(path=path)
 
@@ -2084,27 +2153,33 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 *,
                 message: dict[str, Any],
             ) -> JsonContent:
-                text_value = message.get("text")
-                text = text_value if isinstance(text_value, str) else ""
-                payload = {**message, "text": text}
+                message_input = ChatMessageInput.model_validate(message)
+                payload = message_input.model_dump(mode="python")
+                sender = context.on_behalf_of or context.caller
 
                 path, friendly_name = await outer._generate_new_thread_info(
                     context=context,
-                    text=text,
+                    text=message_input.text,
                 )
                 await outer._seed_new_thread_members(
                     path=path,
                     members=[
                         outer.room.local_participant,
-                        context.on_behalf_of or context.caller,
+                        sender,
                     ],
+                )
+                await outer._seed_new_thread_message(
+                    path=path,
+                    participant=sender,
+                    message=message_input,
                 )
                 outer._record_new_thread_in_index(path=path, name=friendly_name)
                 await outer._queue_chat_message(
                     context=context,
                     path=path,
-                    message=payload,
+                    message={**payload, "pre_stored": True},
                     wait_for_result=False,
+                    store=False,
                 )
                 return JsonContent(json={"path": path, "name": friendly_name})
 
@@ -2758,21 +2833,24 @@ class ChatBot(ChatBotBase):
             participant=from_participant,
         )
 
-        attachments = message.get("attachments", [])
-        for attachment in attachments:
-            thread_context.session.append_assistant_message(
-                message=f"the user attached a file at the path '{attachment['path']}'"
-            )
-
         text = message["text"]
-        iso_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        thread_context.session.append_user_message(
-            message=self.format_message(
-                user_name=from_participant.get_attribute("name"),
-                message=text,
-                iso_timestamp=iso_timestamp,
+        if not self._is_pre_stored_chat_message(message=message):
+            attachments = message.get("attachments", [])
+            for attachment in attachments:
+                thread_context.session.append_assistant_message(
+                    message=f"the user attached a file at the path '{attachment['path']}'"
+                )
+
+            iso_timestamp = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             )
-        )
+            thread_context.session.append_user_message(
+                message=self.format_message(
+                    user_name=from_participant.get_attribute("name"),
+                    message=text,
+                    iso_timestamp=iso_timestamp,
+                )
+            )
 
         model = message.get("model", self.default_model())
 
