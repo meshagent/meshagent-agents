@@ -8,6 +8,7 @@ from typing import Any, Optional
 from meshagent.api import RoomClient
 from meshagent.api.room_server_client import (
     BinaryDataType,
+    DatabaseStruct,
     ListDataType,
     StructDataType,
     TextDataType,
@@ -67,8 +68,11 @@ class ImagesDatabase:
         return normalized
 
     @staticmethod
-    def _encode_annotations(annotations: dict[str, str]) -> list[dict[str, str]]:
-        return [{"key": key, "value": value} for key, value in annotations.items()]
+    def _encode_annotations(annotations: dict[str, str]) -> list[DatabaseStruct]:
+        return [
+            DatabaseStruct({"key": key, "value": value})
+            for key, value in annotations.items()
+        ]
 
     @staticmethod
     def _decode_annotations(value: Any) -> dict[str, str]:
@@ -83,6 +87,8 @@ class ImagesDatabase:
 
         decoded: dict[str, str] = {}
         for item in value:
+            if isinstance(item, DatabaseStruct):
+                item = item.fields
             if not isinstance(item, dict):
                 continue
             key = item.get("key")
