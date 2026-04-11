@@ -412,8 +412,7 @@ class _ExampleToolkitBuilder(ToolkitBuilder):
     def __init__(self):
         super().__init__(name="example", type=_ExampleToolkitConfig)
 
-    async def make(self, *, room, model: str, config: _ExampleToolkitConfig) -> Toolkit:
-        del room
+    async def make(self, *, model: str, config: _ExampleToolkitConfig) -> Toolkit:
         del model
         del config
         return Toolkit(name="example", tools=[])

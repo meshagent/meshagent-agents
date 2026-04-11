@@ -18,8 +18,8 @@ from meshagent.tools import (
     Toolkit,
     FunctionTool,
     ToolContext,
-    RemoteToolkit,
 )
+from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 
 from meshagent.api.room_server_client import RoomClient
 from .context import AgentSessionContext
@@ -35,7 +35,7 @@ class AgentException(RoomException):
     pass
 
 
-class RoomTool(FunctionTool):
+class RemoteRoomTool(FunctionTool):
     def __init__(
         self,
         *,
@@ -90,7 +90,7 @@ class RoomTool(FunctionTool):
 
         if isinstance(result, AsyncIterable):
             raise RoomException(
-                f"tool '{self._toolkit_name}.{self.name}' returned an iterable stream, which is not supported by RoomTool"
+                f"tool '{self._toolkit_name}.{self.name}' returned an iterable stream, which is not supported by RemoteRoomTool"
             )
 
         return result
@@ -267,9 +267,10 @@ class SingleRoomAgent(Agent):
             annotations=annotations,
         )
         self._room = None
-        self._exposed_toolkits = None
+        self._exposed_toolkits: list[Toolkit] = []
+        self._hosted_exposed_toolkits: list[_RemoteToolkitWrapper] = []
 
-    async def get_exposed_toolkits(self) -> list[RemoteToolkit]:
+    async def get_exposed_toolkits(self) -> list[Toolkit]:
         return []
 
     async def start(self, *, room: RoomClient) -> None:
@@ -281,14 +282,28 @@ class SingleRoomAgent(Agent):
         await self.install_requirements()
 
         self._exposed_toolkits = await self.get_exposed_toolkits()
-
-        for tk in self._exposed_toolkits:
-            await tk.start(room=room)
+        self._hosted_exposed_toolkits = []
+        try:
+            for toolkit in self._exposed_toolkits:
+                hosted_toolkit = await _start_hosted_toolkit(
+                    room=room,
+                    toolkit=toolkit,
+                )
+                self._hosted_exposed_toolkits.append(hosted_toolkit)
+        except Exception:
+            for hosted_toolkit in reversed(self._hosted_exposed_toolkits):
+                await hosted_toolkit.stop()
+            self._hosted_exposed_toolkits = []
+            self._exposed_toolkits = []
+            self._room = None
+            raise
 
     async def stop(self) -> None:
-        for tk in self._exposed_toolkits:
-            await tk.stop()
+        for hosted_toolkit in reversed(self._hosted_exposed_toolkits):
+            await hosted_toolkit.stop()
 
+        self._hosted_exposed_toolkits = []
+        self._exposed_toolkits = []
         self._room = None
 
     @property
@@ -470,11 +485,11 @@ class SingleRoomAgent(Agent):
                             f"unable to get toolkit {required_toolkit.name} for caller {context.caller.id}"
                         )
 
-                room_tools = list[RoomTool]()
+                remote_room_tools = list[RemoteRoomTool]()
 
                 if required_toolkit.tools is None:
                     for tool_description in toolkit.tools:
-                        tool = RoomTool(
+                        tool = RemoteRoomTool(
                             on_behalf_of_id=tool_target.id,
                             toolkit_name=toolkit.name,
                             name=tool_description.name,
@@ -489,7 +504,7 @@ class SingleRoomAgent(Agent):
                             pricing=tool_description.pricing,
                             strict=tool_description.strict,
                         )
-                        room_tools.append(tool)
+                        remote_room_tools.append(tool)
 
                 else:
                     tools_by_name = dict[str, ToolDescription]()
@@ -503,7 +518,7 @@ class SingleRoomAgent(Agent):
                                 f"unable to locate required tool {required_tool} in toolkit {required_toolkit.name}"
                             )
 
-                        tool = RoomTool(
+                        tool = RemoteRoomTool(
                             on_behalf_of_id=tool_target.id,
                             toolkit_name=toolkit.name,
                             name=tool_description.name,
@@ -518,7 +533,7 @@ class SingleRoomAgent(Agent):
                             pricing=tool_description.pricing,
                             strict=tool_description.strict,
                         )
-                        room_tools.append(tool)
+                        remote_room_tools.append(tool)
 
                 toolkits.append(
                     Toolkit(
@@ -526,7 +541,7 @@ class SingleRoomAgent(Agent):
                         title=toolkit.title,
                         description=toolkit.description,
                         thumbnail_url=toolkit.thumbnail_url,
-                        tools=room_tools,
+                        tools=remote_room_tools,
                     )
                 )
 

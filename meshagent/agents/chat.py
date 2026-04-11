@@ -18,7 +18,6 @@ from meshagent.tools import (
     make_toolkits,
     ToolkitBuilder,
     ToolkitConfig,
-    RemoteToolkit,
     FunctionTool,
 )
 from meshagent.agents.adapter import LLMAdapter
@@ -38,7 +37,6 @@ from meshagent.agents.responses_thread_adapter import (
 import uuid
 import posixpath
 import re
-from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import asyncio
 from typing import Any, Optional, Callable, AsyncIterator, Awaitable, Literal
@@ -821,21 +819,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         generated_name = self._fallback_thread_name(text=text)
         adapter = self.thread_name_adapter()
         if adapter is not None:
-            caller_context_json = context.caller_context
-            chat_context_json = None
-            if isinstance(caller_context_json, dict):
-                candidate = caller_context_json.get("chat")
-                if isinstance(candidate, dict):
-                    chat_context_json = candidate
-
             session = adapter.create_session()
-            if chat_context_json is not None:
-                caller_context = AgentSessionContext.from_json(chat_context_json)
-                session.messages.extend(deepcopy(caller_context.messages))
-                session.previous_messages.extend(
-                    deepcopy(caller_context.previous_messages)
-                )
-                session.previous_response_id = caller_context.previous_response_id
             cloned_context = session.copy()
             async with cloned_context:
                 cloned_context.replace_rules(rules=self._thread_name_rules)
@@ -1999,7 +1983,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
         return [list_threads, grep_thread_list]
 
-    async def get_exposed_toolkits(self) -> list[RemoteToolkit]:
+    async def get_exposed_toolkits(self) -> list[Toolkit]:
         exposed_toolkits = await super().get_exposed_toolkits()
 
         @tool(
@@ -2084,7 +2068,6 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     name="new_thread",
                     description=f"creates a new thread for {outer.room.local_participant.get_attribute('name')} and sends the first chat message, returning the new thread path and name",
                     input_schema=tools_schema,
-                    supports_context=True,
                 )
 
             async def execute(
@@ -2123,7 +2106,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             *self._build_thread_list_tools(),
         ]
 
-        chatbot_toolkit = RemoteToolkit(
+        chatbot_toolkit = Toolkit(
             name="chat",
             description=f"tools for interacting with {self.name}",
             public=False,

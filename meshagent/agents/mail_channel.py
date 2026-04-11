@@ -686,7 +686,6 @@ class MailChannel(ThreadedChannel):
                 super().__init__(
                     name="new_email_thread",
                     description="starts a new outbound email thread from the current agent thread",
-                    supports_context=True,
                     input_schema={
                         "type": "object",
                         "additionalProperties": False,

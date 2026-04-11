@@ -372,11 +372,10 @@ class _ExampleToolkitBuilder(ToolkitBuilder):
     async def make(
         self,
         *,
-        room,
         model: str,
         config: _ExampleToolkitConfig,
     ) -> Toolkit:
-        self.calls.append({"room": room, "model": model, "config": config})
+        self.calls.append({"model": model, "config": config})
         return Toolkit(name="example", tools=[])
 
 

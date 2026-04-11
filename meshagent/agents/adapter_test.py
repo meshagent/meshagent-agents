@@ -15,8 +15,7 @@ class _FakeRoom:
 
 
 class _FakeToolResponseAdapter(ToolResponseAdapter):
-    async def to_plain_text(self, *, room, response):
-        del room
+    async def to_plain_text(self, *, response):
         del response
         return ""
 
@@ -25,12 +24,10 @@ class _FakeToolResponseAdapter(ToolResponseAdapter):
         *,
         context,
         tool_call: Any,
-        room,
         response,
     ) -> list:
         del context
         del tool_call
-        del room
         del response
         return []
 
@@ -46,7 +43,6 @@ def test_truncate_returns_text_content_for_long_text() -> None:
     adapter = _FakeToolResponseAdapter(max_tool_call_length=16, max_tool_call_lines=2)
 
     truncated = adapter.truncate(
-        room=_FakeRoom(),
         content=TextContent(text="line1\nline2\nline3\nline4"),
     )
 
@@ -60,7 +56,6 @@ def test_truncate_returns_text_content_for_long_json() -> None:
     adapter = _FakeToolResponseAdapter(max_tool_call_length=12, max_tool_call_lines=10)
 
     truncated = adapter.truncate(
-        room=_FakeRoom(),
         content=JsonContent(json={"message": "x" * 50}),
     )
 
@@ -76,7 +71,7 @@ def test_truncate_leaves_file_content_unchanged() -> None:
         mime_type="text/plain",
     )
 
-    assert adapter.truncate(room=_FakeRoom(), content=content) is content
+    assert adapter.truncate(content=content) is content
 
 
 @pytest.mark.asyncio
@@ -89,7 +84,6 @@ async def test_file_content_to_text_content_decodes_declared_text_file() -> None
     )
 
     text_content = await adapter.file_content_to_text_content(
-        room=_FakeRoom(),
         content=content,
     )
 
@@ -109,7 +103,6 @@ async def test_file_content_to_text_content_decodes_utf8_text_without_text_mime(
     )
 
     text_content = await adapter.file_content_to_text_content(
-        room=_FakeRoom(),
         content=content,
     )
 
@@ -128,7 +121,6 @@ async def test_file_content_to_text_content_rejects_binary_utf8_file() -> None:
 
     assert (
         await adapter.file_content_to_text_content(
-            room=_FakeRoom(),
             content=content,
         )
         is None

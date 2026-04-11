@@ -283,7 +283,7 @@ class StorageIndexer(SingleRoomAgent):
 
     async def start(self, *, room):
         if self.embedder is None:
-            self.embedder = open_ai_embedding_3_large(openai=get_client(room=room))
+            self.embedder = open_ai_embedding_3_large(openai=get_client())
 
         await super().start(room=room)
 
@@ -463,7 +463,7 @@ class SiteIndexer(TaskRunner):
 
     async def start(self, *, room):
         if self.embedder is None:
-            self.embedder = open_ai_embedding_3_large(openai=get_client(room=room))
+            self.embedder = open_ai_embedding_3_large(openai=get_client())
 
         await super().start(room=room)
 

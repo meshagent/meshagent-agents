@@ -5,7 +5,7 @@ from typing import Any
 
 from meshagent.api import RoomMessage
 from pydantic import BaseModel
-from meshagent.tools import RemoteToolkit
+from meshagent.tools import Toolkit
 
 from .legacy_chat_channel import LegacyChatChannel
 from .messages import (
@@ -48,8 +48,8 @@ _OUTBOUND_AGENT_MESSAGE_TYPES = {
 
 
 class ChatChannel(LegacyChatChannel):
-    def get_exposed_toolkits(self) -> list[RemoteToolkit]:
-        return [self.make_remote_toolkit()]
+    def get_exposed_toolkits(self) -> list[Toolkit]:
+        return [self.make_toolkit()]
 
     def handles(self, message: Message) -> bool:
         message_type = message.data.type

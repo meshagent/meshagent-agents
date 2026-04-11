@@ -1,11 +1,11 @@
 from meshagent.agents.worker import Worker
 from meshagent.tools import (
-    RemoteToolkit,
     ToolContext,
     FunctionTool,
     Toolkit,
     FileContent,
 )
+from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from meshagent.tools.storage import StorageToolkit
 from meshagent.api.room_server_client import TextDataType, RoomException
 from email import message_from_bytes
@@ -208,7 +208,7 @@ class MailBot(Worker):
 
         if toolkit_name is not None:
             logger.info(f"mailbox will start toolkit {toolkit_name}")
-            self._toolkit = RemoteToolkit(
+            self._toolkit = Toolkit(
                 name=toolkit_name,
                 tools=[
                     NewEmailThreadWithAttachments(agent=self)
@@ -218,6 +218,7 @@ class MailBot(Worker):
             )
         else:
             self._toolkit = None
+        self._hosted_toolkit: _RemoteToolkitWrapper | None = None
 
         self._skill_dirs = skill_dirs
 
@@ -473,11 +474,15 @@ class MailBot(Worker):
     async def start(self, *, room: RoomClient):
         await super().start(room=room)
         if self._toolkit is not None:
-            await self._toolkit.start(room=room)
+            self._hosted_toolkit = await _start_hosted_toolkit(
+                room=room,
+                toolkit=self._toolkit,
+            )
 
     async def stop(self):
-        if self._toolkit is not None:
-            await self._toolkit.stop()
+        if self._hosted_toolkit is not None:
+            await self._hosted_toolkit.stop()
+            self._hosted_toolkit = None
         await super().stop()
 
     async def start_thread(

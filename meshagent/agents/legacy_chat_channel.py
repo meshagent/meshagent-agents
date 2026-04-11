@@ -18,7 +18,6 @@ from meshagent.api.messaging import JsonContent
 from pydantic import BaseModel, ValidationError
 from meshagent.tools import (
     FunctionTool,
-    RemoteToolkit,
     ToolContext,
     Toolkit,
     ToolkitBuilder,
@@ -645,7 +644,6 @@ class LegacyChatChannel(ThreadedChannel):
                     name="new_thread",
                     description=f"starts a new thread for {local_name}, posts a message to the thread, and then returns the path and name of the new thread. Since work will continue asynchronously on that thread, an agent should not invoke this if it will check the result of the work, it should generally be invoked as fire and forget.",
                     input_schema=tools_schema,
-                    supports_context=True,
                 )
 
             async def execute(
@@ -783,9 +781,9 @@ class LegacyChatChannel(ThreadedChannel):
             )
         ]
 
-    def make_remote_toolkit(self) -> RemoteToolkit:
+    def make_toolkit(self) -> Toolkit:
         local_name = self._local_participant_name()
-        return RemoteToolkit(
+        return Toolkit(
             name="chat",
             description=f"tools for interacting with {local_name}",
             public=False,

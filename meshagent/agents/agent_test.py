@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from meshagent.agents.agent import RoomTool
+from meshagent.agents.agent import RemoteRoomTool
 from meshagent.api import RoomException
 from meshagent.api.messaging import TextContent
 from meshagent.tools import ToolContext
@@ -61,7 +61,7 @@ class _FakeRoom:
 
 
 @pytest.mark.asyncio
-async def test_room_tool_raises_if_remote_tool_returns_iterable() -> None:
+async def test_remote_room_tool_raises_if_remote_room_tool_returns_iterable() -> None:
     fake_agents = _FakeAgentsClient(response=_FakeIterableResult())
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
@@ -70,7 +70,7 @@ async def test_room_tool_raises_if_remote_tool_returns_iterable() -> None:
         caller=caller,
         caller_context={"chat": {"id": "chat-1"}},
     )
-    tool = RoomTool(
+    tool = RemoteRoomTool(
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={
@@ -89,13 +89,13 @@ async def test_room_tool_raises_if_remote_tool_returns_iterable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_room_tool_uses_non_stream_call_without_event_handler() -> None:
+async def test_remote_room_tool_uses_non_stream_call_without_event_handler() -> None:
     response = TextContent(text="ok")
     fake_agents = _FakeAgentsClient(response=response)
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
     context = ToolContext(room=room, caller=caller)
-    tool = RoomTool(
+    tool = RemoteRoomTool(
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={
@@ -112,8 +112,8 @@ async def test_room_tool_uses_non_stream_call_without_event_handler() -> None:
     assert len(fake_agents.calls) == 1
 
 
-def test_room_tool_defaults_to_strict_when_metadata_is_missing() -> None:
-    tool = RoomTool(
+def test_remote_room_tool_defaults_to_strict_when_metadata_is_missing() -> None:
+    tool = RemoteRoomTool(
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={
@@ -127,8 +127,8 @@ def test_room_tool_defaults_to_strict_when_metadata_is_missing() -> None:
     assert tool.strict is True
 
 
-def test_room_tool_preserves_explicit_non_strict_metadata() -> None:
-    tool = RoomTool(
+def test_remote_room_tool_preserves_explicit_non_strict_metadata() -> None:
+    tool = RemoteRoomTool(
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={

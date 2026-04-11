@@ -1,11 +1,10 @@
 from typing import Optional
-from meshagent.tools import RemoteToolkit
-
 from meshagent.tools import (
     Toolkit,
     FunctionTool,
     ToolContext,
 )
+from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from meshagent.api import Participant
 from meshagent.api.messaging import ensure_content
 from meshagent.api.room_server_client import RoomClient
@@ -91,7 +90,8 @@ class TaskRunner(SingleRoomAgent):
         self._input_schema = input_schema
         self._output_schema = output_schema
 
-        self._worker_toolkit = None
+        self._worker_toolkit: Toolkit | None = None
+        self._hosted_worker_toolkit: _RemoteToolkitWrapper | None = None
 
     async def validate_arguments(self, arguments: dict):
         validate(arguments, self.input_schema)
@@ -145,13 +145,16 @@ class TaskRunner(SingleRoomAgent):
     async def start(self, *, room: RoomClient):
         await super().start(room=room)
 
-        self._worker_toolkit = RemoteToolkit(
+        self._worker_toolkit = Toolkit(
             name=self.name,
             tools=[
                 RunTaskTool(agent=self),
             ],
         )
-        await self._worker_toolkit.start(room=room)
+        self._hosted_worker_toolkit = await _start_hosted_toolkit(
+            room=room,
+            toolkit=self._worker_toolkit,
+        )
 
     async def run(
         self,
@@ -179,7 +182,9 @@ class TaskRunner(SingleRoomAgent):
             await super().stop()
 
     async def stop(self):
-        await self._worker_toolkit.stop()
+        if self._hosted_worker_toolkit is not None:
+            await self._hosted_worker_toolkit.stop()
+            self._hosted_worker_toolkit = None
 
         logger.info(
             f"disconnected '{self.name}' from room, this will automatically happen when all the users leave the room. agents will not keep the room open"

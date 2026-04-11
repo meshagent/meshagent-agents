@@ -15,7 +15,8 @@ from meshagent.api import Participant, RoomClient
 from meshagent.api.messaging import FileContent
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
-from meshagent.tools import RemoteToolkit, ToolContext, Toolkit, ToolkitBuilder
+from meshagent.tools import ToolContext, Toolkit, ToolkitBuilder
+from meshagent.tools.database import DatabaseToolkitConfig, make_database_toolkit
 from .process_thread_adapter import AgentProcessThreadAdapter
 from .thread_adapter import ThreadAdapter, default_format_message
 from .messages import (
@@ -150,7 +151,7 @@ class Channel:
     def get_agent_toolkits(self) -> list[Toolkit]:
         return []
 
-    def get_exposed_toolkits(self) -> list[RemoteToolkit]:
+    def get_exposed_toolkits(self) -> list[Toolkit]:
         return []
 
     async def on_start(self) -> None:
@@ -1034,6 +1035,13 @@ class LLMAgentProcess(AgentProcess):
             if not isinstance(toolkit_name, str):
                 raise ValueError("toolkit config must include a string `name`")
 
+            if toolkit_name == "database":
+                typed_config = DatabaseToolkitConfig.model_validate(raw_config)
+                toolkits.append(
+                    await make_database_toolkit(room=self._room, config=typed_config)
+                )
+                continue
+
             matching_builder: ToolkitBuilder | None = None
             for builder in self._toolkit_builders:
                 if builder.name == toolkit_name:
@@ -1046,7 +1054,6 @@ class LLMAgentProcess(AgentProcess):
             typed_config = matching_builder.type.model_validate(raw_config)
             toolkits.append(
                 await matching_builder.make(
-                    room=self._room,
                     model=model,
                     config=typed_config,
                 )

@@ -9,7 +9,6 @@ from typing import Any
 from meshagent.api import Participant, RoomClient, RoomException
 from meshagent.tools import (
     FunctionTool,
-    RemoteToolkit,
     ToolContext,
     Toolkit,
     ToolkitBuilder,
@@ -101,8 +100,8 @@ class ToolkitChannel(Channel):
     def get_agent_toolkits(self) -> list[Toolkit]:
         return []
 
-    def get_exposed_toolkits(self) -> list[RemoteToolkit]:
-        return [self.make_remote_toolkit()]
+    def get_exposed_toolkits(self) -> list[Toolkit]:
+        return [self.make_toolkit()]
 
     async def on_stop(self) -> None:
         self._fail_pending_turns(
@@ -178,14 +177,14 @@ class ToolkitChannel(Channel):
         if not pending.future.done():
             pending.future.set_result(self._response_text(pending=pending))
 
-    def make_remote_toolkit(self) -> RemoteToolkit:
+    def make_toolkit(self) -> Toolkit:
         local_name_value = self._room.local_participant.get_attribute("name")
         local_name = (
             local_name_value.strip()
             if isinstance(local_name_value, str) and local_name_value.strip() != ""
             else self._toolkit_name
         )
-        return RemoteToolkit(
+        return Toolkit(
             name=self._toolkit_name,
             description=f"send a message to {local_name} and return the reply text",
             public=self._public,
@@ -368,7 +367,6 @@ class ToolkitChannel(Channel):
                         "send a prompt to the agent and return the final assistant text"
                     ),
                     input_schema=outer._input_schema,
-                    supports_context=True,
                 )
 
             async def execute(

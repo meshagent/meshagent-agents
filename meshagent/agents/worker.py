@@ -4,12 +4,12 @@ from meshagent.api import RoomMessage, RoomClient
 from meshagent.agents import AgentSessionContext
 from meshagent.agents.context import TaskContext
 from meshagent.tools import (
-    RemoteToolkit,
     FunctionTool,
     Toolkit,
     make_toolkits,
     ToolkitBuilder,
 )
+from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from .adapter import LLMAdapter
 import asyncio
 import contextlib
@@ -128,7 +128,6 @@ class Worker(SingleRoomAgent):
         rules: Optional[list[str]] = None,
         toolkit_name: Optional[str] = None,
         skill_dirs: Optional[list[str]] = None,
-        supports_context: bool = True,
         annotations: Optional[list[str]] = None,
         threading_mode: Optional[ThreadingMode] = None,
         thread_dir: str = ".threads",
@@ -200,7 +199,7 @@ class Worker(SingleRoomAgent):
 
         if toolkit_name is not None:
             logger.info(f"worker will start toolkit {toolkit_name}")
-            self._worker_toolkit = RemoteToolkit(
+            self._worker_toolkit = Toolkit(
                 name=toolkit_name,
                 tools=[
                     SubmitWork(queue=self._queue, agent=self),
@@ -208,8 +207,7 @@ class Worker(SingleRoomAgent):
             )
         else:
             self._worker_toolkit = None
-
-        self.supports_context = supports_context
+        self._hosted_worker_toolkit: _RemoteToolkitWrapper | None = None
 
     def _serialize_initial_message_payload(
         self,
@@ -359,7 +357,10 @@ class Worker(SingleRoomAgent):
         room_agent_started = False
         try:
             if self._worker_toolkit is not None:
-                await self._worker_toolkit.start(room=room)
+                self._hosted_worker_toolkit = await _start_hosted_toolkit(
+                    room=room,
+                    toolkit=self._worker_toolkit,
+                )
                 worker_toolkit_started = True
 
             await super().start(room=room)
@@ -375,9 +376,10 @@ class Worker(SingleRoomAgent):
                 with contextlib.suppress(Exception):
                     await super().stop()
 
-            if worker_toolkit_started and self._worker_toolkit is not None:
+            if worker_toolkit_started and self._hosted_worker_toolkit is not None:
                 with contextlib.suppress(Exception):
-                    await self._worker_toolkit.stop()
+                    await self._hosted_worker_toolkit.stop()
+                self._hosted_worker_toolkit = None
             raise
 
     async def stop(self):
@@ -385,8 +387,9 @@ class Worker(SingleRoomAgent):
 
         await asyncio.gather(self._main_task)
 
-        if self._worker_toolkit is not None:
-            await self._worker_toolkit.stop()
+        if self._hosted_worker_toolkit is not None:
+            await self._hosted_worker_toolkit.stop()
+            self._hosted_worker_toolkit = None
 
         await super().stop()
 
@@ -417,14 +420,6 @@ class Worker(SingleRoomAgent):
     async def append_message_context(
         self, *, message: dict, chat_context: AgentSessionContext
     ):
-        if self.supports_context:
-            caller_context_json = message.get("caller_context")
-            if caller_context_json is not None:
-                caller_context = AgentSessionContext.from_json(caller_context_json)
-
-                chat_context.messages.extend(caller_context.messages)
-                chat_context.previous_response_id = caller_context.previous_response_id
-
         prompt = self.get_prompt_for_message(message=message)
 
         chat_context.append_user_message(message=prompt)

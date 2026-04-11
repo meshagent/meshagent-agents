@@ -207,8 +207,7 @@ class _FakeToolkitBuilder(ToolkitBuilder):
     def __init__(self, *, name: str) -> None:
         super().__init__(name=name, type=_FakeToolkitConfig)
 
-    async def make(self, *, room, model: str, config: _FakeToolkitConfig):
-        del room
+    async def make(self, *, model: str, config: _FakeToolkitConfig):
         del model
         del config
         raise AssertionError(
@@ -300,7 +299,7 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
             "grep_thread_list",
         }
 
-        remote_toolkit = channel.make_remote_toolkit()
+        remote_toolkit = channel.make_toolkit()
         assert {tool.name for tool in remote_toolkit.tools} == agent_tool_names
         assert remote_toolkit.validation_mode == "content_types"
 
@@ -536,7 +535,7 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
             "list_threads",
             "grep_thread_list",
         }
-        assert channel.make_remote_toolkit().validation_mode == "content_types"
+        assert channel.make_toolkit().validation_mode == "content_types"
         assert (
             "meshagent.chatbot.thread-list",
             ".threads/assistant/index.threadl",

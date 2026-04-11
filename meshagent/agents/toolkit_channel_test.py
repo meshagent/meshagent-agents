@@ -71,8 +71,7 @@ class _FakeToolkitBuilder(ToolkitBuilder):
     def __init__(self) -> None:
         super().__init__(name="search", type=_SearchToolkitConfig)
 
-    async def make(self, *, room, model: str, config: _SearchToolkitConfig):
-        del room
+    async def make(self, *, model: str, config: _SearchToolkitConfig):
         del model
         del config
         raise AssertionError("builder should not be called in this test")
@@ -96,7 +95,7 @@ async def test_toolkit_channel_exposes_remote_tool_and_returns_final_text() -> N
     )
     await channel.start(supervisor)  # type: ignore[arg-type]
     try:
-        remote_toolkit = channel.make_remote_toolkit()
+        remote_toolkit = channel.make_toolkit()
         assert remote_toolkit.name == "assistant"
         assert {tool.name for tool in remote_toolkit.tools} == {"run_assistant_task"}
 
@@ -206,7 +205,7 @@ async def test_toolkit_channel_respects_explicit_thread_id_and_surfaces_turn_err
     channel = ToolkitChannel(room=room, toolkit_name="assistant")
     await channel.start(supervisor)  # type: ignore[arg-type]
     try:
-        remote_toolkit = channel.make_remote_toolkit()
+        remote_toolkit = channel.make_toolkit()
         result_task = asyncio.create_task(
             remote_toolkit.invoke(
                 context=ToolContext(room=room, caller=caller),
@@ -262,7 +261,7 @@ async def test_toolkit_channel_auto_rejects_tool_approvals() -> None:
     channel = ToolkitChannel(room=room, toolkit_name="assistant")
     await channel.start(supervisor)  # type: ignore[arg-type]
     try:
-        remote_toolkit = channel.make_remote_toolkit()
+        remote_toolkit = channel.make_toolkit()
         result_task = asyncio.create_task(
             remote_toolkit.invoke(
                 context=ToolContext(room=room, caller=caller),

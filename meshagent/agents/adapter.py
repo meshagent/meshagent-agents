@@ -13,7 +13,7 @@ from meshagent.tools import Content, ToolContext, Toolkit, ToolkitBuilder, Toolk
 from .agent import AgentSessionContext
 from .messages import AgentMessage
 
-TEvent = TypeVar("T")
+TEvent = TypeVar("TEvent")
 
 DEFAULT_MAX_TOOL_CALL_LINES = 2000
 DEFAULT_MAX_TOOL_CALL_LENGTH = 50 * 1024
@@ -72,10 +72,8 @@ class ToolResponseAdapter(ABC):
     async def file_content_to_text_content(
         self,
         *,
-        room: RoomClient,
         content: Content,
     ) -> TextContent | None:
-        del room
         if not isinstance(content, FileContent):
             return None
 
@@ -97,8 +95,7 @@ class ToolResponseAdapter(ABC):
 
         return None
 
-    def truncate(self, *, room: RoomClient, content: Content) -> Content:
-        del room
+    def truncate(self, *, content: Content) -> Content:
         text: str | None = None
         if isinstance(content, TextContent):
             text = content.text
@@ -138,7 +135,7 @@ class ToolResponseAdapter(ABC):
         return TextContent(text=f"{truncated_text}\n\n{notice}")
 
     @abstractmethod
-    async def to_plain_text(self, *, room: RoomClient, response: Content):
+    async def to_plain_text(self, *, response: Content):
         pass
 
     @abstractmethod
@@ -147,7 +144,6 @@ class ToolResponseAdapter(ABC):
         *,
         context: AgentSessionContext,
         tool_call: Any,
-        room: RoomClient,
         response: Content,
     ) -> list:
         pass
@@ -156,8 +152,8 @@ class ToolResponseAdapter(ABC):
 class LLMAdapter(Generic[TEvent]):
     outputTokenMax: float = float("inf")
 
-    @abstractmethod
-    def default_model(self) -> str: ...
+    def default_model(self) -> str:
+        raise NotImplementedError
 
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()
@@ -179,7 +175,6 @@ class LLMAdapter(Generic[TEvent]):
         self,
         *,
         context: AgentSessionContext,
-        room: RoomClient,
         model: Optional[str] = None,
     ) -> None:
         return None
@@ -189,15 +184,12 @@ class LLMAdapter(Generic[TEvent]):
         *,
         context: AgentSessionContext,
         model: str,
-        room: Optional[RoomClient] = None,
         toolkits: Optional[list] = None,
         output_schema: Optional[dict] = None,
     ) -> int:
         return 0
 
-    async def check_for_termination(
-        self, *, context: AgentSessionContext, room: RoomClient
-    ):
+    async def check_for_termination(self, *, context: AgentSessionContext):
         return True
 
     def set_tool_call_approval_handler(
@@ -232,19 +224,16 @@ class LLMAdapter(Generic[TEvent]):
     def tool_providers(self, *, model: str) -> list[ToolkitBuilder]:
         return []
 
-    async def make_toolkit(
-        self, *, room: RoomClient, model: str, config: ToolkitConfig
-    ) -> Toolkit:
+    async def make_toolkit(self, *, model: str, config: ToolkitConfig) -> Toolkit:
         for tool in self.tool_providers(model=model):
             if tool.name == config.name:
                 return Toolkit(
                     name=config.name,
-                    tools=[await tool.make(room=room, model=model, config=config)],
+                    tools=[await tool.make(model=model, config=config)],
                 )
 
         raise RoomException(f"Unexpected tool: {config.name} for model {model}")
 
-    @abstractmethod
     async def next(
         self,
         *,
@@ -258,13 +247,14 @@ class LLMAdapter(Generic[TEvent]):
         on_behalf_of: Optional[RemoteParticipant] = None,
         options: Optional[dict] = None,
     ) -> Any:
-        pass
+        raise NotImplementedError
 
-    def validate(response: dict, output_schema: dict):
+    @staticmethod
+    def validate(response: dict, output_schema: dict) -> None:
         validate(response, output_schema)
 
 
-class MessageStreamLLMAdapter(LLMAdapter):
+class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
     def __init__(
         self, *, participant_name: str, context_mode: Literal["diff", "full"] = "diff"
     ):
@@ -277,9 +267,7 @@ class MessageStreamLLMAdapter(LLMAdapter):
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()
 
-    async def check_for_termination(
-        self, *, context: AgentSessionContext, room: RoomClient
-    ):
+    async def check_for_termination(self, *, context: AgentSessionContext):
         return True
 
     async def next(
@@ -289,7 +277,7 @@ class MessageStreamLLMAdapter(LLMAdapter):
         room: RoomClient,
         toolkits: list[Toolkit],
         output_schema: Optional[dict] = None,
-        event_handler: Optional[Callable[[TEvent], None]] = None,
+        event_handler: Optional[Callable[[AgentMessage | dict[str, Any]], None]] = None,
         steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[RemoteParticipant] = None,
@@ -307,6 +295,3 @@ class MessageStreamLLMAdapter(LLMAdapter):
         raise RoomException(
             "MessageStreamLLMAdapter has been removed; use streaming toolkits instead"
         )
-
-    def validate(response: dict, output_schema: dict):
-        validate(response, output_schema)

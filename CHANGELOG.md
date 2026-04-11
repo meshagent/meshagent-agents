@@ -1,4 +1,5 @@
 ## [0.36.3]
+- Breaking: `LLMAdapter.compact` no longer accepts a `RoomClient`; adapters now compact session context without a room argument.
 - Storage client now supports move operations and emits `file.moved` events.
 - Secrets client now supports existence checks.
 - Project user add calls now omit permission fields unless explicitly set.
