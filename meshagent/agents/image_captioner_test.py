@@ -49,7 +49,7 @@ class _FakeAdapter(LLMAdapter):
         self,
         *,
         context,
-        room,
+        caller,
         toolkits,
         output_schema=None,
         event_handler=None,
@@ -58,7 +58,7 @@ class _FakeAdapter(LLMAdapter):
         on_behalf_of=None,
         options: Optional[dict] = None,
     ):
-        del room
+        del caller
         del toolkits
         del output_schema
         del event_handler
@@ -70,7 +70,16 @@ class _FakeAdapter(LLMAdapter):
 
 
 class _DummyRoom:
-    pass
+    class _LocalParticipant:
+        id = "participant_1"
+
+        def get_attribute(self, key: str):
+            if key == "name":
+                return "assistant"
+            return None
+
+    def __init__(self) -> None:
+        self.local_participant = self._LocalParticipant()
 
 
 @pytest.mark.asyncio

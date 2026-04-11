@@ -62,7 +62,6 @@ class AgentMessage(BaseModel):
 class TurnStart(AgentMessage):
     type: Literal[AGENT_MESSAGE_TURN_START]
     content: list[AgentInputContent]
-    toolkits: Optional[list[dict[str, Any]]] = None
     model: Optional[str] = None
     instructions: Optional[str] = None
 
@@ -70,7 +69,6 @@ class TurnStart(AgentMessage):
 class TurnSteer(AgentMessage):
     type: Literal[AGENT_MESSAGE_TURN_STEER]
     content: list[AgentInputContent]
-    toolkits: Optional[list[dict[str, Any]]] = None
     turn_id: str
 
 

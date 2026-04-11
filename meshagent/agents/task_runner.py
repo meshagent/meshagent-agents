@@ -1,7 +1,7 @@
 from typing import Optional
 from meshagent.tools import (
     Toolkit,
-    FunctionTool,
+    LocalRoomTool,
     ToolContext,
 )
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
@@ -20,10 +20,11 @@ from meshagent.agents.agent import SingleRoomAgent
 logger = logging.getLogger("agent")
 
 
-class RunTaskTool(FunctionTool):
-    def __init__(self, *, agent: "TaskRunner"):
+class RunTaskTool(LocalRoomTool):
+    def __init__(self, *, agent: "TaskRunner", room: RoomClient):
         self.agent = agent
         super().__init__(
+            room=room,
             name=f"run_{agent.name}_task",
             title=f"Run {agent.title or agent.name} Task",
             description=agent.description,
@@ -36,7 +37,7 @@ class RunTaskTool(FunctionTool):
         session_context = await self.agent.init_session()
         call_context = TaskContext(
             session=session_context,
-            room=context.room,
+            room=self.room,
             caller=context.caller,
             on_behalf_of=context.on_behalf_of,
             toolkits=[],
@@ -148,7 +149,7 @@ class TaskRunner(SingleRoomAgent):
         self._worker_toolkit = Toolkit(
             name=self.name,
             tools=[
-                RunTaskTool(agent=self),
+                RunTaskTool(agent=self, room=room),
             ],
         )
         self._hosted_worker_toolkit = await _start_hosted_toolkit(
@@ -166,11 +167,10 @@ class TaskRunner(SingleRoomAgent):
     ) -> Content:
         await super().start(room=room)
         try:
-            runner = RunTaskTool(agent=self)
+            runner = RunTaskTool(agent=self, room=room)
             response = await runner.execute(
                 context=ToolContext(
                     caller=caller or room.local_participant,
-                    room=room,
                 ),
                 attachment=attachment,
                 **arguments,

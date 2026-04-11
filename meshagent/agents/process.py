@@ -15,8 +15,7 @@ from meshagent.api import Participant, RoomClient
 from meshagent.api.messaging import FileContent
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
-from meshagent.tools import ToolContext, Toolkit, ToolkitBuilder
-from meshagent.tools.database import DatabaseToolkitConfig, make_database_toolkit
+from meshagent.tools import ToolContext, Toolkit
 from .process_thread_adapter import AgentProcessThreadAdapter
 from .thread_adapter import ThreadAdapter, default_format_message
 from .messages import (
@@ -711,7 +710,6 @@ class LLMAgentProcess(AgentProcess):
         thread_id: str,
         room: RoomClient,
         llm_adapter: LLMAdapter,
-        toolkit_builders: Optional[list[ToolkitBuilder]] = None,
         toolkits: Optional[list[Toolkit]] = None,
         thread_adapter: AgentProcessThreadAdapter | None = None,
         session_initializer: SessionInitializer | None = None,
@@ -740,7 +738,6 @@ class LLMAgentProcess(AgentProcess):
         self._pending_turns: asyncio.Queue[_QueuedTurn] = asyncio.Queue()
         self._priority_turn: _QueuedTurn | None = None
         self._active_turn_queue: asyncio.Queue[_QueuedTurnMessage] | None = None
-        self._toolkit_builders = list(toolkit_builders or [])
         self._toolkits = list(toolkits or [])
         self._room = room
         self._pending_tool_call_approvals: dict[str, asyncio.Future[bool]] = {}
@@ -777,14 +774,6 @@ class LLMAgentProcess(AgentProcess):
     @property
     def toolkits(self) -> list[Toolkit]:
         return self._toolkits
-
-    @property
-    def toolkit_builders(self) -> list[ToolkitBuilder]:
-        return self._toolkit_builders
-
-    @property
-    def room(self) -> RoomClient:
-        return self._room
 
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
         thread_adapter = self.thread_adapter
@@ -1023,44 +1012,6 @@ class LLMAgentProcess(AgentProcess):
 
         approval_future.set_result(approved)
 
-    async def _resolve_requested_toolkits(
-        self,
-        *,
-        model: str,
-        requested_toolkits: list[dict[str, Any]],
-    ) -> list[Toolkit]:
-        toolkits: list[Toolkit] = []
-        for raw_config in requested_toolkits:
-            toolkit_name = raw_config.get("name")
-            if not isinstance(toolkit_name, str):
-                raise ValueError("toolkit config must include a string `name`")
-
-            if toolkit_name == "database":
-                typed_config = DatabaseToolkitConfig.model_validate(raw_config)
-                toolkits.append(
-                    await make_database_toolkit(room=self._room, config=typed_config)
-                )
-                continue
-
-            matching_builder: ToolkitBuilder | None = None
-            for builder in self._toolkit_builders:
-                if builder.name == toolkit_name:
-                    matching_builder = builder
-                    break
-
-            if matching_builder is None:
-                raise ValueError(f"tool cannot be configured: {raw_config}")
-
-            typed_config = matching_builder.type.model_validate(raw_config)
-            toolkits.append(
-                await matching_builder.make(
-                    model=model,
-                    config=typed_config,
-                )
-            )
-
-        return toolkits
-
     async def _build_turn_toolkits(
         self,
         *,
@@ -1069,21 +1020,14 @@ class LLMAgentProcess(AgentProcess):
         sender: Participant | None = None,
     ) -> list[Toolkit]:
         if self._turn_toolkits_builder is not None:
-            return await self._turn_toolkits_builder(sender, model, turns)
+            combined_toolkits = await self._turn_toolkits_builder(sender, model, turns)
+        else:
+            combined_toolkits = [*self._toolkits]
+            supervisor = self.supervisor
+            if supervisor is not None:
+                for channel in supervisor.channels:
+                    combined_toolkits.extend(channel.get_agent_toolkits())
 
-        combined_toolkits = [*self._toolkits]
-        supervisor = self.supervisor
-        if supervisor is not None:
-            for channel in supervisor.channels:
-                combined_toolkits.extend(channel.get_agent_toolkits())
-        for turn in turns:
-            if turn.toolkits is not None and len(turn.toolkits) > 0:
-                combined_toolkits.extend(
-                    await self._resolve_requested_toolkits(
-                        model=model,
-                        requested_toolkits=turn.toolkits,
-                    )
-                )
         return combined_toolkits
 
     @staticmethod
@@ -1456,7 +1400,7 @@ class LLMAgentProcess(AgentProcess):
                 self.llm_adapter.next(
                     context=session,
                     toolkits=combined_toolkits,
-                    room=self._room,
+                    caller=self._room.local_participant,
                     event_handler=handle_event,
                     steering_callback=lambda: self._apply_pending_turn_steers(
                         session=session

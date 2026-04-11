@@ -1,11 +1,11 @@
 import asyncio
 import re
 import uuid
-from typing import Any, Literal
+from typing import Any
 
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 import meshagent.agents.process_thread_adapter as process_thread_adapter_module
 import meshagent.agents.thread_adapter as thread_adapter_module
@@ -31,7 +31,6 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
     AGENT_EVENT_TURN_INTERRUPTED,
-    AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
@@ -81,7 +80,7 @@ from meshagent.api import Participant, RemoteParticipant
 from meshagent.api.messaging import FileContent
 from meshagent.api.messaging import JsonContent
 from meshagent.api.messaging import TextContent
-from meshagent.tools import ToolContext, Toolkit, ToolkitBuilder
+from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
 
 
 class _LifecycleChannel(Channel):
@@ -359,26 +358,6 @@ class _AttachmentRecordingSession(_LifecycleSession):
         return message
 
 
-class _ExampleToolkitConfig(BaseModel):
-    name: Literal["example"] = "example"
-    enabled: bool = False
-
-
-class _ExampleToolkitBuilder(ToolkitBuilder):
-    def __init__(self) -> None:
-        super().__init__(name="example", type=_ExampleToolkitConfig)
-        self.calls: list[dict[str, Any]] = []
-
-    async def make(
-        self,
-        *,
-        model: str,
-        config: _ExampleToolkitConfig,
-    ) -> Toolkit:
-        self.calls.append({"model": model, "config": config})
-        return Toolkit(name="example", tools=[])
-
-
 class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(self, *, session: _LifecycleSession | None = None) -> None:
         self.session = session if session is not None else _LifecycleSession()
@@ -395,7 +374,7 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -411,7 +390,7 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         self.calls.append(
             {
                 "context": context,
-                "room": room,
+                "caller": caller,
                 "messages": [*context.messages],
                 "metadata": dict(context.metadata),
                 "toolkits": [toolkit.name for toolkit in toolkits],
@@ -441,7 +420,7 @@ class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -451,7 +430,7 @@ class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
         options: dict | None = None,
     ) -> Any:
         del context
-        del room
+        del caller
         del toolkits
         del output_schema
         del steering_callback
@@ -546,7 +525,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -556,7 +535,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         options: dict | None = None,
     ) -> Any:
         del context
-        del room
+        del caller
         del toolkits
         del output_schema
         del model
@@ -586,7 +565,7 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -604,7 +583,7 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
         self.calls.append(
             {
                 "context": context,
-                "room": room,
+                "caller": caller,
                 "messages": [*context.messages],
                 "metadata": dict(context.metadata),
                 "toolkits": [toolkit.name for toolkit in toolkits],
@@ -649,7 +628,7 @@ class _ToolBoundarySteeringLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -658,7 +637,7 @@ class _ToolBoundarySteeringLLMAdapter(LLMAdapter[dict[str, Any]]):
         on_behalf_of=None,
         options: dict | None = None,
     ) -> Any:
-        del room
+        del caller
         del toolkits
         del output_schema
         del event_handler
@@ -768,7 +747,7 @@ class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -778,7 +757,7 @@ class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
         options: dict | None = None,
     ) -> Any:
         del context
-        del room
+        del caller
         del toolkits
         del output_schema
         del model
@@ -829,6 +808,7 @@ class _DownloadRecordingStorage:
 class _DownloadRecordingRoom:
     def __init__(self, *, files: dict[str, FileContent] | None = None) -> None:
         self.storage = _DownloadRecordingStorage(files=files or {})
+        self.local_participant = _ThreadLocalParticipant()
 
 
 class _ThreadParticipant(RemoteParticipant):
@@ -988,7 +968,7 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -1017,7 +997,6 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
         self.approval_requested.set()
         decision = await self._approval_handler(
             ToolContext(
-                room=room,
                 caller=_ToolCallerParticipant(),  # type: ignore[arg-type]
             ),
             request,
@@ -1025,6 +1004,23 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
         self.approval_decisions.append(decision)
         self.approval_resolved.set()
         return {"approved": decision}
+
+
+class _RoomBindingTool(LocalRoomTool):
+    def __init__(self, *, room) -> None:
+        super().__init__(
+            room=room,
+            name="room_binding_tool",
+            input_schema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        )
+
+    async def execute(self, context: ToolContext):
+        del context
+        return TextContent(text=self.room.local_participant.id)
 
 
 class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
@@ -1100,7 +1096,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -1109,7 +1105,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         on_behalf_of=None,
         options: dict | None = None,
     ) -> Any:
-        del room
+        del caller
         del toolkits
         del output_schema
         del model
@@ -1179,7 +1175,7 @@ class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -1188,7 +1184,7 @@ class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
         on_behalf_of=None,
         options: dict | None = None,
     ) -> Any:
-        del room
+        del caller
         del toolkits
         del output_schema
         del model
@@ -1234,7 +1230,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room,
+        caller,
         toolkits: list[Toolkit],
         output_schema: dict | None = None,
         event_handler=None,
@@ -1243,7 +1239,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
         on_behalf_of=None,
         options: dict | None = None,
     ) -> Any:
-        del room
+        del caller
         del toolkits
         del output_schema
         del model
@@ -1721,77 +1717,12 @@ def test_agent_tool_call_ended_serializes_result_and_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_agent_process_builds_requested_toolkits_for_turn_start() -> None:
-    session = _LifecycleSession()
-    adapter = _RecordingLLMAdapter(session=session)
-    builder = _ExampleToolkitBuilder()
-    supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
-        llm_adapter=adapter,
-        toolkit_builders=[builder],
-        toolkits=[Toolkit(name="static", tools=[])],
-    )
-
-    await process.start(supervisor)
-
-    turn_start_message_id = "00000000-0000-0000-0000-000000000001"
-    process.send(
-        Message(
-            data=TurnStart(
-                type=AGENT_MESSAGE_TURN_START,
-                message_id=turn_start_message_id,
-                thread_id="thread-1",
-                content=[{"type": "text", "text": "hello"}],
-                toolkits=[{"name": "example", "enabled": True}],
-                model="custom-model",
-                instructions="be concise",
-            )
-        )
-    )
-
-    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
-    await _wait_for(
-        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
-    )
-
-    assert session.started == 1
-    assert session.instructions is None
-    assert len(adapter.calls) == 1
-    assert adapter.calls[0]["messages"] == [{"role": "user", "content": "hello"}]
-    assert adapter.calls[0]["toolkits"] == ["static", "example"]
-    assert adapter.calls[0]["model"] == "custom-model"
-    assert len(builder.calls) == 1
-    assert builder.calls[0]["model"] == "custom-model"
-    assert builder.calls[0]["config"].enabled is True
-    accepted_payload = supervisor.payloads(
-        message_type=AGENT_EVENT_TURN_START_ACCEPTED
-    )[0]
-    uuid.UUID(accepted_payload["message_id"])
-    assert accepted_payload["thread_id"] == "thread-1"
-    assert accepted_payload["source_message_id"] == turn_start_message_id
-    started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
-    uuid.UUID(started_payload["message_id"])
-    assert started_payload["thread_id"] == "thread-1"
-    assert started_payload["source_message_id"] == turn_start_message_id
-    ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
-    uuid.UUID(ended_payload["message_id"])
-    assert ended_payload["thread_id"] == "thread-1"
-    assert ended_payload["error"] is None
-
-    await process.stop(supervisor)
-
-    assert session.closed == 1
-
-
-@pytest.mark.asyncio
 async def test_llm_agent_process_passes_turn_id_to_restore_session_context() -> None:
     adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
     process = _RestoringLLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -1832,7 +1763,7 @@ async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -1868,6 +1799,39 @@ async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
     assert ended_payload["turn_id"] == started_payload["turn_id"]
 
     await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_uses_builder_returned_room_bound_toolkits() -> None:
+    room = _DownloadRecordingRoom()
+    adapter = _RecordingLLMAdapter()
+
+    async def _build_toolkits(sender, model, turns) -> list[Toolkit]:
+        del sender
+        del model
+        del turns
+        return [Toolkit(name="dynamic", room=room, tools=[_RoomBindingTool(room=room)])]
+
+    process = LLMAgentProcess(
+        thread_id="thread-1",
+        room=room,
+        llm_adapter=adapter,
+        turn_toolkits_builder=_build_toolkits,
+    )
+
+    toolkits = await process._build_turn_toolkits(
+        model="default-model",
+        turns=[],
+    )
+
+    result = await toolkits[0].execute(
+        context=ToolContext(caller=room.local_participant),
+        name="room_binding_tool",
+        input=JsonContent(json={}),
+    )
+
+    assert isinstance(result, TextContent)
+    assert result.text == room.local_participant.id
 
 
 @pytest.mark.asyncio
@@ -1939,7 +1903,7 @@ async def test_llm_agent_process_processes_queued_steer_messages_before_turn_end
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -2046,7 +2010,7 @@ async def test_llm_agent_process_applies_queued_steer_at_tool_boundary() -> None
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -2133,7 +2097,7 @@ async def test_llm_agent_process_rejects_steer_with_thread_id_on_event() -> None
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -2178,7 +2142,7 @@ async def test_llm_agent_process_continues_queued_steer_when_turn_is_interrupted
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -2295,7 +2259,7 @@ async def test_llm_agent_process_sets_thread_and_turn_metadata_during_adapter_ca
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -2333,7 +2297,7 @@ async def test_llm_agent_process_calls_on_turn_steer_before_interrupt_continuati
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -2412,7 +2376,7 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
     supervisor = _RecordingSupervisor()
     process = LLMAgentProcess(
         thread_id="thread-1",
-        room=object(),  # type: ignore[arg-type]
+        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 

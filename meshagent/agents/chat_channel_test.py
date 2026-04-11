@@ -2,7 +2,6 @@ import uuid
 from unittest import mock
 
 import pytest
-from pydantic import BaseModel
 
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.legacy_chat_channel import LegacyChatChannel as ChatChannel
@@ -44,7 +43,7 @@ from meshagent.agents.messages import (
 from meshagent.agents.process import AgentSupervisor, Message
 from meshagent.api import Participant, RoomException, RoomMessage
 from meshagent.api.messaging import EmptyContent, JsonContent
-from meshagent.tools import ToolContext, ToolkitBuilder
+from meshagent.tools import ToolContext
 
 
 class _FakeParticipant(Participant):
@@ -199,22 +198,6 @@ class _FakeRoom:
         self.storage = storage if storage is not None else _FakeStorage()
 
 
-class _FakeToolkitConfig(BaseModel):
-    name: str
-
-
-class _FakeToolkitBuilder(ToolkitBuilder):
-    def __init__(self, *, name: str) -> None:
-        super().__init__(name=name, type=_FakeToolkitConfig)
-
-    async def make(self, *, model: str, config: _FakeToolkitConfig):
-        del model
-        del config
-        raise AssertionError(
-            "toolkit builder should not be called in chat channel test"
-        )
-
-
 class _RecordingSupervisor(AgentSupervisor):
     def __init__(self) -> None:
         super().__init__()
@@ -236,7 +219,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         self,
         *,
         context,
-        room,
+        caller,
         toolkits,
         output_schema=None,
         event_handler=None,
@@ -245,7 +228,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         on_behalf_of=None,
         options=None,
     ):
-        del room
+        del caller
         del toolkits
         del output_schema
         del event_handler
@@ -283,7 +266,6 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
     channel = ChatChannel(
         room=room,
         thread_dir="/threads/chat",
-        toolkit_builders=[_FakeToolkitBuilder(name="search")],
     )
     supervisor = _RecordingSupervisor()
 
@@ -306,23 +288,12 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         new_thread_tool = next(
             tool for tool in agent_toolkits[0].tools if tool.name == "new_thread"
         )
-        tools_schema = new_thread_tool.input_schema["properties"]["message"][
-            "properties"
-        ]["tools"]
-        assert len(tools_schema["anyOf"]) == 2
-        assert tools_schema["anyOf"][0]["type"] == "array"
-        assert tools_schema["anyOf"][0]["items"]["type"] == "object"
-        assert (
-            tools_schema["anyOf"][0]["items"]["properties"]["name"]["type"] == "string"
-        )
-        assert tools_schema["anyOf"][1] == {"type": "null"}
-        context = ToolContext(room=room, caller=caller)
+        context = ToolContext(caller=caller)
         result = await new_thread_tool.execute(
             context=context,
             message={
                 "text": "Plan this friendly thread",
                 "attachments": [{"path": "uploads/plan.md"}],
-                "tools": [{"name": "search"}],
             },
         )
 
@@ -340,7 +311,6 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         assert isinstance(turn, TurnStart)
         assert turn.type == AGENT_MESSAGE_TURN_START
         assert turn.thread_id == result_path
-        assert turn.toolkits == [{"name": "search"}]
         assert turn.content == [
             AgentTextContent(type="text", text="Plan this friendly thread"),
             AgentFileContent(type="file", url="room:///uploads/plan.md"),
@@ -393,7 +363,7 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
             if tool.name == "new_thread"
         )
         result = await new_thread_tool.execute(
-            context=ToolContext(room=room, caller=caller),
+            context=ToolContext(caller=caller),
             message={
                 "text": "Plan the release work",
                 "attachments": [
@@ -437,7 +407,6 @@ async def test_chat_channel_attach_file_emits_file_content_events() -> None:
 
         result = await attach_file_tool.execute(
             context=ToolContext(
-                room=room,
                 caller=caller,
                 caller_context={
                     "thread_id": "/threads/test.thread",
@@ -501,7 +470,6 @@ async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
         ):
             await attach_file_tool.execute(
                 context=ToolContext(
-                    room=room,
                     caller=caller,
                     caller_context={
                         "thread_id": "/threads/test.thread",
@@ -573,7 +541,6 @@ async def test_chat_channel_enables_messaging_and_translates_chat_messages() -> 
                     "path": "/threads/test.thread",
                     "text": "hello",
                     "attachments": [{"path": "docs/report.pdf"}],
-                    "tools": [{"name": "search"}],
                     "model": "gpt-5",
                 },
             )
@@ -589,7 +556,6 @@ async def test_chat_channel_enables_messaging_and_translates_chat_messages() -> 
         assert turn.type == AGENT_MESSAGE_TURN_START
         assert turn.thread_id == "/threads/test.thread"
         assert turn.model == "gpt-5"
-        assert turn.toolkits == [{"name": "search"}]
         assert turn.content == [
             AgentTextContent(type="text", text="hello"),
             AgentFileContent(type="file", url="room:///docs/report.pdf"),
@@ -1030,9 +996,7 @@ async def test_chat_channel_notifies_open_participants_when_thread_is_cleared() 
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_reports_tool_providers() -> (
-    None
-):
+async def test_chat_channel_sets_threading_attributes_and_tracks_thread_list() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     sync = _FakeSync()
     room = _FakeRoom(
@@ -1044,10 +1008,6 @@ async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_rep
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
-        toolkit_builders=[
-            _FakeToolkitBuilder(name="search"),
-            _FakeToolkitBuilder(name="shell"),
-        ],
     )
     supervisor = _RecordingSupervisor()
 
@@ -1075,28 +1035,7 @@ async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_rep
         )
 
         assert sync.document.root.get_children() == []
-
-        room.messaging.emit_message(
-            RoomMessage(
-                from_participant_id=caller.id,
-                type="get_thread_toolkit_builders",
-                message={"path": "/threads/chat/example.thread"},
-            )
-        )
-
-        assert room.messaging.sent_messages == [
-            {
-                "to": caller,
-                "type": "set_thread_tool_providers",
-                "message": {
-                    "path": "/threads/chat/example.thread",
-                    "tool_providers": [
-                        {"name": "search"},
-                        {"name": "shell"},
-                    ],
-                },
-            }
-        ]
+        assert room.messaging.sent_messages == []
     finally:
         await channel.stop(supervisor)
 
@@ -1104,9 +1043,7 @@ async def test_chat_channel_sets_threading_attributes_tracks_thread_list_and_rep
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_does_not_bump_thread_index_on_open_or_tool_provider_request() -> (
-    None
-):
+async def test_chat_channel_does_not_bump_thread_index_on_open() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     sync = _FakeSync()
     existing_entry = sync.document.root.append_child(
@@ -1127,7 +1064,6 @@ async def test_chat_channel_does_not_bump_thread_index_on_open_or_tool_provider_
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
-        toolkit_builders=[_FakeToolkitBuilder(name="search")],
     )
     supervisor = _RecordingSupervisor()
 
@@ -1140,14 +1076,6 @@ async def test_chat_channel_does_not_bump_thread_index_on_open_or_tool_provider_
                 message={"path": "/threads/chat/example.thread"},
             )
         )
-        room.messaging.emit_message(
-            RoomMessage(
-                from_participant_id=caller.id,
-                type="get_thread_toolkit_builders",
-                message={"path": "/threads/chat/example.thread"},
-            )
-        )
-
         assert existing_entry.get_attribute("modified_at") == "2024-01-01T00:00:00Z"
     finally:
         await channel.stop(supervisor)

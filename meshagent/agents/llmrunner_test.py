@@ -165,7 +165,7 @@ class _FakeLLMAdapter(LLMAdapter):
         self,
         *,
         context,
-        room,
+        caller,
         toolkits,
         output_schema=None,
         event_handler=None,
@@ -178,7 +178,7 @@ class _FakeLLMAdapter(LLMAdapter):
         self.calls.append(
             {
                 "context": context,
-                "room": room,
+                "caller": caller,
                 "toolkits": toolkits,
                 "output_schema": output_schema,
                 "model": model,

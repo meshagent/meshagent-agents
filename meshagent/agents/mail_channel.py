@@ -663,10 +663,11 @@ class MailChannel(ThreadedChannel):
         context: ToolContext,
         attachments: list[str],
     ) -> list[FileContent]:
+        del context
         files: list[FileContent] = []
         for attachment_path in attachments:
             try:
-                files.append(await context.room.storage.download(path=attachment_path))
+                files.append(await self.room.storage.download(path=attachment_path))
             except Exception as exc:
                 logger.error(
                     "unable to download file %s",

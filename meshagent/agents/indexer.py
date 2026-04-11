@@ -1,7 +1,8 @@
 from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
-from meshagent.tools import Toolkit, FunctionTool, ToolContext
+from meshagent.tools import Toolkit, FunctionTool, LocalRoomTool, ToolContext
 from meshagent.openai.proxy import get_client
 from meshagent.api.room_server_client import (
+    RoomClient,
     TextDataType,
     VectorDataType,
     FloatDataType,
@@ -122,10 +123,11 @@ class OpenAIEmbedder(Embedder):
         )
 
 
-class RagTool(FunctionTool):
+class RagTool(LocalRoomTool):
     def __init__(
         self,
         *,
+        room: RoomClient,
         name="rag_search",
         table: str,
         title="RAG search",
@@ -137,6 +139,7 @@ class RagTool(FunctionTool):
         self.table = table
 
         super().__init__(
+            room=room,
             name=name,
             input_schema={
                 "type": "object",
@@ -153,13 +156,14 @@ class RagTool(FunctionTool):
         self._embedder = embedder
 
     async def execute(self, context: ToolContext, query: str):
+        del context
         if self._embedder is None:
-            results = await context.room.database.search(
+            results = await self.room.database.search(
                 table=self.table, text=query, limit=10
             )
         else:
             embedding = await self._embedder.embed(text=query)
-            results = await context.room.database.search(
+            results = await self.room.database.search(
                 table=self.table, text=query, vector=embedding, limit=10
             )
 
@@ -187,15 +191,21 @@ def open_ai_embedding_ada_2(openai: Optional[AsyncOpenAI] = None):
 
 
 class RagToolkit(Toolkit):
-    def __init__(self, table: str, embedder: Optional[Embedder] = None):
+    def __init__(
+        self,
+        room: RoomClient,
+        table: str,
+        embedder: Optional[Embedder] = None,
+    ):
         if embedder is None:
             embedder = open_ai_embedding_3_large()
 
         super().__init__(
             name="meshagent.rag",
+            room=room,
             title="RAG",
             description="Searches against an index",
-            tools=[RagTool(table=table, embedder=embedder)],
+            tools=[RagTool(room=room, table=table, embedder=embedder)],
         )
 
 

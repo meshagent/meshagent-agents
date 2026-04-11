@@ -2,6 +2,7 @@ from meshagent.agents.worker import Worker
 from meshagent.tools import (
     ToolContext,
     FunctionTool,
+    LocalRoomTool,
     Toolkit,
     FileContent,
 )
@@ -59,10 +60,11 @@ class MailThreadContext:
 SmtpConfiguration = mail_common.SmtpConfiguration
 
 
-class NewEmailThreadWithAttachments(FunctionTool):
-    def __init__(self, *, agent: "MailBot"):
+class NewEmailThreadWithAttachments(LocalRoomTool):
+    def __init__(self, *, agent: "MailBot", room: RoomClient):
         self.agent = agent
         super().__init__(
+            room=room,
             name="new_email_thread",
             title="New Email Thread",
             description="Starts a new email thread that is managed by the mailbot",
@@ -103,7 +105,7 @@ class NewEmailThreadWithAttachments(FunctionTool):
         for attachment in attachments:
             try:
                 attachment_data.append(
-                    await context.room.storage.download(path=attachment)
+                    await self.room.storage.download(path=attachment)
                 )
             except Exception as ex:
                 logger.error(f"Unable to download file {ex}", exc_info=ex)
@@ -391,9 +393,10 @@ class MailBot(Worker):
         try:
             if self._enable_attachments:
 
-                class AttachTool(FunctionTool):
-                    def __init__(self):
+                class AttachTool(LocalRoomTool):
+                    def __init__(self, *, room: RoomClient):
                         super().__init__(
+                            room=room,
                             name="attach file",
                             description="attach a file from the room to the conversation",
                             input_schema={
@@ -423,7 +426,7 @@ class MailBot(Worker):
                                 )
                             else:
                                 attachment_data.append(
-                                    await context.room.storage.download(path=path)
+                                    await self.room.storage.download(path=path)
                                 )
                         except Exception as ex:
                             logger.error(f"Unable to download file {ex}", exc_info=ex)
@@ -433,12 +436,12 @@ class MailBot(Worker):
 
                 toolkits = [
                     *toolkits,
-                    Toolkit(name="attachments", tools=[AttachTool()]),
+                    Toolkit(name="attachments", tools=[AttachTool(room=self.room)]),
                 ]
 
             reply = await self._llm_adapter.next(
                 context=chat_context,
-                room=self.room,
+                caller=self.room.local_participant,
                 toolkits=toolkits,
             )
         except Exception as ex:
@@ -624,7 +627,6 @@ class MailBot(Worker):
     ) -> list[Toolkit]:
         toolkits = await self.get_required_toolkits(
             context=ToolContext(
-                room=self.room,
                 caller=self.room.local_participant,
                 caller_context={"chat": thread_context.chat.to_json()},
             )

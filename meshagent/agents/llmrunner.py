@@ -3,13 +3,12 @@ from typing import Optional
 from jsonschema import validate, ValidationError
 from meshagent.api.schema_util import prompt_schema, merge
 from meshagent.api import Requirement
-from meshagent.tools import Toolkit, make_toolkits, ToolkitBuilder
+from meshagent.tools import Toolkit
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.completions_thread_adapter import CompletionsThreadAdapter
 from meshagent.agents.task_runner import TaskContext
 from meshagent.agents.responses_thread_adapter import ResponsesThreadAdapter
 from meshagent.agents.threaded_task_runner import ThreadedTaskRunner, ThreadingMode
-from meshagent.agents.toolkit_schema import build_tools_property_schema
 from meshagent.openai.tools.completions_adapter import OpenAICompletionsAdapter
 
 import tarfile
@@ -75,24 +74,6 @@ class LLMTaskRunner(ThreadedTaskRunner):
                     threading_mode=resolved_threading_mode,
                 )
 
-                tools_schema, defs = build_tools_property_schema(
-                    toolkit_builders=self.get_toolkit_builders()
-                )
-                if tools_schema is not None:
-                    input_schema = merge(
-                        schema=input_schema,
-                        additional_properties={
-                            "tools": tools_schema,
-                        },
-                    )
-
-                    if len(defs) > 0:
-                        if input_schema.get("$defs") is None:
-                            input_schema["$defs"] = {}
-
-                        for key, value in defs.items():
-                            input_schema["$defs"][key] = value
-
             else:
                 input_schema = {
                     "type": "object",
@@ -132,9 +113,6 @@ class LLMTaskRunner(ThreadedTaskRunner):
         chat = self._llm_adapter.create_session()
         return chat
 
-    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
-        return []
-
     async def get_context_toolkits(self, *, context: TaskContext) -> list[Toolkit]:
         return []
 
@@ -165,7 +143,6 @@ class LLMTaskRunner(ThreadedTaskRunner):
         if prompt is None:
             raise ValueError("`prompt` is required")
 
-        message_tools = arguments.get("tools")
         if self.allow_model_selection:
             model = arguments.get("model", self._llm_adapter.default_model())
         else:
@@ -248,16 +225,6 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 *await self.get_required_toolkits(context=context),
             ]
 
-            if message_tools is not None and len(message_tools) > 0:
-                combined_toolkits.extend(
-                    await make_toolkits(
-                        room=self.room,
-                        model=model,
-                        providers=self.get_toolkit_builders(),
-                        tools=message_tools,
-                    )
-                )
-
             def push(event: dict):
                 if thread_adapter is not None:
                     thread_adapter.push(event=event)
@@ -267,7 +234,7 @@ class LLMTaskRunner(ThreadedTaskRunner):
                 try:
                     resp = await self._llm_adapter.next(
                         context=context.session,
-                        room=context.room,
+                        caller=context.room.local_participant,
                         toolkits=combined_toolkits,
                         output_schema=self.output_schema,
                         event_handler=push,

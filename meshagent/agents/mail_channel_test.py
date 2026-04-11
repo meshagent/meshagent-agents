@@ -223,7 +223,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         self,
         *,
         context,
-        room,
+        caller,
         toolkits,
         output_schema=None,
         event_handler=None,
@@ -232,7 +232,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         on_behalf_of=None,
         options=None,
     ):
-        del room
+        del caller
         del toolkits
         del output_schema
         del event_handler
@@ -712,7 +712,6 @@ async def test_new_email_thread_tool_uses_current_thread_id(
         new_thread_tool = toolkit.tools[0]
         await new_thread_tool.execute(
             ToolContext(
-                room=room,  # type: ignore[arg-type]
                 caller=room.local_participant,
                 caller_context={"thread_id": ".threads/assistant/customer.thread"},
             ),

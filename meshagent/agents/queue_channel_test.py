@@ -132,7 +132,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         self,
         *,
         context,
-        room,
+        caller,
         toolkits,
         output_schema=None,
         event_handler=None,
@@ -141,7 +141,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
         on_behalf_of=None,
         options=None,
     ):
-        del room
+        del caller
         del toolkits
         del output_schema
         del event_handler
@@ -175,7 +175,6 @@ async def test_queue_channel_emits_turn_start_from_prompt_and_path() -> None:
                 "path": ".threads/jobs/webhook.thread",
                 "model": "gpt-5.4",
                 "instructions": "Be concise",
-                "tools": [{"name": "search"}],
                 "sender_name": "Webhook",
             }
         )
@@ -187,7 +186,6 @@ async def test_queue_channel_emits_turn_start_from_prompt_and_path() -> None:
         assert outbound.data.thread_id == ".threads/jobs/webhook.thread"
         assert outbound.data.model == "gpt-5.4"
         assert outbound.data.instructions == "Be concise"
-        assert outbound.data.toolkits == [{"name": "search"}]
         assert outbound.data.content[0].text == "Process webhook payload"
         assert outbound.sender is not None
         assert outbound.sender.get_attribute("name") == "Webhook"

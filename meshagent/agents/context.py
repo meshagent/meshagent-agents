@@ -236,9 +236,9 @@ class AgentSessionContext:
 
         return caller_context
 
-    @staticmethod
-    def from_json(json: dict):
-        return AgentSessionContext(
+    @classmethod
+    def from_json(cls, json: dict):
+        return cls(
             messages=json["messages"],
             system_role=json.get("system_role", None),
             previous_messages=json.get("previous_messages", None),

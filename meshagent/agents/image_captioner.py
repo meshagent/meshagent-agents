@@ -90,7 +90,7 @@ class LLMImageCaptioner(ImageCaptioner):
 
             response = await self._llm_adapter.next(
                 context=session_context,
-                room=room,
+                caller=room.local_participant,
                 toolkits=[],
                 output_schema=self._output_schema,
             )

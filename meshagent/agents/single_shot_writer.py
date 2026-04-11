@@ -66,7 +66,7 @@ class SingleShotWriter(Writer):
         try:
             response = await self._llm_adapter.next(
                 context=writer_context.call_context.session,
-                room=writer_context.room,
+                caller=writer_context.room.local_participant,
                 toolkits=toolkits,
                 output_schema=writer_context.document.schema.to_json(),
             )

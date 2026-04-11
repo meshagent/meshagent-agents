@@ -1,8 +1,6 @@
 import asyncio
-from typing import Literal
 
 import pytest
-from pydantic import BaseModel
 
 from meshagent.agents.messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -27,7 +25,7 @@ from meshagent.agents.toolkit_channel import ToolkitChannel
 from meshagent.api import Participant
 from meshagent.api.messaging import JsonContent, TextContent
 from meshagent.api.room_server_client import RoomException
-from meshagent.tools import ToolContext, ToolkitBuilder
+from meshagent.tools import ToolContext
 
 
 class _FakeLocalParticipant(Participant):
@@ -63,20 +61,6 @@ class _FakeParticipant(Participant):
         super().__init__(id=participant_id, attributes={"name": name})
 
 
-class _SearchToolkitConfig(BaseModel):
-    name: Literal["search"] = "search"
-
-
-class _FakeToolkitBuilder(ToolkitBuilder):
-    def __init__(self) -> None:
-        super().__init__(name="search", type=_SearchToolkitConfig)
-
-    async def make(self, *, model: str, config: _SearchToolkitConfig):
-        del model
-        del config
-        raise AssertionError("builder should not be called in this test")
-
-
 async def _drain() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -91,7 +75,6 @@ async def test_toolkit_channel_exposes_remote_tool_and_returns_final_text() -> N
         room=room,
         toolkit_name="assistant",
         thread_dir="/threads/tasks",
-        toolkit_builders=[_FakeToolkitBuilder()],
     )
     await channel.start(supervisor)  # type: ignore[arg-type]
     try:
@@ -101,12 +84,11 @@ async def test_toolkit_channel_exposes_remote_tool_and_returns_final_text() -> N
 
         result_task = asyncio.create_task(
             remote_toolkit.invoke(
-                context=ToolContext(room=room, caller=caller),
+                context=ToolContext(caller=caller),
                 name="run_assistant_task",
                 input=JsonContent(
                     json={
                         "prompt": "Plan the work",
-                        "tools": [{"name": "search"}],
                         "model": "gpt-5.4",
                         "instructions": "Be brief",
                     }
@@ -121,7 +103,6 @@ async def test_toolkit_channel_exposes_remote_tool_and_returns_final_text() -> N
         assert request.sender is caller
         assert request.data.thread_id == "/threads/tasks/Plan the work.thread"
         assert request.data.content[0].text == "Plan the work"
-        assert request.data.toolkits == [{"name": "search"}]
         assert request.data.model == "gpt-5.4"
         assert request.data.instructions == "Be brief"
 
@@ -208,7 +189,7 @@ async def test_toolkit_channel_respects_explicit_thread_id_and_surfaces_turn_err
         remote_toolkit = channel.make_toolkit()
         result_task = asyncio.create_task(
             remote_toolkit.invoke(
-                context=ToolContext(room=room, caller=caller),
+                context=ToolContext(caller=caller),
                 name="run_assistant_task",
                 input=JsonContent(
                     json={
@@ -264,7 +245,7 @@ async def test_toolkit_channel_auto_rejects_tool_approvals() -> None:
         remote_toolkit = channel.make_toolkit()
         result_task = asyncio.create_task(
             remote_toolkit.invoke(
-                context=ToolContext(room=room, caller=caller),
+                context=ToolContext(caller=caller),
                 name="run_assistant_task",
                 input=JsonContent(json={"prompt": "Do the work"}),
             )

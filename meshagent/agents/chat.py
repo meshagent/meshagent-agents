@@ -15,9 +15,6 @@ from meshagent.api.messaging import JsonContent
 from meshagent.tools import (
     Toolkit,
     ToolContext,
-    make_toolkits,
-    ToolkitBuilder,
-    ToolkitConfig,
     FunctionTool,
 )
 from meshagent.agents.adapter import LLMAdapter
@@ -53,7 +50,6 @@ from meshagent.tools import tool
 from meshagent.tools.strict_schema import ensure_strict_json_schema
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
-from meshagent.agents.toolkit_schema import build_tools_property_schema
 from meshagent.agents.thread_schema import thread_list_schema, thread_schema
 
 
@@ -78,7 +74,6 @@ class ChatAttachment(BaseModel):
 class ChatMessageInput(BaseModel):
     text: str
     attachments: Optional[list[ChatAttachment]] = None
-    tools: Optional[list[Any]] = None
 
 
 class ChatBotReasoningTool(ReasoningTool):
@@ -320,14 +315,12 @@ class ChatBotClient:
         self,
         *,
         text: str,
-        tools: Optional[list[ToolkitConfig]] = None,
         attachments: Optional[list[dict]] = None,
         steer: bool = False,
     ) -> None:
         if self._participant is None or self._doc is None:
             raise RoomException("chat client not started")
 
-        tool_payload = [tool.model_dump(mode="json") for tool in tools or []]
         attachment_payload: list[dict[str, str]] = []
         if attachments is not None:
             for attachment in attachments:
@@ -347,7 +340,6 @@ class ChatBotClient:
             message={
                 "text": text,
                 "path": self.thread_path,
-                "tools": tool_payload,
                 "attachments": attachment_payload,
                 "store": True,
             },
@@ -820,6 +812,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
         adapter = self.thread_name_adapter()
         if adapter is not None:
             session = adapter.create_session()
+            caller_context = context.caller_context
+            if isinstance(caller_context, dict):
+                raw_chat_context = caller_context.get("chat")
+                if isinstance(raw_chat_context, dict):
+                    session = type(session).from_json(raw_chat_context)
             cloned_context = session.copy()
             async with cloned_context:
                 cloned_context.replace_rules(rules=self._thread_name_rules)
@@ -827,7 +824,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 try:
                     response = await adapter.next(
                         context=cloned_context,
-                        room=context.room,
+                        caller=self.room.local_participant,
                         model=self.default_model(),
                         on_behalf_of=context.on_behalf_of or context.caller,
                         toolkits=[],
@@ -1109,15 +1106,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
     ):
         return get_online_participants(room=self._room, thread=thread, exclude=exclude)
 
-    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
-        return []
-
     async def get_thread_toolkits(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
     ) -> list[Toolkit]:
         toolkits = await self.get_required_toolkits(
             context=ToolContext(
-                room=self.room,
                 caller=self.room.local_participant,
                 on_behalf_of=participant,
                 caller_context=thread_context.to_caller_context(),
@@ -1698,31 +1691,6 @@ class ChatBotBase(SingleRoomAgent, ABC):
         await self._close_thread_list_document(room=room)
         await super().stop()
 
-    async def _on_get_thread_toolkits_message(self, *, message: RoomMessage):
-        path = message.message["path"]
-
-        chat_with_participant = None
-        for participant in self._room.messaging.get_participants():
-            if participant.id == message.from_participant_id:
-                chat_with_participant = participant
-                break
-
-        if chat_with_participant is None:
-            logger.warning(
-                "participant does not have messaging enabled, skipping message"
-            )
-            return
-
-        tool_providers = self.get_toolkit_builders()
-        self._room.messaging.send_message_nowait(
-            to=chat_with_participant,
-            type="set_thread_tool_providers",
-            message={
-                "path": path,
-                "tool_providers": [{"name": t.name} for t in tool_providers],
-            },
-        )
-
     async def _queue_chat_message(
         self,
         *,
@@ -2034,30 +2002,6 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 }
             },
         }
-
-        message_tools_schema, defs = build_tools_property_schema(
-            toolkit_builders=self.get_toolkit_builders()
-        )
-        if message_tools_schema is not None:
-            tools_schema["properties"]["message"]["properties"]["tools"] = (
-                message_tools_schema
-            )
-        else:
-            # Backward compatibility: some clients always send `tools: []`.
-            tools_schema["properties"]["message"]["properties"]["tools"] = {
-                "anyOf": [
-                    {
-                        "type": "array",
-                        "items": ensure_strict_json_schema({}),
-                    },
-                    {"type": "null"},
-                ],
-            }
-
-        if len(defs) > 0:
-            for key, value in defs.items():
-                tools_schema["$defs"][key] = value
-
         tools_schema = ensure_strict_json_schema(tools_schema)
 
         outer = self
@@ -2142,19 +2086,6 @@ class ChatBotBase(SingleRoomAgent, ABC):
     def on_message(
         self, message: RoomMessage, from_participant: Optional[RemoteParticipant] = None
     ) -> _QueuedChatMessage | None:
-        if message.type == "get_thread_toolkit_builders":
-            task = asyncio.create_task(
-                self._on_get_thread_toolkits_message(message=message)
-            )
-
-            def on_done(task: asyncio.Task):
-                try:
-                    task.result()
-                except Exception as ex:
-                    logger.error(f"unable to get tool providers {ex}", exc_info=ex)
-
-            task.add_done_callback(on_done)
-
         if (
             message.type == "chat"
             or message.type == "opened"
@@ -2670,7 +2601,7 @@ class ChatBot(ChatBotBase):
             )
             response = await self._llm_adapter.next(
                 context=cloned_context,
-                room=self._room,
+                caller=self._room.local_participant,
                 model=self._decision_model or self._llm_adapter.default_model(),
                 options=self._decision_options,
                 on_behalf_of=from_user,
@@ -2775,23 +2706,9 @@ class ChatBot(ChatBotBase):
                     participant=from_participant,
                 )
 
-            with tracer.start_as_current_span("get_thread_toolkit_builders"):
-                thread_tool_providers = self.get_toolkit_builders()
-
             await self.prepare_llm_context(thread_context=thread_context)
 
             message_toolkits = [*thread_toolkits]
-            message_tools = message.get("tools")
-
-            if message_tools is not None and len(message_tools) > 0:
-                message_toolkits.extend(
-                    await make_toolkits(
-                        room=self.room,
-                        model=model,
-                        providers=thread_tool_providers,
-                        tools=message_tools,
-                    )
-                )
 
         online = await self.get_online_participants(
             thread=thread_context.thread, exclude=[self.room.local_participant]
@@ -2845,7 +2762,7 @@ class ChatBot(ChatBotBase):
 
         return await self._llm_adapter.next(
             context=thread_context.session,
-            room=self._room,
+            caller=self._room.local_participant,
             toolkits=message_toolkits,
             event_handler=thread_context.emit,
             model=model,

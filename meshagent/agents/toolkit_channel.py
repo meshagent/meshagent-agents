@@ -11,7 +11,6 @@ from meshagent.tools import (
     FunctionTool,
     ToolContext,
     Toolkit,
-    ToolkitBuilder,
 )
 
 from .legacy_chat_channel import LegacyChatChannel
@@ -35,7 +34,6 @@ from .messages import (
     TurnStarted,
 )
 from .process import Channel, Message
-from .toolkit_schema import build_tools_property_schema
 
 
 @dataclass(slots=True)
@@ -58,7 +56,6 @@ class ToolkitChannel(Channel):
         tool_name: str | None = None,
         thread_dir: str | None = None,
         public: bool = True,
-        toolkit_builders: list[ToolkitBuilder] | None = None,
     ) -> None:
         super().__init__()
         normalized_toolkit_name = toolkit_name.strip()
@@ -78,7 +75,6 @@ class ToolkitChannel(Channel):
             thread_dir=thread_dir
         )
         self._public = public
-        self._toolkit_builders = list(toolkit_builders or [])
         self._pending_by_source_message_id: dict[str, _PendingToolkitTurn] = {}
         self._pending_by_turn_id: dict[str, _PendingToolkitTurn] = {}
         self._input_schema = self._build_input_schema()
@@ -192,23 +188,6 @@ class ToolkitChannel(Channel):
         )
 
     def _build_input_schema(self) -> dict[str, Any]:
-        tools_schema, defs = build_tools_property_schema(
-            toolkit_builders=self._toolkit_builders
-        )
-        if tools_schema is None:
-            tools_schema = {
-                "anyOf": [
-                    {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": True,
-                        },
-                    },
-                    {"type": "null"},
-                ]
-            }
-
         schema: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
@@ -234,11 +213,8 @@ class ToolkitChannel(Channel):
                     "anyOf": [{"type": "string"}, {"type": "null"}],
                     "description": "optional instructions override for this turn",
                 },
-                "tools": tools_schema,
             },
         }
-        if len(defs) > 0:
-            schema["$defs"] = defs
         return schema
 
     def _get_thread_dir(self) -> str:
@@ -378,7 +354,6 @@ class ToolkitChannel(Channel):
                 thread_id: str | None = None,
                 model: str | None = None,
                 instructions: str | None = None,
-                tools: list[dict[str, Any]] | None = None,
             ) -> str:
                 if outer.supervisor is None:
                     raise RoomException(
@@ -395,7 +370,6 @@ class ToolkitChannel(Channel):
                     type=AGENT_MESSAGE_TURN_START,
                     thread_id=resolved_thread_id,
                     content=[AgentTextContent(type="text", text=prompt)],
-                    toolkits=tools,
                     model=model,
                     instructions=instructions,
                 )

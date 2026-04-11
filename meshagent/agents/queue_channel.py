@@ -111,7 +111,6 @@ class QueueChannel(ThreadedChannel):
                             thread_text=thread_text,
                         ),
                         content=content,
-                        toolkits=self._toolkits_from_payload(payload=payload),
                         model=self._model_from_payload(payload=payload),
                         instructions=self._instructions_from_payload(payload=payload),
                     ),
@@ -454,19 +453,6 @@ class QueueChannel(ThreadedChannel):
             id=f"queue:{self._queue_name}:{uuid.uuid5(uuid.NAMESPACE_URL, normalized_sender)}",
             attributes={"name": normalized_sender},
         )
-
-    @staticmethod
-    def _toolkits_from_payload(
-        *, payload: dict[str, Any]
-    ) -> list[dict[str, Any]] | None:
-        raw_toolkits = payload.get("tools")
-        if not isinstance(raw_toolkits, list):
-            return None
-
-        toolkits = [toolkit for toolkit in raw_toolkits if isinstance(toolkit, dict)]
-        if len(toolkits) == 0:
-            return None
-        return toolkits
 
     @staticmethod
     def _model_from_payload(*, payload: dict[str, Any]) -> str | None:

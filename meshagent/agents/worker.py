@@ -4,10 +4,8 @@ from meshagent.api import RoomMessage, RoomClient
 from meshagent.agents import AgentSessionContext
 from meshagent.agents.context import TaskContext
 from meshagent.tools import (
-    FunctionTool,
+    LocalRoomTool,
     Toolkit,
-    make_toolkits,
-    ToolkitBuilder,
 )
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from .adapter import LLMAdapter
@@ -83,11 +81,12 @@ class _WorkerThreadingHelper(ThreadedTaskRunner):
         )
 
 
-class SubmitWork(FunctionTool):
-    def __init__(self, *, agent: "Worker", queue: str):
+class SubmitWork(LocalRoomTool):
+    def __init__(self, *, agent: "Worker", queue: str, room: RoomClient):
         self.queue = queue
         self.agent = agent
         super().__init__(
+            room=room,
             name=f"queue_{agent.name}_task",
             title=f"Queue {agent.title} Task",
             description=f"Queues a new task to the worker -- {agent.description}",
@@ -104,7 +103,8 @@ class SubmitWork(FunctionTool):
         )
 
     async def execute(self, context: ToolContext, *, prompt: str):
-        await context.room.queues.send(
+        del context
+        await self.room.queues.send(
             name=self.queue,
             message={
                 "prompt": prompt,
@@ -282,7 +282,7 @@ class Worker(SingleRoomAgent):
             )
             response = await self._decision_llm_adapter.next(
                 context=decision_context,
-                room=self.room,
+                caller=self.room.local_participant,
                 toolkits=[],
                 model=self._decision_model
                 or self._decision_llm_adapter.default_model(),
@@ -492,10 +492,9 @@ class Worker(SingleRoomAgent):
             await self.append_message_context(
                 message=message, chat_context=chat_context
             )
-
             return await self._llm_adapter.next(
                 context=chat_context,
-                room=self.room,
+                caller=self.room.local_participant,
                 toolkits=toolkits,
                 event_handler=push if thread_adapter is not None else None,
                 model=model,
@@ -505,33 +504,13 @@ class Worker(SingleRoomAgent):
                 with contextlib.suppress(Exception):
                     await thread_adapter.stop()
 
-    def get_toolkit_builders(self) -> list[ToolkitBuilder]:
-        return []
-
     async def get_message_toolkits(self, *, message: dict) -> list[Toolkit]:
         toolkits = await self.get_required_toolkits(
             context=ToolContext(
-                room=self.room,
                 caller=self.room.local_participant,
                 on_behalf_of=None,
             )
         )
-
-        tool_providers = [*self.get_toolkit_builders()]
-
-        model = message.get("model", self._llm_adapter.default_model())
-
-        message_tools = message.get("tools")
-
-        if message_tools is not None and len(message_tools) > 0:
-            toolkits.extend(
-                await make_toolkits(
-                    room=self.room,
-                    model=model,
-                    providers=tool_providers,
-                    tools=message_tools,
-                )
-            )
         return [*self._toolkits, *toolkits]
 
     def prepare_chat_context(self, *, chat_context: AgentSessionContext):

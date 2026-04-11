@@ -16,7 +16,7 @@ from meshagent.api import (
 )
 from meshagent.tools import (
     Toolkit,
-    FunctionTool,
+    LocalRoomTool,
     ToolContext,
 )
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
@@ -35,10 +35,11 @@ class AgentException(RoomException):
     pass
 
 
-class RemoteRoomTool(FunctionTool):
+class RemoteRoomTool(LocalRoomTool):
     def __init__(
         self,
         *,
+        room: RoomClient,
         toolkit_name: str,
         name,
         input_schema,
@@ -65,6 +66,7 @@ class RemoteRoomTool(FunctionTool):
             }
 
         super().__init__(
+            room=room,
             name=name,
             input_schema=input_schema,
             output_spec=output_spec,
@@ -79,7 +81,7 @@ class RemoteRoomTool(FunctionTool):
         )
 
     async def execute(self, context: ToolContext, **kwargs):
-        result = await context.room.agents.invoke_tool(
+        result = await self.room.agents.invoke_tool(
             toolkit=self._toolkit_name,
             tool=self.name,
             participant_id=self._participant_id,
@@ -490,6 +492,7 @@ class SingleRoomAgent(Agent):
                 if required_toolkit.tools is None:
                     for tool_description in toolkit.tools:
                         tool = RemoteRoomTool(
+                            room=self.room,
                             on_behalf_of_id=tool_target.id,
                             toolkit_name=toolkit.name,
                             name=tool_description.name,
@@ -519,6 +522,7 @@ class SingleRoomAgent(Agent):
                             )
 
                         tool = RemoteRoomTool(
+                            room=self.room,
                             on_behalf_of_id=tool_target.id,
                             toolkit_name=toolkit.name,
                             name=tool_description.name,
@@ -535,14 +539,14 @@ class SingleRoomAgent(Agent):
                         )
                         remote_room_tools.append(tool)
 
-                toolkits.append(
-                    Toolkit(
-                        name=toolkit.name,
-                        title=toolkit.title,
-                        description=toolkit.description,
-                        thumbnail_url=toolkit.thumbnail_url,
-                        tools=remote_room_tools,
-                    )
+                required_toolkit_instance = Toolkit(
+                    name=toolkit.name,
+                    title=toolkit.title,
+                    description=toolkit.description,
+                    thumbnail_url=toolkit.thumbnail_url,
+                    room=self.room,
+                    tools=remote_room_tools,
                 )
+                toolkits.append(required_toolkit_instance)
 
         return toolkits

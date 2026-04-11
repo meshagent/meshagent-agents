@@ -66,11 +66,11 @@ async def test_remote_room_tool_raises_if_remote_room_tool_returns_iterable() ->
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
     context = ToolContext(
-        room=room,
         caller=caller,
         caller_context={"chat": {"id": "chat-1"}},
     )
     tool = RemoteRoomTool(
+        room=room,
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={
@@ -94,8 +94,9 @@ async def test_remote_room_tool_uses_non_stream_call_without_event_handler() -> 
     fake_agents = _FakeAgentsClient(response=response)
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
-    context = ToolContext(room=room, caller=caller)
+    context = ToolContext(caller=caller)
     tool = RemoteRoomTool(
+        room=room,
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={

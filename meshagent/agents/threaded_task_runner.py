@@ -366,7 +366,7 @@ class ThreadedTaskRunner(TaskRunner):
             try:
                 response = await self._thread_name_adapter.next(
                     context=cloned_context,
-                    room=context.room,
+                    caller=context.room.local_participant,
                     model=model,
                     on_behalf_of=context.on_behalf_of,
                     toolkits=[],

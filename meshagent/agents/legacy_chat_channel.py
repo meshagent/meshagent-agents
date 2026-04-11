@@ -20,7 +20,6 @@ from meshagent.tools import (
     FunctionTool,
     ToolContext,
     Toolkit,
-    ToolkitBuilder,
     tool,
 )
 from meshagent.tools.strict_schema import ensure_strict_json_schema
@@ -65,7 +64,6 @@ from .messages import (
 )
 from .process import Message
 from .threaded_channel import ThreadedChannel
-from .toolkit_schema import build_tools_property_schema
 
 logger = logging.getLogger("legacy-chat-channel")
 _MessageT = TypeVar("_MessageT", bound=AgentMessage)
@@ -79,7 +77,6 @@ class _ChatMessagePayload(BaseModel):
     path: str
     text: str = ""
     attachments: list[_ChatAttachmentPayload] | None = None
-    tools: list[dict[str, Any]] | None = None
     model: str | None = None
 
 
@@ -101,7 +98,6 @@ class LegacyChatChannel(ThreadedChannel):
         thread_dir: str | None = None,
         llm_adapter: LLMAdapter | None = None,
         empty_state_title: str = "How can I help you?",
-        toolkit_builders: list[ToolkitBuilder] | None = None,
     ) -> None:
         super().__init__(
             room=room,
@@ -110,7 +106,6 @@ class LegacyChatChannel(ThreadedChannel):
             llm_adapter=llm_adapter,
         )
         self._empty_state_title = empty_state_title
-        self._toolkit_builders = list(toolkit_builders or [])
         self._active_turn_ids_by_thread: dict[str, str] = {}
         self._pending_approval_turn_ids_by_thread: dict[str, dict[str, str]] = {}
         self._open_participant_ids_by_thread: dict[str, set[str]] = {}
@@ -610,26 +605,6 @@ class LegacyChatChannel(ThreadedChannel):
             },
         }
 
-        message_tools_schema, defs = build_tools_property_schema(
-            toolkit_builders=self._toolkit_builders
-        )
-        if message_tools_schema is not None:
-            tools_schema["properties"]["message"]["properties"]["tools"] = (
-                message_tools_schema
-            )
-        else:
-            tools_schema["properties"]["message"]["properties"]["tools"] = {
-                "anyOf": [
-                    {
-                        "type": "array",
-                        "items": ensure_strict_json_schema({}),
-                    },
-                    {"type": "null"},
-                ],
-            }
-
-        for key, value in defs.items():
-            tools_schema["$defs"][key] = value
         return ensure_strict_json_schema(tools_schema)
 
     def _make_new_thread_tool(self) -> FunctionTool:
@@ -687,7 +662,6 @@ class LegacyChatChannel(ThreadedChannel):
                         "path": path,
                         "text": text,
                         "attachments": payload.get("attachments"),
-                        "tools": payload.get("tools"),
                     }
                 )
                 outer.emit(
@@ -696,7 +670,6 @@ class LegacyChatChannel(ThreadedChannel):
                         type=AGENT_MESSAGE_TURN_START,
                         thread_id=path,
                         content=outer._content_from_chat_message(payload=chat_message),
-                        toolkits=chat_message.tools,
                     ),
                 )
                 return JsonContent(json={"path": path, "name": friendly_name})
@@ -723,7 +696,7 @@ class LegacyChatChannel(ThreadedChannel):
             )
             if room_storage_path is not None:
                 try:
-                    exists = await context.room.storage.exists(path=room_storage_path)
+                    exists = await outer.room.storage.exists(path=room_storage_path)
                 except Exception as exc:
                     raise RoomException(
                         f"attach_file could not verify room file {room_storage_path}: {exc}"
@@ -791,44 +764,12 @@ class LegacyChatChannel(ThreadedChannel):
             validation_mode="content_types",
         )
 
-    def _send_thread_tool_providers(
-        self,
-        *,
-        to: Participant,
-        path: str,
-    ) -> None:
-        self._room.messaging.send_message_nowait(
-            to=to,
-            type="set_thread_tool_providers",
-            message={
-                "path": path,
-                "tool_providers": [
-                    {"name": toolkit_builder.name}
-                    for toolkit_builder in self._toolkit_builders
-                ],
-            },
-        )
-
     def _handle_room_control_message(
         self,
         *,
         message: RoomMessage,
         sender: Participant,
     ) -> bool:
-        if message.type == "get_thread_toolkit_builders":
-            thread_id = self._thread_id_from_room_message(message=message)
-            if thread_id is None:
-                return True
-            self._register_open_participant(
-                thread_id=thread_id,
-                participant_id=sender.id,
-            )
-            self._send_thread_tool_providers(
-                to=sender,
-                path=thread_id,
-            )
-            return True
-
         if message.type == "typing":
             return True
 
@@ -839,7 +780,6 @@ class LegacyChatChannel(ThreadedChannel):
         return message_type not in {
             "opened",
             "cleared",
-            "get_thread_toolkit_builders",
             "typing",
         }
 
@@ -960,7 +900,6 @@ class LegacyChatChannel(ThreadedChannel):
                 type=AGENT_MESSAGE_TURN_START,
                 thread_id=payload.path,
                 content=self._content_from_chat_message(payload=payload),
-                toolkits=payload.tools,
                 model=payload.model,
             )
 
@@ -979,7 +918,6 @@ class LegacyChatChannel(ThreadedChannel):
                 thread_id=payload.path,
                 turn_id=turn_id,
                 content=self._content_from_chat_message(payload=payload),
-                toolkits=payload.tools,
             )
 
         if message_type == "cancel":

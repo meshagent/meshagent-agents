@@ -7,8 +7,8 @@ from typing import Any, Generic, Literal, Optional, TypeVar
 from jsonschema import validate
 
 from meshagent.api.messaging import FileContent, JsonContent, TextContent
-from meshagent.api import RoomClient, RoomException, RemoteParticipant
-from meshagent.tools import Content, ToolContext, Toolkit, ToolkitBuilder, ToolkitConfig
+from meshagent.api import Participant, RoomException
+from meshagent.tools import Content, ToolContext, Toolkit
 
 from .agent import AgentSessionContext
 from .messages import AgentMessage
@@ -221,30 +221,17 @@ class LLMAdapter(Generic[TEvent]):
 
         return publish
 
-    def tool_providers(self, *, model: str) -> list[ToolkitBuilder]:
-        return []
-
-    async def make_toolkit(self, *, model: str, config: ToolkitConfig) -> Toolkit:
-        for tool in self.tool_providers(model=model):
-            if tool.name == config.name:
-                return Toolkit(
-                    name=config.name,
-                    tools=[await tool.make(model=model, config=config)],
-                )
-
-        raise RoomException(f"Unexpected tool: {config.name} for model {model}")
-
     async def next(
         self,
         *,
         context: AgentSessionContext,
-        room: RoomClient,
+        caller: Participant,
         toolkits: list[Toolkit],
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[TEvent], None]] = None,
         steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
-        on_behalf_of: Optional[RemoteParticipant] = None,
+        on_behalf_of: Optional[Participant] = None,
         options: Optional[dict] = None,
     ) -> Any:
         raise NotImplementedError
@@ -274,17 +261,17 @@ class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
         self,
         *,
         context: AgentSessionContext,
-        room: RoomClient,
+        caller: Participant,
         toolkits: list[Toolkit],
         output_schema: Optional[dict] = None,
         event_handler: Optional[Callable[[AgentMessage | dict[str, Any]], None]] = None,
         steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
-        on_behalf_of: Optional[RemoteParticipant] = None,
+        on_behalf_of: Optional[Participant] = None,
         options: Optional[dict] = None,
     ) -> Any:
         del context
-        del room
+        del caller
         del toolkits
         del output_schema
         del event_handler
