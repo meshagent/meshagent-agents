@@ -1,5 +1,5 @@
 from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
-from meshagent.tools import Toolkit, FunctionTool, LocalRoomTool, ToolContext
+from meshagent.tools import Toolkit, LocalRoomTool, ToolContext
 from meshagent.openai.proxy import get_client
 from meshagent.api.room_server_client import (
     RoomClient,
