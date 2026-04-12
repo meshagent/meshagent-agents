@@ -20,6 +20,7 @@ from .mail_channel import MailChannel
 from .queue_channel import QueueChannel
 from .toolkit_channel import ToolkitChannel
 from .thread_schema import thread_schema, thread_list_schema
+from .mcp import MCPHeader, MCPServerConfig, MCPToolkitClientOptions
 from .version import __version__
 
 
@@ -48,5 +49,8 @@ __all__ = [
     ToolkitChannel,
     thread_schema,
     thread_list_schema,
+    MCPHeader,
+    MCPServerConfig,
+    MCPToolkitClientOptions,
     __version__,
 ]

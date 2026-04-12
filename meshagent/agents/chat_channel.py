@@ -10,6 +10,7 @@ from meshagent.tools import Toolkit
 from .legacy_chat_channel import LegacyChatChannel
 from .messages import (
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
@@ -18,6 +19,7 @@ from .messages import (
     AGENT_MESSAGE_TURN_STEER,
     AgentMessage,
     ApproveAgentToolCall,
+    CapabilitiesRequest,
     ClearThread,
     RejectAgentToolCall,
     TurnInterrupt,
@@ -34,6 +36,7 @@ class _AgentMessageEnvelope(BaseModel):
 
 
 _INBOUND_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
+    AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
     AGENT_MESSAGE_TURN_START: TurnStart,
     AGENT_MESSAGE_TURN_STEER: TurnSteer,
     AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,

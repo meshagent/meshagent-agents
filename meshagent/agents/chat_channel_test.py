@@ -4,6 +4,7 @@ from unittest import mock
 import pytest
 
 from meshagent.agents.adapter import LLMAdapter
+from meshagent.agents.chat_channel import ChatChannel as AgentChatChannel
 from meshagent.agents.legacy_chat_channel import LegacyChatChannel as ChatChannel
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
@@ -17,6 +18,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TURN_INTERRUPT,
@@ -32,6 +34,7 @@ from meshagent.agents.messages import (
     AgentTextContentStarted,
     AgentToolCallApprovalRequested,
     ApproveAgentToolCall,
+    CapabilitiesRequest,
     ClearThread,
     ThreadCleared,
     TurnEnded,
@@ -594,6 +597,45 @@ async def test_chat_channel_preserves_existing_attachment_urls() -> None:
             AgentFileContent(type="file", url="room://docs/report.pdf"),
             AgentFileContent(type="file", url="https://example.com/image.png"),
         ]
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_channel_translates_capabilities_request_agent_message() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = AgentChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_CAPABILITIES_REQUEST,
+                        "thread_id": "/threads/test.thread",
+                        "message_id": "capabilities-1",
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        sent = supervisor.sent[0]
+        assert sent.sender is caller
+        assert sent.source is channel
+
+        request = sent.data
+        assert isinstance(request, CapabilitiesRequest)
+        assert request.type == AGENT_MESSAGE_CAPABILITIES_REQUEST
+        assert request.thread_id == "/threads/test.thread"
+        assert request.message_id == "capabilities-1"
     finally:
         await channel.stop(supervisor)
 

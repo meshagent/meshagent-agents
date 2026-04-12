@@ -11,7 +11,7 @@ from meshagent.api import Participant, RoomException
 from meshagent.tools import Content, ToolContext, Toolkit
 
 from .agent import AgentSessionContext
-from .messages import AgentMessage
+from .messages import AgentMessage, ToolChoice
 
 TEvent = TypeVar("TEvent")
 
@@ -232,6 +232,7 @@ class LLMAdapter(Generic[TEvent]):
         steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[Participant] = None,
+        tool_choice: ToolChoice | None = None,
         options: Optional[dict] = None,
     ) -> Any:
         raise NotImplementedError
@@ -268,6 +269,7 @@ class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
         steering_callback: SteeringCallback | None = None,
         model: Optional[str] = None,
         on_behalf_of: Optional[Participant] = None,
+        tool_choice: ToolChoice | None = None,
         options: Optional[dict] = None,
     ) -> Any:
         del context
@@ -278,6 +280,7 @@ class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
         del steering_callback
         del model
         del on_behalf_of
+        del tool_choice
         del options
         raise RoomException(
             "MessageStreamLLMAdapter has been removed; use streaming toolkits instead"

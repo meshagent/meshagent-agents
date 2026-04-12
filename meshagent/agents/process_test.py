@@ -65,6 +65,7 @@ from meshagent.agents.messages import (
     TurnInterrupted,
     TurnInterrupt,
     TurnStarted,
+    ToolChoice,
     TurnSteerAccepted,
     TurnSteer,
 )
@@ -382,6 +383,7 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del output_schema
         del steering_callback
@@ -428,6 +430,7 @@ class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del context
         del caller
@@ -533,6 +536,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del context
         del caller
@@ -573,6 +577,7 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del output_schema
         del event_handler
@@ -636,6 +641,7 @@ class _ToolBoundarySteeringLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del caller
         del toolkits
@@ -755,6 +761,7 @@ class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del context
         del caller
@@ -976,6 +983,7 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del context
         del toolkits
@@ -1104,6 +1112,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del caller
         del toolkits
@@ -1183,6 +1192,7 @@ class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del caller
         del toolkits
@@ -1238,6 +1248,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
         model: str | None = None,
         on_behalf_of=None,
         options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Any:
         del caller
         del toolkits

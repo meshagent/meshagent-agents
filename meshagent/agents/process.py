@@ -18,7 +18,10 @@ from meshagent.agents.context import AgentSessionContext
 from meshagent.tools import ToolContext, Toolkit
 from .process_thread_adapter import AgentProcessThreadAdapter
 from .thread_adapter import ThreadAdapter, default_format_message
+from .version import __version__ as agents_version
 from .messages import (
+    AGENT_MESSAGE_CAPABILITIES_REQUEST,
+    AGENT_MESSAGE_CAPABILITIES_RESPONSE,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
@@ -41,9 +44,14 @@ from .messages import (
     AgentTextContent,
     AgentToolCallApprovalRequested,
     ApproveAgentToolCall,
+    CapabilitiesRequest,
+    CapabilitiesResponse,
     ClearThread,
     RejectAgentToolCall,
+    ToolkitCapabilities,
+    ToolkitToolCapabilities,
     ThreadCleared,
+    ToolChoice,
     TurnEnded,
     TurnInterrupt,
     TurnInterrupted,
@@ -69,6 +77,8 @@ _THREAD_STATUS_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
     {
         AGENT_MESSAGE_THREAD_CLEAR,
+        AGENT_MESSAGE_CAPABILITIES_REQUEST,
+        AGENT_MESSAGE_CAPABILITIES_RESPONSE,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
         AGENT_MESSAGE_TOOL_CALL_REJECT,
         AGENT_MESSAGE_TURN_INTERRUPT,
@@ -729,6 +739,7 @@ class LLMAgentProcess(AgentProcess):
             AGENT_MESSAGE_TURN_STEER: self.on_turn_steer,
             AGENT_MESSAGE_TURN_INTERRUPT: self.on_turn_interrupt,
             AGENT_MESSAGE_THREAD_CLEAR: self.on_clear_thread,
+            AGENT_MESSAGE_CAPABILITIES_REQUEST: self.on_capabilities_request,
             AGENT_MESSAGE_TOOL_CALL_APPROVE: self.on_tool_call_approve,
             AGENT_MESSAGE_TOOL_CALL_REJECT: self.on_tool_call_reject,
         }
@@ -745,6 +756,8 @@ class LLMAgentProcess(AgentProcess):
         self._pending_status_messages: list[_QueuedTurnMessage] = []
         self._interrupt_requested_turn_id: str | None = None
         self._interrupt_source_message_id: str | None = None
+        self._active_turn_toolkit_client_options: dict[str, dict[str, Any]] = {}
+        self._active_turn_tool_choice: ToolChoice | None = None
         self._session_initializer = session_initializer
         self._turn_instructions_provider = turn_instructions_provider
         self._turn_toolkits_builder = turn_toolkits_builder
@@ -1012,12 +1025,119 @@ class LLMAgentProcess(AgentProcess):
 
         approval_future.set_result(approved)
 
+    def _resolve_turn_toolkit_client_options(
+        self,
+        *,
+        turns: list[TurnStart | TurnSteer],
+    ) -> dict[str, dict[str, Any]]:
+        configured_options: dict[str, dict[str, Any]] | None = None
+        for turn in turns:
+            if not isinstance(turn, TurnStart):
+                continue
+            configured_options = {}
+            if turn.toolkits is None:
+                continue
+            for toolkit_name, toolkit_config in turn.toolkits.items():
+                client_options = toolkit_config.client_options
+                if client_options is None:
+                    continue
+                configured_options[toolkit_name] = client_options
+
+        if configured_options is not None:
+            self._active_turn_toolkit_client_options = configured_options
+            return dict(configured_options)
+
+        return dict(self._active_turn_toolkit_client_options)
+
+    def _resolve_turn_tool_choice(
+        self,
+        *,
+        turns: list[TurnStart | TurnSteer],
+    ) -> ToolChoice | None:
+        configured_tool_choice: ToolChoice | None = None
+        saw_turn_start = False
+        for turn in turns:
+            if not isinstance(turn, TurnStart):
+                continue
+            saw_turn_start = True
+            configured_tool_choice = turn.tool_choice
+
+        if saw_turn_start:
+            self._active_turn_tool_choice = configured_tool_choice
+            return configured_tool_choice
+
+        return self._active_turn_tool_choice
+
+    @staticmethod
+    def _merge_toolkit_capabilities(
+        *,
+        capabilities: list[ToolkitCapabilities],
+    ) -> list[ToolkitCapabilities]:
+        merged: dict[str, ToolkitCapabilities] = {}
+        for capability in capabilities:
+            existing = merged.get(capability.name)
+            if existing is None:
+                merged[capability.name] = capability
+                continue
+
+            existing.rules = [
+                *existing.rules,
+                *[rule for rule in capability.rules if rule not in existing.rules],
+            ]
+            existing.hidden = existing.hidden and capability.hidden
+            existing.tools.extend(
+                [
+                    tool
+                    for tool in capability.tools
+                    if tool.name
+                    not in {existing_tool.name for existing_tool in existing.tools}
+                ]
+            )
+        return list(merged.values())
+
+    async def _build_capabilities(
+        self,
+        *,
+        sender: Participant | None,
+    ) -> list[ToolkitCapabilities]:
+        toolkits = await self._build_turn_toolkits(
+            model=self.llm_adapter.default_model(),
+            turns=[],
+            sender=sender,
+            toolkit_client_options={},
+        )
+        capabilities: list[ToolkitCapabilities] = []
+        for toolkit in toolkits:
+            if toolkit.hidden:
+                continue
+            capabilities.append(
+                ToolkitCapabilities(
+                    name=toolkit.name,
+                    title=toolkit.title,
+                    description=toolkit.description,
+                    thumbnail_url=toolkit.thumbnail_url,
+                    rules=[*toolkit.rules],
+                    client_options=toolkit.client_options,
+                    hidden=toolkit.hidden,
+                    tools=[
+                        ToolkitToolCapabilities(
+                            name=tool.name,
+                            title=tool.title,
+                            description=tool.description,
+                        )
+                        for tool in toolkit.get_tools(client_options=None)
+                    ],
+                )
+            )
+        return self._merge_toolkit_capabilities(capabilities=capabilities)
+
     async def _build_turn_toolkits(
         self,
         *,
         model: str,
         turns: list[TurnStart | TurnSteer],
         sender: Participant | None = None,
+        toolkit_client_options: dict[str, dict[str, Any]] | None = None,
     ) -> list[Toolkit]:
         if self._turn_toolkits_builder is not None:
             combined_toolkits = await self._turn_toolkits_builder(sender, model, turns)
@@ -1028,7 +1148,19 @@ class LLMAgentProcess(AgentProcess):
                 for channel in supervisor.channels:
                     combined_toolkits.extend(channel.get_agent_toolkits())
 
-        return combined_toolkits
+        resolved_toolkits: list[Toolkit] = []
+        for toolkit in combined_toolkits:
+            resolved_toolkits.append(
+                toolkit.with_client_options(
+                    client_options=(
+                        None
+                        if toolkit_client_options is None
+                        else toolkit_client_options.get(toolkit.name)
+                    )
+                )
+            )
+
+        return resolved_toolkits
 
     @staticmethod
     def _normalize_room_storage_path(*, url: str) -> str:
@@ -1310,9 +1442,11 @@ class LLMAgentProcess(AgentProcess):
         queued_messages: list[_QueuedTurnMessage],
         session: AgentSessionContext,
         model: str,
-    ) -> tuple[Participant | None, list[Toolkit]]:
+    ) -> tuple[Participant | None, list[Toolkit], ToolChoice | None]:
         turns = [queued_message.request for queued_message in queued_messages]
         sender = self._sender_for_turn_batch(queued_messages=queued_messages)
+        toolkit_client_options = self._resolve_turn_toolkit_client_options(turns=turns)
+        tool_choice = self._resolve_turn_tool_choice(turns=turns)
 
         self._record_applied_turns(queued_messages=queued_messages)
         await self._append_queued_turn_messages(
@@ -1324,8 +1458,9 @@ class LLMAgentProcess(AgentProcess):
             model=model,
             turns=turns,
             sender=sender,
+            toolkit_client_options=toolkit_client_options,
         )
-        return sender, combined_toolkits
+        return sender, combined_toolkits, tool_choice
 
     async def _run_adapter_next(
         self,
@@ -1333,6 +1468,7 @@ class LLMAgentProcess(AgentProcess):
         session: AgentSessionContext,
         sender: Participant | None,
         combined_toolkits: list[Toolkit],
+        tool_choice: ToolChoice | None,
         model: str,
     ) -> None:
         turn_id = self._turn_id
@@ -1407,6 +1543,7 @@ class LLMAgentProcess(AgentProcess):
                     ),
                     model=model,
                     on_behalf_of=sender,
+                    tool_choice=tool_choice,
                 )
             )
             self._active_next_task = next_task
@@ -1444,7 +1581,7 @@ class LLMAgentProcess(AgentProcess):
 
         await self._remove_pending_status_messages(queued_messages=steer_messages)
         self.llm_adapter.on_turn_steer(context=session, interrupted=True)
-        sender, combined_toolkits = await self._prepare_turn_batch(
+        sender, combined_toolkits, tool_choice = await self._prepare_turn_batch(
             queued_messages=steer_messages,
             session=session,
             model=model,
@@ -1453,6 +1590,7 @@ class LLMAgentProcess(AgentProcess):
             session=session,
             sender=sender,
             combined_toolkits=combined_toolkits,
+            tool_choice=tool_choice,
             model=model,
         )
         return True
@@ -1464,7 +1602,7 @@ class LLMAgentProcess(AgentProcess):
         session: AgentSessionContext,
         model: str,
     ) -> None:
-        sender, combined_toolkits = await self._prepare_turn_batch(
+        sender, combined_toolkits, tool_choice = await self._prepare_turn_batch(
             queued_messages=queued_messages,
             session=session,
             model=model,
@@ -1473,6 +1611,7 @@ class LLMAgentProcess(AgentProcess):
             session=session,
             sender=sender,
             combined_toolkits=combined_toolkits,
+            tool_choice=tool_choice,
             model=model,
         )
 
@@ -1678,6 +1817,8 @@ class LLMAgentProcess(AgentProcess):
             self._interrupt_requested_turn_id = None
             self._interrupt_source_message_id = None
             self._active_turn_queue = None
+            self._active_turn_toolkit_client_options = {}
+            self._active_turn_tool_choice = None
             remaining_queued_messages = self._drain_queued_turn_messages(
                 active_turn_queue=active_turn_queue,
             )
@@ -1761,6 +1902,20 @@ class LLMAgentProcess(AgentProcess):
                 ]
             )
         self._schedule_next_turn()
+
+    async def on_capabilities_request(self, message: Message) -> None:
+        request = _coerce_message_data(message.data, CapabilitiesRequest)
+        capabilities = await self._build_capabilities(sender=message.sender)
+        self.emit(
+            sender=message.sender,
+            payload=CapabilitiesResponse(
+                type=AGENT_MESSAGE_CAPABILITIES_RESPONSE,
+                thread_id=request.thread_id,
+                source_message_id=request.message_id,
+                version=agents_version,
+                toolkits=capabilities,
+            ),
+        )
 
     async def on_turn_steer(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnSteer)

@@ -23,6 +23,8 @@ AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
 AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
+AGENT_MESSAGE_CAPABILITIES_REQUEST = "meshagent.agent.capabilities_request"
+AGENT_MESSAGE_CAPABILITIES_RESPONSE = "meshagent.agent.capabilities_response"
 AGENT_EVENT_THREAD_CLEARED = "meshagent.agent.thread.cleared"
 AGENT_EVENT_TURN_START_ACCEPTED = "meshagent.agent.turn.start.accepted"
 AGENT_EVENT_TURN_INTERRUPT_ACCEPTED = "meshagent.agent.turn.interrupt.accepted"
@@ -59,11 +61,22 @@ class AgentMessage(BaseModel):
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 
+class ToolChoice(BaseModel):
+    toolkit_name: str
+    tool_name: str
+
+
+class TurnToolkitConfig(BaseModel):
+    client_options: dict[str, Any] | None = None
+
+
 class TurnStart(AgentMessage):
     type: Literal[AGENT_MESSAGE_TURN_START]
     content: list[AgentInputContent]
     model: Optional[str] = None
     instructions: Optional[str] = None
+    toolkits: dict[str, TurnToolkitConfig] | None = None
+    tool_choice: ToolChoice | None = None
 
 
 class TurnSteer(AgentMessage):
@@ -81,9 +94,37 @@ class ClearThread(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLEAR]
 
 
+class CapabilitiesRequest(AgentMessage):
+    type: Literal[AGENT_MESSAGE_CAPABILITIES_REQUEST]
+
+
 class AgentError(BaseModel):
     message: str
     code: Optional[str]
+
+
+class ToolkitToolCapabilities(BaseModel):
+    name: str
+    title: str | None = None
+    description: str | None = None
+
+
+class ToolkitCapabilities(BaseModel):
+    name: str
+    title: str | None = None
+    description: str | None = None
+    thumbnail_url: str | None = None
+    rules: list[str] = Field(default_factory=list)
+    client_options: dict[str, Any] | None = None
+    hidden: bool = False
+    tools: list[ToolkitToolCapabilities] = Field(default_factory=list)
+
+
+class CapabilitiesResponse(AgentMessage):
+    type: Literal[AGENT_MESSAGE_CAPABILITIES_RESPONSE]
+    source_message_id: str
+    version: str
+    toolkits: list[ToolkitCapabilities]
 
 
 class ThreadCleared(AgentMessage):
