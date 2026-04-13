@@ -75,6 +75,32 @@ class _Asset:
     source: Path
     dest: PurePosixPath
     read_only: bool
+    base_path: Path | None = None
+
+    def resolve(self, *, root_path: Path | None = None) -> _ResolvedAsset:
+        resolved_source = _resolve_asset_source(
+            source=self.source,
+            configured_base_path=self.base_path,
+            root_path=root_path,
+        )
+        if self.kind == "instruction" and not resolved_source.is_file():
+            raise ValueError("instructions() requires a file source path")
+        if self.kind == "skill" and not resolved_source.is_dir():
+            raise ValueError("skills() requires a directory source path")
+        return _ResolvedAsset(
+            kind=self.kind,
+            source=resolved_source,
+            dest=self.dest,
+            read_only=self.read_only,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAsset:
+    kind: AssetKind
+    source: Path
+    dest: PurePosixPath
+    read_only: bool
 
     @property
     def is_file(self) -> bool:
@@ -113,7 +139,7 @@ class _MountGroup:
 
 @dataclass(frozen=True, slots=True)
 class _DeployAsset:
-    asset: _Asset
+    asset: _ResolvedAsset
     room_path: str
     mount_group: _MountGroup
 
@@ -181,7 +207,7 @@ def _agent_base_path_scope(base_path: Path):
         _AGENT_BASE_PATH.reset(token)
 
 
-def _normalize_source_path(source: str, *, base_path: Path) -> Path:
+def _normalize_source_path(source: str | Path, *, base_path: Path) -> Path:
     resolved = Path(source).expanduser()
     if not resolved.is_absolute():
         resolved = base_path / resolved
@@ -189,6 +215,38 @@ def _normalize_source_path(source: str, *, base_path: Path) -> Path:
     if not resolved.exists():
         raise FileNotFoundError(f"local path not found: {source}")
     return resolved
+
+
+def _normalize_root_path(
+    root_path: str | Path | None,
+    *,
+    field_name: str = "root_path",
+) -> Path | None:
+    if root_path is None:
+        return None
+
+    resolved = Path(root_path).expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"{field_name} not found: {root_path}")
+    if not resolved.is_dir():
+        raise ValueError(f"{field_name} must be a directory")
+    return resolved
+
+
+def _resolve_asset_source(
+    *,
+    source: Path,
+    configured_base_path: Path | None,
+    root_path: Path | None,
+) -> Path:
+    resolved_root = (
+        root_path
+        if root_path is not None
+        else configured_base_path
+        if configured_base_path is not None
+        else Path.cwd().resolve()
+    )
+    return _normalize_source_path(source, base_path=resolved_root)
 
 
 def _normalize_dest_path(dest: str) -> PurePosixPath:
@@ -220,25 +278,23 @@ def _normalize_asset(
     source: str,
     dest: str | None,
     read_only: bool,
-    base_path: Path,
+    base_path: Path | None,
 ) -> _Asset:
-    resolved_source = _normalize_source_path(source, base_path=base_path)
+    normalized_source = Path(source).expanduser()
+    if str(normalized_source).strip() == "":
+        raise ValueError("source path must not be empty")
     resolved_dest = (
         _normalize_dest_path(dest)
         if dest is not None
-        else _default_asset_dest(kind=kind, source=resolved_source)
+        else _default_asset_dest(kind=kind, source=normalized_source)
     )
-
-    if kind == "instruction" and not resolved_source.is_file():
-        raise ValueError("instructions() requires a file source path")
-    if kind == "skill" and not resolved_source.is_dir():
-        raise ValueError("skills() requires a directory source path")
 
     return _Asset(
         kind=kind,
-        source=resolved_source,
+        source=normalized_source,
         dest=resolved_dest,
         read_only=read_only,
+        base_path=base_path.resolve() if base_path is not None else None,
     )
 
 
@@ -312,7 +368,7 @@ def _heartbeat_minutes(schedule: str) -> int:
     )
 
 
-def _group_mount_path(asset: _Asset) -> PurePosixPath:
+def _group_mount_path(asset: _ResolvedAsset) -> PurePosixPath:
     if asset.is_file:
         parent = asset.dest.parent
         if str(parent) == ".":
@@ -410,7 +466,7 @@ def _workspace_ignore_patterns(*, workspace_root: Path) -> list[str]:
 def _workspace_runtime_code_assets(
     *,
     runtime_context: _RuntimeModuleContext,
-) -> list[_Asset]:
+) -> list[_ResolvedAsset]:
     import pathspec
 
     workspace_root = runtime_context.import_root
@@ -419,7 +475,7 @@ def _workspace_runtime_code_assets(
         _workspace_ignore_patterns(workspace_root=workspace_root),
     )
 
-    runtime_assets_by_dest: dict[str, _Asset] = {}
+    runtime_assets_by_dest: dict[str, _ResolvedAsset] = {}
     for source_path in sorted(workspace_root.rglob("*")):
         if not source_path.is_file():
             continue
@@ -443,7 +499,7 @@ def _workspace_runtime_code_assets(
             continue
 
         runtime_dest = _PACKAGE_RUNTIME_DIR / relative_source
-        runtime_assets_by_dest[runtime_dest.as_posix()] = _Asset(
+        runtime_assets_by_dest[runtime_dest.as_posix()] = _ResolvedAsset(
             kind="file",
             source=resolved_source_path,
             dest=runtime_dest,
@@ -452,7 +508,7 @@ def _workspace_runtime_code_assets(
 
     runtime_assets_by_dest.setdefault(
         runtime_context.runtime_entry_dest.as_posix(),
-        _Asset(
+        _ResolvedAsset(
             kind="file",
             source=runtime_context.module_path,
             dest=runtime_context.runtime_entry_dest,
@@ -723,7 +779,10 @@ class Package:
             raise ValueError("package name must not be empty")
 
         self.name = normalized_name
-        self._base_path = (_AGENT_BASE_PATH.get() or Path.cwd()).resolve()
+        configured_base_path = _AGENT_BASE_PATH.get()
+        self._base_path = (
+            configured_base_path.resolve() if configured_base_path is not None else None
+        )
         self._mounts: list[_Asset] = []
         self._files: list[_Asset] = []
         self._skills: list[_Asset] = []
@@ -886,16 +945,26 @@ class Package:
             return f"python {shlex.quote(runtime_context.runtime_entry_relpath.as_posix())}"
         return runtime_context.runtime_command
 
+    def _resolved_assets(
+        self,
+        *,
+        root_path: str | Path | None = None,
+    ) -> list[_ResolvedAsset]:
+        resolved_root_path = _normalize_root_path(root_path)
+        return [
+            asset.resolve(root_path=resolved_root_path) for asset in self._all_assets()
+        ]
+
     def _build_optimization_enabled(self) -> bool:
         return self._optimize_image
 
     def _resolve_assets_to_deploy_assets(
         self,
         *,
-        assets: list[_Asset],
+        assets: list[_ResolvedAsset],
         room_subpath_prefix: str,
     ) -> list[_DeployAsset]:
-        groups: dict[PurePosixPath, list[_Asset]] = {}
+        groups: dict[PurePosixPath, list[_ResolvedAsset]] = {}
         for asset in assets:
             group_path = _group_mount_path(asset)
             grouped_assets = groups.setdefault(group_path, [])
@@ -944,10 +1013,14 @@ class Package:
 
         return resolved_assets
 
-    def _resolve_deploy_assets(self) -> list[_DeployAsset]:
+    def _resolve_deploy_assets(
+        self,
+        *,
+        root_path: str | Path | None = None,
+    ) -> list[_DeployAsset]:
         slug = _slugify_segment(self.name)
         return self._resolve_assets_to_deploy_assets(
-            assets=self._all_assets(),
+            assets=self._resolved_assets(root_path=root_path),
             room_subpath_prefix=f".agents/{slug}/mounts",
         )
 
@@ -969,7 +1042,7 @@ class Package:
         *,
         runtime_context: _RuntimeModuleContext,
         temp_dir: Path | None,
-    ) -> _Asset | None:
+    ) -> _ResolvedAsset | None:
         if self._module_export_name is None:
             return None
         if temp_dir is None:
@@ -988,7 +1061,7 @@ class Package:
             ),
             encoding="utf-8",
         )
-        return _Asset(
+        return _ResolvedAsset(
             kind="file",
             source=entrypoint_source_path,
             dest=_PACKAGE_RUNTIME_DIR / _PACKAGE_ENTRYPOINT_NAME,
@@ -1000,6 +1073,7 @@ class Package:
         *,
         module_path: Path,
         temp_dir: Path | None = None,
+        root_path: str | Path | None = None,
     ) -> tuple[_RuntimeModuleContext, list[_DeployAsset]]:
         runtime_context = _runtime_module_context(module_path=module_path)
         workspace_root = runtime_context.import_root.resolve()
@@ -1009,7 +1083,7 @@ class Package:
             )
         else:
             runtime_assets = [
-                _Asset(
+                _ResolvedAsset(
                     kind="file",
                     source=runtime_context.module_path,
                     dest=runtime_context.runtime_entry_dest,
@@ -1023,7 +1097,7 @@ class Package:
         if entrypoint_asset is not None:
             runtime_assets.append(entrypoint_asset)
         seen_destinations = {asset.dest.as_posix() for asset in runtime_assets}
-        for asset in self._all_assets():
+        for asset in self._resolved_assets(root_path=root_path):
             try:
                 relative_source = asset.source.relative_to(workspace_root)
             except ValueError as exc:
@@ -1047,7 +1121,7 @@ class Package:
                         continue
                     seen_destinations.add(destination_key)
                     runtime_assets.append(
-                        _Asset(
+                        _ResolvedAsset(
                             kind=asset.kind,
                             source=local_path,
                             dest=file_dest,
@@ -1060,7 +1134,7 @@ class Package:
                 continue
             seen_destinations.add(destination_key)
             runtime_assets.append(
-                _Asset(
+                _ResolvedAsset(
                     kind=asset.kind,
                     source=asset.source,
                     dest=runtime_dest,
@@ -1610,16 +1684,18 @@ class MeshagentPackage(PythonPackage):
     def _runtime_base_image(self) -> str:
         return _DEFAULT_MESHAGENT_PACKAGE_BUILD_IMAGE
 
-    def _rules_storage_toolkit(self) -> StorageToolkit:
-        return StorageToolkit(
-            read_only=True,
-            mounts=[
-                StorageToolLocalMount(
-                    path="/",
-                    local_path="/",
-                    read_only=True,
-                )
+    def _rules_storage_toolkit(
+        self,
+        *,
+        deploy_assets: list[_DeployAsset],
+    ) -> StorageToolkit | None:
+        return self._storage_toolkit(
+            deploy_assets=[
+                deploy_asset
+                for deploy_asset in deploy_assets
+                if deploy_asset.asset.kind in {"instruction", "skill"}
             ],
+            read_only=True,
         )
 
     @staticmethod
@@ -1664,12 +1740,26 @@ class MeshagentPackage(PythonPackage):
     def _storage_toolkit(
         self,
         *,
-        room: RoomClient,
         deploy_assets: list[_DeployAsset],
         read_only: bool = False,
+        room: RoomClient | None = None,
     ) -> StorageToolkit | None:
         if len(deploy_assets) == 0:
             return None
+
+        if room is None:
+            return StorageToolkit(
+                read_only=read_only,
+                mounts=[
+                    StorageToolLocalMount(
+                        path=deploy_asset.asset.dest.as_posix(),
+                        local_path=str(deploy_asset.asset.source),
+                        read_only=read_only or deploy_asset.asset.read_only,
+                    )
+                    for deploy_asset in deploy_assets
+                ],
+            )
+
         return StorageToolkit(
             read_only=read_only,
             mounts=[
@@ -1693,10 +1783,20 @@ class MeshagentPackage(PythonPackage):
             return AnthropicOpenAIResponsesStreamAdapter(model=self.model)
         return OpenAIResponsesAdapter(model=self.model)
 
-    def serve(self, *, room: str | None = None) -> None:
-        asyncio.run(self._serve_async(room=room))
+    def serve(
+        self,
+        *,
+        room: str | None = None,
+        root_path: str | Path | None = None,
+    ) -> None:
+        asyncio.run(self._serve_async(room=room, root_path=root_path))
 
-    async def _serve_async(self, *, room: str | None = None) -> None:
+    async def _serve_async(
+        self,
+        *,
+        room: str | None = None,
+        root_path: str | Path | None = None,
+    ) -> None:
         from meshagent.anthropic.mcp import AnthropicMessagesMCPToolkit
         from meshagent.anthropic.web_fetch import WebFetchTool as AnthropicWebFetchTool
         from meshagent.anthropic.web_search import (
@@ -1738,12 +1838,12 @@ class MeshagentPackage(PythonPackage):
             raise ValueError(
                 "MeshagentPackage.serve() requires MESHAGENT_TOKEN to be set"
             )
-        deploy_assets = self._resolve_deploy_assets()
+        deploy_assets = self._resolve_deploy_assets(root_path=root_path)
         self._validate_model_tool_compatibility(deploy_assets=deploy_assets)
         shell_mount_spec = self._shell_mount_spec(deploy_assets=deploy_assets)
         process_llm_adapter = self._llm_adapter()
         channel_llm_adapter = self._llm_adapter()
-        rules_storage_toolkit = self._rules_storage_toolkit()
+        rules_storage_toolkit = self._rules_storage_toolkit(deploy_assets=deploy_assets)
         self_package = self
 
         class _PackageSupervisor(AgentSupervisor):
@@ -1761,6 +1861,7 @@ class MeshagentPackage(PythonPackage):
                     rules: list[str] = []
                     skill_paths = self_package._skill_paths()
                     if len(skill_paths) > 0:
+                        assert rules_storage_toolkit is not None
                         rules.append(
                             "You have access to to following skills which follow the agentskills spec:"
                         )
@@ -1774,6 +1875,7 @@ class MeshagentPackage(PythonPackage):
                             "Use the shell or storage tool to find out more about skills and execute them when they are required"
                         )
                     for instruction_path in self_package._instruction_paths():
+                        assert rules_storage_toolkit is not None
                         rules.extend(
                             await self_package._load_rules_from_storage(
                                 path=instruction_path.as_posix(),
@@ -1791,7 +1893,6 @@ class MeshagentPackage(PythonPackage):
                     toolkits: list[Toolkit] = []
                     storage_toolkit = (
                         self_package._storage_toolkit(
-                            room=self._room,
                             deploy_assets=deploy_assets,
                             read_only=self_package._storage_read_only,
                         )
@@ -1862,7 +1963,6 @@ class MeshagentPackage(PythonPackage):
                         )
                     if self_package._apply_patch_enabled:
                         apply_patch_storage = self_package._storage_toolkit(
-                            room=self._room,
                             deploy_assets=deploy_assets,
                         )
                         assert apply_patch_storage is not None

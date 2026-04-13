@@ -27,20 +27,24 @@ def _write_runtime_module(tmp_path: Path, *, body: str = "print('hello')\n") -> 
     return module_path
 
 
-def test_agent_package_skills_requires_directory(tmp_path: Path) -> None:
+def test_agent_package_skills_validation_is_lazy(tmp_path: Path) -> None:
     file_path = tmp_path / "skill.txt"
     file_path.write_text("not a directory", encoding="utf-8")
 
+    package = Package(name="assistant").skills(str(file_path))
+
     with pytest.raises(ValueError, match="directory"):
-        Package(name="assistant").skills(str(file_path))
+        package._resolve_deploy_assets()
 
 
-def test_agent_package_instructions_requires_file(tmp_path: Path) -> None:
+def test_agent_package_instructions_validation_is_lazy(tmp_path: Path) -> None:
     dir_path = tmp_path / "rules"
     dir_path.mkdir()
 
+    package = Package(name="assistant").instructions(str(dir_path))
+
     with pytest.raises(ValueError, match="file"):
-        Package(name="assistant").instructions(str(dir_path))
+        package._resolve_deploy_assets()
 
 
 def test_root_agents_module_exports_package_and_agent() -> None:
@@ -132,6 +136,42 @@ def test_package_include_workspace_defaults_by_package_type() -> None:
     assert Package.debian(name="debian")._include_workspace is False
     assert Package.python(name="python")._include_workspace is True
     assert Package.meshagent(name="meshagent")._include_workspace is True
+
+
+def test_agent_package_resolves_paths_lazily_from_current_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    instruction_path = project_dir / "rules.txt"
+    instruction_path.write_text("Always be concise.\n", encoding="utf-8")
+    monkeypatch.chdir(project_dir)
+
+    package = Package(name="assistant").instructions("rules.txt")
+
+    assert package._instructions[0].source == Path("rules.txt")
+    assert package._instructions[0].base_path is None
+    deploy_assets = package._resolve_deploy_assets()
+    assert deploy_assets[0].asset.source == instruction_path.resolve()
+
+
+def test_agent_package_resolves_paths_lazily_from_explicit_root_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    instruction_path = project_dir / "rules.txt"
+    instruction_path.write_text("Always be concise.\n", encoding="utf-8")
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    monkeypatch.chdir(cwd_dir)
+
+    package = Package(name="assistant").instructions("rules.txt")
+
+    deploy_assets = package._resolve_deploy_assets(root_path=project_dir)
+    assert deploy_assets[0].asset.source == instruction_path.resolve()
 
 
 def test_runtime_module_deploy_assets_include_filtered_workspace_files(
@@ -514,6 +554,7 @@ async def test_build_package_image_uses_room_image_build_api(
     from meshagent.cli import image as image_module
 
     captured: dict[str, object] = {}
+    monkeypatch.delenv("MESHAGENT_ARCH", raising=False)
 
     def _fake_parse_build_tag(tag: str) -> str:
         captured["tag"] = tag
@@ -946,6 +987,82 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
     assert "meshagent.document_authoring.widget" in toolkit_names
     assert "discovery" in toolkit_names
     assert "meshagent.openai.computer" in toolkit_names
+
+
+@pytest.mark.asyncio
+async def test_meshagent_package_serve_resolves_instructions_from_root_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    instruction_path = project_dir / "rules.txt"
+    instruction_path.write_text("Always be concise.\n", encoding="utf-8")
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    monkeypatch.chdir(cwd_dir)
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        def __init__(self, *, turn_instructions_provider, **kwargs) -> None:
+            del kwargs
+            self.turn_instructions_provider = turn_instructions_provider
+
+        def register_content_scheme(self, scheme) -> None:
+            del scheme
+            return None
+
+    class _FakeThreadAdapter:
+        def __init__(self, *, room, path: str) -> None:
+            del room, path
+
+        def make_toolkit(self):
+            return package_module.Toolkit(name="thread", tools=[])
+
+    class _FakeRoomClient:
+        def __init__(self, *, protocol) -> None:
+            del protocol
+            self.local_participant = object()
+            self.protocol = type(
+                "_Protocol", (), {"wait_for_close": staticmethod(_wait_for_close)}
+            )()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            return None
+
+    async def _wait_for_close() -> None:
+        return None
+
+    async def _fake_start(self) -> None:
+        self._state = "started"
+        process = self.create_thread_process("thread")
+        captured["instructions"] = await process.turn_instructions_provider(None)
+
+    async def _fake_stop(self) -> None:
+        self._state = "stopped"
+
+    monkeypatch.setenv("MESHAGENT_TOKEN", "test-token")
+    monkeypatch.setattr(package_module, "LLMAgentProcess", _FakeProcess)
+    monkeypatch.setattr(package_module, "AgentProcessThreadAdapter", _FakeThreadAdapter)
+    monkeypatch.setattr(package_module, "RoomClient", _FakeRoomClient)
+    monkeypatch.setattr(package_module.AgentSupervisor, "start", _fake_start)
+    monkeypatch.setattr(package_module.AgentSupervisor, "stop", _fake_stop)
+
+    package = Package.meshagent(name="assistant").instructions("rules.txt")
+
+    await package._serve_async(room="demo-room", root_path=project_dir)
+
+    assert captured["instructions"] == (
+        "Always be concise.\n"
+        "based on the previous transcript, take your turn and respond"
+    )
+    assert package._instructions[0].source == Path("rules.txt")
+    assert package._instructions[0].base_path is None
+    assert instruction_path.resolve() != (cwd_dir / "rules.txt").resolve()
 
 
 @pytest.mark.asyncio
