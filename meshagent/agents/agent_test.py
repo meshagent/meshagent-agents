@@ -114,7 +114,9 @@ async def test_remote_room_tool_uses_non_stream_call_without_event_handler() -> 
 
 
 def test_remote_room_tool_defaults_to_strict_when_metadata_is_missing() -> None:
+    room = _FakeRoom(agents=_FakeAgentsClient(response=None))
     tool = RemoteRoomTool(
+        room=room,
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={
@@ -129,7 +131,9 @@ def test_remote_room_tool_defaults_to_strict_when_metadata_is_missing() -> None:
 
 
 def test_remote_room_tool_preserves_explicit_non_strict_metadata() -> None:
+    room = _FakeRoom(agents=_FakeAgentsClient(response=None))
     tool = RemoteRoomTool(
+        room=room,
         toolkit_name="remote_tools",
         name="computer_call",
         input_schema={

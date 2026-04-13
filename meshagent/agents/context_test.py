@@ -4,7 +4,7 @@ from meshagent.api import RoomException
 
 from meshagent.agents.chat import ChatThreadContext
 from meshagent.agents.context import AgentSessionContext, TaskContext
-from meshagent.agents.agent import Agent
+from meshagent.agents.agent import SingleRoomAgent
 
 
 def test_agent_session_context_does_not_support_binary_inputs_by_default() -> None:
@@ -58,7 +58,7 @@ async def test_agent_session_context_async_manager_calls_start_and_close() -> No
     assert context.closed == 1
 
 
-class _LegacyContextAgent(Agent):
+class _LegacyContextAgent(SingleRoomAgent):
     async def init_chat_context(self) -> AgentSessionContext:
         ctx = AgentSessionContext(system_role=None)
         ctx.metadata["source"] = "legacy"

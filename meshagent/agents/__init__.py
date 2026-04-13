@@ -1,8 +1,11 @@
-from .agent import (
-    Agent,
-    AgentSessionContext,
-    RequiredToolkit,
-    SingleRoomAgent,
+from .agent import AgentSessionContext, RequiredToolkit, SingleRoomAgent
+from .package import (
+    DebianPackage,
+    MeshagentPackage,
+    Package,
+    PythonPackage,
+    deploy_package,
+    run_package,
 )
 
 from .context import TaskContext
@@ -21,11 +24,11 @@ from .queue_channel import QueueChannel
 from .toolkit_channel import ToolkitChannel
 from .thread_schema import thread_schema, thread_list_schema
 from .mcp import MCPHeader, MCPServerConfig, MCPToolkitClientOptions
+from .process import ContentScheme
 from .version import __version__
 
 
 __all__ = [
-    Agent,
     TaskContext,
     AgentSessionContext,
     RequiredToolkit,
@@ -33,6 +36,12 @@ __all__ = [
     ThreadedTaskRunner,
     ThreadingMode,
     SingleRoomAgent,
+    Package,
+    DebianPackage,
+    PythonPackage,
+    MeshagentPackage,
+    deploy_package,
+    run_package,
     connect_development_agent,
     Listener,
     ListenerContext,
@@ -49,6 +58,7 @@ __all__ = [
     ToolkitChannel,
     thread_schema,
     thread_list_schema,
+    ContentScheme,
     MCPHeader,
     MCPServerConfig,
     MCPToolkitClientOptions,

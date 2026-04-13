@@ -98,95 +98,6 @@ class RemoteRoomTool(LocalRoomTool):
         return result
 
 
-class Agent:
-    def __init__(
-        self,
-        *,
-        name: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        requires: Optional[list[Requirement]] = None,
-        annotations: Optional[list[str]] = None,
-        skills_dirs: Optional[list[str]] = None,
-    ):
-        if name is not None:
-            logger.warning(
-                f"agent name property is deprecated and will be removed in a future version {name}"
-            )
-
-        if title is None:
-            title = name
-        self._title = title
-        if description is None:
-            description = ""
-
-        self._description = description
-        if requires is None:
-            requires = []
-
-        self._requires = requires
-
-        if annotations is None:
-            annotations = []
-
-        self._annotations = annotations
-        self._skills_dirs = None
-
-    def get_requirements(self) -> list[Requirement]:
-        return self._requires
-
-    @property
-    def description(self):
-        return self._description
-
-    @property
-    def title(self):
-        return self._title
-
-    @property
-    def requires(self):
-        return self._requires
-
-    @property
-    def annotations(self):
-        return self._annotations
-
-    async def init_session(self) -> AgentSessionContext:
-        legacy_initializer = type(self).init_chat_context
-        if legacy_initializer is not Agent.init_chat_context:
-            cls = type(self)
-            if cls not in _legacy_init_chat_context_warned:
-                warnings.warn(
-                    (
-                        f"{cls.__name__}.init_chat_context() is deprecated and will be removed in a future release. "
-                        "Override init_session() instead."
-                    ),
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                _legacy_init_chat_context_warned.add(cls)
-            return await legacy_initializer(self)
-        return AgentSessionContext()
-
-    # Backwards compatibility for existing subclasses overriding init_chat_context.
-    async def init_chat_context(self) -> AgentSessionContext:
-        warnings.warn(
-            "init_chat_context() is deprecated and will be removed in a future release. Use init_session() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return AgentSessionContext()
-
-    def to_json(self) -> dict:
-        return {
-            "name": self.name,
-            "title": self.title,
-            "description": self.description,
-            "requires": list(map(lambda x: x.to_json(), self.requires)),
-            "annotations": self.annotations,
-        }
-
-
 async def install_required_table(*, room: RoomClient, table: RequiredTable):
     await room.database.create_table_with_schema(
         name=table.name,
@@ -251,26 +162,93 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     await room.database.optimize(table=table.name, namespace=table.namespace)
 
 
-class SingleRoomAgent(Agent):
+class SingleRoomAgent:
     def __init__(
         self,
         *,
-        name=None,
-        title=None,
-        description=None,
-        requires=None,
+        name: Optional[str] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        requires: Optional[list[Requirement]] = None,
         annotations: Optional[list[str]] = None,
-    ):
-        super().__init__(
-            name=name,
-            title=title,
-            description=description,
-            requires=requires,
-            annotations=annotations,
-        )
+    ) -> None:
+        if name is not None:
+            logger.warning(
+                "agent name property is deprecated and will be removed in a future version %s",
+                name,
+            )
+
+        if title is None:
+            title = name
+        if description is None:
+            description = ""
+        if requires is None:
+            requires = []
+        if annotations is None:
+            annotations = []
+
+        self._name = name
+        self._title = title
+        self._description = description
+        self._requires = requires
+        self._annotations = annotations
         self._room = None
         self._exposed_toolkits: list[Toolkit] = []
         self._hosted_exposed_toolkits: list[_RemoteToolkitWrapper] = []
+
+    def get_requirements(self) -> list[Requirement]:
+        return self._requires
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    @property
+    def title(self) -> str | None:
+        return self._title
+
+    @property
+    def requires(self) -> list[Requirement]:
+        return self._requires
+
+    @property
+    def annotations(self) -> list[str]:
+        return self._annotations
+
+    async def init_session(self) -> AgentSessionContext:
+        legacy_initializer = type(self).init_chat_context
+        if legacy_initializer is not SingleRoomAgent.init_chat_context:
+            cls = type(self)
+            if cls not in _legacy_init_chat_context_warned:
+                warnings.warn(
+                    (
+                        f"{cls.__name__}.init_chat_context() is deprecated and will be removed in a future release. "
+                        "Override init_session() instead."
+                    ),
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                _legacy_init_chat_context_warned.add(cls)
+            return await legacy_initializer(self)
+        return AgentSessionContext()
+
+    # Backwards compatibility for existing subclasses overriding init_chat_context.
+    async def init_chat_context(self) -> AgentSessionContext:
+        warnings.warn(
+            "init_chat_context() is deprecated and will be removed in a future release. Use init_session() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return AgentSessionContext()
+
+    def to_json(self) -> dict:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "requires": [requirement.to_json() for requirement in self.requires],
+            "annotations": self.annotations,
+        }
 
     async def get_exposed_toolkits(self) -> list[Toolkit]:
         return []
@@ -314,7 +292,16 @@ class SingleRoomAgent(Agent):
 
     @property
     def name(self) -> str:
-        return self._room.local_participant.get_attribute("name")
+        room = self._room
+        if room is not None:
+            room_name = room.local_participant.get_attribute("name")
+            if isinstance(room_name, str) and room_name.strip() != "":
+                return room_name
+
+        if isinstance(self._name, str) and self._name.strip() != "":
+            return self._name
+
+        raise RoomException("agent name is only available after the agent starts")
 
     async def install_requirements(self, participant_id: Optional[str] = None):
         schemas_by_name = dict[str, StorageEntry]()

@@ -1,7 +1,9 @@
 import asyncio
 import re
 import uuid
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 
 import pytest
@@ -73,6 +75,7 @@ from meshagent.agents.process import (
     AgentProcess,
     AgentSupervisor,
     Channel,
+    ContentScheme,
     LLMAgentProcess,
     Message,
 )
@@ -816,6 +819,44 @@ class _DownloadRecordingRoom:
     def __init__(self, *, files: dict[str, FileContent] | None = None) -> None:
         self.storage = _DownloadRecordingStorage(files=files or {})
         self.local_participant = _ThreadLocalParticipant()
+
+
+def _normalize_room_content_path(*, url: str) -> str:
+    parsed_url = urlparse(url)
+    if parsed_url.scheme != "room":
+        raise ValueError(f"unsupported room file url: {url}")
+
+    raw_path = f"{parsed_url.netloc}{parsed_url.path}".lstrip("/")
+    normalized = PurePosixPath("/" + raw_path).as_posix().strip("/")
+    if normalized == "":
+        raise ValueError("room file url must reference a non-root storage path")
+
+    if any(part in {".", ".."} for part in PurePosixPath(normalized).parts):
+        raise ValueError("room file url cannot contain '.' or '..' segments")
+
+    return normalized
+
+
+def _room_content_scheme(*, room: _DownloadRecordingRoom) -> ContentScheme:
+    async def _download(url: str) -> FileContent:
+        path = _normalize_room_content_path(url=url)
+        return await room.storage.download(path=path)
+
+    return ContentScheme(prefix="room://", download=_download)
+
+
+def _make_llm_agent_process(
+    *,
+    room: _DownloadRecordingRoom,
+    process_cls: type[LLMAgentProcess] = LLMAgentProcess,
+    **kwargs,
+) -> LLMAgentProcess:
+    process = process_cls(
+        participant=room.local_participant,
+        **kwargs,
+    )
+    process.register_content_scheme(_room_content_scheme(room=room))
+    return process
 
 
 class _ThreadParticipant(RemoteParticipant):
@@ -1731,9 +1772,11 @@ def test_agent_tool_call_ended_serializes_result_and_error() -> None:
 async def test_llm_agent_process_passes_turn_id_to_restore_session_context() -> None:
     adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
-    process = _RestoringLLMAgentProcess(
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        process_cls=_RestoringLLMAgentProcess,
         thread_id="thread-1",
-        room=_DownloadRecordingRoom(),
         llm_adapter=adapter,
     )
 
@@ -1764,6 +1807,7 @@ async def test_llm_agent_process_passes_turn_id_to_restore_session_context() -> 
     assert len(process.restore_calls) == 1
     assert process.restore_calls[0]["turn_id"] == turn_id
     assert process.restore_calls[0]["session_context"] is adapter.session
+    assert adapter.calls[0]["caller"] is room.local_participant
 
     await process.stop(supervisor)
 
@@ -1772,9 +1816,9 @@ async def test_llm_agent_process_passes_turn_id_to_restore_session_context() -> 
 async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
     adapter = _PublishingLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -1823,9 +1867,9 @@ async def test_llm_agent_process_uses_builder_returned_room_bound_toolkits() -> 
         del turns
         return [Toolkit(name="dynamic", room=room, tools=[_RoomBindingTool(room=room)])]
 
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="thread-1",
         llm_adapter=adapter,
         turn_toolkits_builder=_build_toolkits,
     )
@@ -1858,9 +1902,9 @@ async def test_llm_agent_process_forwards_custom_retry_events_to_thread_adapter(
     thread_adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
     llm_adapter = _CustomEventLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=thread_adapter,
     )
@@ -1912,9 +1956,9 @@ async def test_llm_agent_process_processes_queued_steer_messages_before_turn_end
 ):
     adapter = _QueuedSteerLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2019,9 +2063,9 @@ async def test_llm_agent_process_processes_queued_steer_messages_before_turn_end
 async def test_llm_agent_process_applies_queued_steer_at_tool_boundary() -> None:
     adapter = _ToolBoundarySteeringLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2106,9 +2150,9 @@ async def test_llm_agent_process_applies_queued_steer_at_tool_boundary() -> None
 async def test_llm_agent_process_rejects_steer_with_thread_id_on_event() -> None:
     adapter = _RecordingLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2151,9 +2195,9 @@ async def test_llm_agent_process_continues_queued_steer_when_turn_is_interrupted
 ):
     adapter = _QueuedSteerLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2268,9 +2312,9 @@ async def test_llm_agent_process_sets_thread_and_turn_metadata_during_adapter_ca
     session = _LifecycleSession()
     adapter = _RecordingLLMAdapter(session=session)
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2306,9 +2350,9 @@ async def test_llm_agent_process_calls_on_turn_steer_before_interrupt_continuati
 ):
     adapter = _InterruptAwareQueuedSteerLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2385,9 +2429,9 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
 ):
     adapter = _CancellationIgnoringLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2481,9 +2525,9 @@ async def test_llm_agent_process_waits_for_pending_tool_call_approvals(
 ) -> None:
     adapter = _ApprovalCapableLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2556,9 +2600,9 @@ async def test_llm_agent_process_waits_for_pending_tool_call_approvals(
 async def test_llm_agent_process_clears_pending_approvals_when_turn_ends() -> None:
     adapter = _ApprovalCapableLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2609,9 +2653,9 @@ async def test_llm_agent_process_appends_remote_file_urls_as_image_and_file_inpu
     session = _AttachmentRecordingSession()
     adapter = _RecordingLLMAdapter(session=session)
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2674,9 +2718,9 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
         }
     )
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="thread-1",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="thread-1",
         llm_adapter=adapter,
     )
 
@@ -2746,7 +2790,7 @@ def test_llm_agent_process_requires_agent_process_thread_adapter() -> None:
     with pytest.raises(TypeError, match="AgentProcessThreadAdapter"):
         LLMAgentProcess(
             thread_id="/threads/test.thread",
-            room=room,
+            participant=room.local_participant,
             llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
             thread_adapter=_GenericThreadAdapter(
                 room=room,
@@ -2843,9 +2887,9 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
     adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
     llm_adapter = _ThreadPublishingLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=adapter,
     )
@@ -5151,9 +5195,9 @@ async def test_llm_agent_process_thread_adapter_inserts_applied_steer_before_pos
     thread_adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
     llm_adapter = _ToolBoundaryThreadOrderingLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=thread_adapter,
     )
@@ -5386,9 +5430,9 @@ async def test_llm_agent_process_thread_adapter_restores_thread_state(
     adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
     llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=adapter,
     )
@@ -5459,9 +5503,9 @@ async def test_llm_agent_process_thread_adapter_restore_prefers_message_role(
     adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
     llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=adapter,
     )
@@ -5523,9 +5567,9 @@ async def test_llm_agent_process_clear_thread_resets_thread_and_session_context(
     adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
     llm_adapter = _ClearableLLMAdapter()
     supervisor = _RecordingSupervisor()
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
+    process = _make_llm_agent_process(
         room=room,
+        thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=adapter,
     )

@@ -7,11 +7,10 @@ import mimetypes
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable, Literal, Optional, TypeVar
 from urllib.parse import urlparse
 
-from meshagent.api import Participant, RoomClient
+from meshagent.api import Participant
 from meshagent.api.messaging import FileContent
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
@@ -95,6 +94,17 @@ TurnToolkitsBuilder = Callable[
     [Participant | None, str, list["TurnStart | TurnSteer"]],
     Awaitable[list[Toolkit]],
 ]
+ContentDownload = Callable[[str], Awaitable[FileContent]]
+
+
+@dataclass(frozen=True, slots=True)
+class ContentScheme:
+    prefix: str
+    download: ContentDownload
+
+    def __post_init__(self) -> None:
+        if self.prefix == "":
+            raise ValueError("content scheme prefix cannot be empty")
 
 
 @dataclass(slots=True)
@@ -718,7 +728,7 @@ class LLMAgentProcess(AgentProcess):
         self,
         *,
         thread_id: str,
-        room: RoomClient,
+        participant: Participant,
         llm_adapter: LLMAdapter,
         toolkits: Optional[list[Toolkit]] = None,
         thread_adapter: AgentProcessThreadAdapter | None = None,
@@ -750,7 +760,8 @@ class LLMAgentProcess(AgentProcess):
         self._priority_turn: _QueuedTurn | None = None
         self._active_turn_queue: asyncio.Queue[_QueuedTurnMessage] | None = None
         self._toolkits = list(toolkits or [])
-        self._room = room
+        self._participant = participant
+        self._content_schemes: list[ContentScheme] = []
         self._pending_tool_call_approvals: dict[str, asyncio.Future[bool]] = {}
         self._active_turn_sender: Participant | None = None
         self._pending_status_messages: list[_QueuedTurnMessage] = []
@@ -787,6 +798,9 @@ class LLMAgentProcess(AgentProcess):
     @property
     def toolkits(self) -> list[Toolkit]:
         return self._toolkits
+
+    def register_content_scheme(self, scheme: ContentScheme) -> None:
+        self._content_schemes.append(scheme)
 
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
         thread_adapter = self.thread_adapter
@@ -1163,25 +1177,22 @@ class LLMAgentProcess(AgentProcess):
         return resolved_toolkits
 
     @staticmethod
-    def _normalize_room_storage_path(*, url: str) -> str:
-        parsed_url = urlparse(url)
-        if parsed_url.scheme != "room":
-            raise ValueError(f"unsupported room file url: {url}")
-
-        raw_path = f"{parsed_url.netloc}{parsed_url.path}".lstrip("/")
-        normalized = PurePosixPath("/" + raw_path).as_posix().strip("/")
-        if normalized == "":
-            raise ValueError("room file url must reference a non-root storage path")
-
-        if any(part in {".", ".."} for part in PurePosixPath(normalized).parts):
-            raise ValueError("room file url cannot contain '.' or '..' segments")
-
-        return normalized
-
-    @staticmethod
     def _guess_url_mime_type(*, url: str) -> str | None:
         guessed_mime_type, _ = mimetypes.guess_type(urlparse(url).path)
         return guessed_mime_type
+
+    def _resolve_content_scheme(self, *, url: str) -> ContentScheme | None:
+        matched_scheme: ContentScheme | None = None
+        matched_prefix_length = -1
+        for scheme in self._content_schemes:
+            if not url.startswith(scheme.prefix):
+                continue
+            prefix_length = len(scheme.prefix)
+            if prefix_length <= matched_prefix_length:
+                continue
+            matched_scheme = scheme
+            matched_prefix_length = prefix_length
+        return matched_scheme
 
     def _append_downloaded_file_content(
         self,
@@ -1242,9 +1253,9 @@ class LLMAgentProcess(AgentProcess):
         url: str,
         sender: Participant | None,
     ) -> None:
-        if urlparse(url).scheme == "room":
-            room_path = self._normalize_room_storage_path(url=url)
-            file_content = await self._room.storage.download(path=room_path)
+        content_scheme = self._resolve_content_scheme(url=url)
+        if content_scheme is not None:
+            file_content = await content_scheme.download(url)
             self._append_downloaded_file_content(
                 session=session,
                 file_content=file_content,
@@ -1536,7 +1547,7 @@ class LLMAgentProcess(AgentProcess):
                 self.llm_adapter.next(
                     context=session,
                     toolkits=combined_toolkits,
-                    caller=self._room.local_participant,
+                    caller=self._participant,
                     event_handler=handle_event,
                     steering_callback=lambda: self._apply_pending_turn_steers(
                         session=session
