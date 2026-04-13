@@ -536,6 +536,40 @@ def _emit_status(
         status_callback(message)
 
 
+def _bind_room_status_callback(
+    *,
+    room_client: RoomClient,
+    status_callback: _StatusCallback | None,
+) -> None:
+    if status_callback is None:
+        return
+
+    def _on_room_status(**kwargs: object) -> None:
+        status = kwargs.get("status")
+        message = kwargs.get("message")
+        status_text = status.strip() if isinstance(status, str) else ""
+        message_text = message.strip() if isinstance(message, str) else ""
+        if status_text != "" and message_text != "":
+            _emit_status(
+                status_callback=status_callback,
+                message=f"Room status {status_text}: {message_text}",
+            )
+            return
+        if message_text != "":
+            _emit_status(
+                status_callback=status_callback,
+                message=f"Room status {message_text}",
+            )
+            return
+        if status_text != "":
+            _emit_status(
+                status_callback=status_callback,
+                message=f"Room status {status_text}",
+            )
+
+    room_client.on("room.status", _on_room_status)
+
+
 def _has_chat_channel(*, channels: list[str]) -> bool:
     return "chat" in channels
 
@@ -2127,6 +2161,16 @@ async def deploy_package(
             project_id=resolved_project_id,
             room=resolved_room,
         )
+        room_client = RoomClient(
+            protocol=WebSocketClientProtocol(
+                url=connection.room_url,
+                token=connection.jwt,
+            )
+        )
+        _bind_room_status_callback(
+            room_client=room_client,
+            status_callback=status_callback,
+        )
         module_path = package._resolved_runtime_module_path(module_path=None)
         deploy_assets = package._resolve_deploy_assets()
         with tempfile.TemporaryDirectory(
@@ -2143,12 +2187,7 @@ async def deploy_package(
                 runtime_context=runtime_context,
                 container_image=container_image,
             )
-            async with RoomClient(
-                protocol=WebSocketClientProtocol(
-                    url=websocket_room_url(room_name=resolved_room),
-                    token=connection.jwt,
-                )
-            ) as room_client:
+            async with room_client:
                 _emit_status(
                     status_callback=status_callback,
                     message=(
@@ -2263,6 +2302,16 @@ async def run_package(
             project_id=resolved_project_id,
             room=resolved_room,
         )
+        room_client = RoomClient(
+            protocol=WebSocketClientProtocol(
+                url=connection.room_url,
+                token=connection.jwt,
+            )
+        )
+        _bind_room_status_callback(
+            room_client=room_client,
+            status_callback=status_callback,
+        )
         module_path = package._resolved_runtime_module_path(module_path=None)
         deploy_assets = package._resolve_deploy_assets()
         with tempfile.TemporaryDirectory(
@@ -2280,12 +2329,7 @@ async def run_package(
                 container_image=container_image,
             )
 
-            async with RoomClient(
-                protocol=WebSocketClientProtocol(
-                    url=websocket_room_url(room_name=resolved_room),
-                    token=connection.jwt,
-                )
-            ) as room_client:
+            async with room_client:
                 _emit_status(
                     status_callback=status_callback,
                     message=(

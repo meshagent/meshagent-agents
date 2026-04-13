@@ -1026,6 +1026,10 @@ async def test_agent_package_run_uploads_assets_and_starts_container(
             self.storage = _FakeRoomStorage()
             self.containers = _FakeContainers()
 
+        def on(self, event_name: str, func) -> None:
+            del event_name, func
+            return None
+
         async def __aenter__(self):
             return self
 
@@ -1037,7 +1041,14 @@ async def test_agent_package_run_uploads_assets_and_starts_container(
         async def connect_room(self, *, project_id: str, room: str):
             assert project_id == "project-123"
             assert room == "demo-room"
-            return type("_Connection", (), {"jwt": "room-jwt"})()
+            return type(
+                "_Connection",
+                (),
+                {
+                    "jwt": "room-jwt",
+                    "room_url": "ws://example.test/rooms/demo-room",
+                },
+            )()
 
         async def close(self) -> None:
             return None
@@ -1167,6 +1178,10 @@ async def test_run_package_uses_built_image_when_commands_configured(
             self.storage = _Storage()
             self.containers = _FakeContainers()
 
+        def on(self, event_name: str, func) -> None:
+            del event_name, func
+            return None
+
         async def __aenter__(self):
             return self
 
@@ -1178,7 +1193,14 @@ async def test_run_package_uses_built_image_when_commands_configured(
         async def connect_room(self, *, project_id: str, room: str):
             assert project_id == "project-123"
             assert room == "demo-room"
-            return type("_Connection", (), {"jwt": "room-jwt"})()
+            return type(
+                "_Connection",
+                (),
+                {
+                    "jwt": "room-jwt",
+                    "room_url": "ws://example.test/rooms/demo-room",
+                },
+            )()
 
         async def close(self) -> None:
             return None
@@ -1243,7 +1265,14 @@ async def test_agent_package_deploy_builds_service_spec_with_kind(
         async def connect_room(self, *, project_id: str, room: str):
             assert project_id == "project-123"
             assert room == "demo-room"
-            return type("_Connection", (), {"jwt": "room-jwt"})()
+            return type(
+                "_Connection",
+                (),
+                {
+                    "jwt": "room-jwt",
+                    "room_url": "ws://example.test/rooms/demo-room",
+                },
+            )()
 
         async def list_room_services(self, *, project_id: str, room_name: str):
             raise AssertionError(
@@ -1270,6 +1299,10 @@ async def test_agent_package_deploy_builds_service_spec_with_kind(
         def __init__(self, *, protocol) -> None:
             del protocol
             self.storage = _FakeRoomStorage()
+
+        def on(self, event_name: str, func) -> None:
+            del event_name, func
+            return None
 
         async def __aenter__(self):
             return self
@@ -1331,7 +1364,14 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
         async def connect_room(self, *, project_id: str, room: str):
             assert project_id == "project-123"
             assert room == "demo-room"
-            return type("_Connection", (), {"jwt": "room-jwt"})()
+            return type(
+                "_Connection",
+                (),
+                {
+                    "jwt": "room-jwt",
+                    "room_url": "ws://example.test/rooms/demo-room",
+                },
+            )()
 
         async def create_room_service(
             self, *, project_id: str, service, room_name: str
@@ -1353,6 +1393,10 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
         def __init__(self, *, protocol) -> None:
             del protocol
             self.storage = _FakeRoomStorage()
+
+        def on(self, event_name: str, func) -> None:
+            del event_name, func
+            return None
 
         async def __aenter__(self):
             return self
@@ -1417,7 +1461,14 @@ async def test_agent_package_deploy_updates_existing_service_by_service_id_annot
         async def connect_room(self, *, project_id: str, room: str):
             assert project_id == "project-123"
             assert room == "demo-room"
-            return type("_Connection", (), {"jwt": "room-jwt"})()
+            return type(
+                "_Connection",
+                (),
+                {
+                    "jwt": "room-jwt",
+                    "room_url": "ws://example.test/rooms/demo-room",
+                },
+            )()
 
         async def create_room_service(
             self, *, project_id: str, service, room_name: str
@@ -1460,6 +1511,10 @@ async def test_agent_package_deploy_updates_existing_service_by_service_id_annot
         def __init__(self, *, protocol) -> None:
             del protocol
             self.storage = _FakeRoomStorage()
+
+        def on(self, event_name: str, func) -> None:
+            del event_name, func
+            return None
 
         async def __aenter__(self):
             return self
