@@ -5,6 +5,8 @@ import types
 
 import pytest
 
+from meshagent.tools.storage import StorageToolLocalMount, StorageToolkit
+
 
 class _AsyncTextReader:
     def __init__(self, path: Path, *, encoding: str):
@@ -61,6 +63,13 @@ def _load_skills_module():
 skills = _load_skills_module()
 
 
+def _root_storage_toolkit() -> StorageToolkit:
+    return StorageToolkit(
+        read_only=True,
+        mounts=[StorageToolLocalMount(path="/", local_path="/")],
+    )
+
+
 @pytest.mark.asyncio
 async def test_to_prompt_includes_missing_skill_and_logs_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -70,7 +79,10 @@ async def test_to_prompt_includes_missing_skill_and_logs_warning(
 
     caplog.set_level("WARNING")
 
-    prompt = await skills.to_prompt([missing_skill_dir])
+    prompt = await skills.to_prompt(
+        [missing_skill_dir],
+        storage_toolkit=_root_storage_toolkit(),
+    )
 
     assert "<available_skills>" in prompt
     assert "<name>" in prompt
@@ -89,7 +101,11 @@ async def test_to_prompt_raises_for_missing_skill_when_missing_ok_is_false(
     missing_skill_dir.mkdir()
 
     with pytest.raises(skills.ParseError, match="SKILL.md not found in"):
-        await skills.to_prompt([missing_skill_dir], missing_ok=False)
+        await skills.to_prompt(
+            [missing_skill_dir],
+            storage_toolkit=_root_storage_toolkit(),
+            missing_ok=False,
+        )
 
 
 @pytest.mark.asyncio
@@ -102,10 +118,31 @@ async def test_to_prompt_keeps_valid_skill_entries_unchanged(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    prompt = await skills.to_prompt([skill_dir])
+    prompt = await skills.to_prompt(
+        [skill_dir],
+        storage_toolkit=_root_storage_toolkit(),
+    )
 
     assert "<name>\npdf-reader\n</name>" in prompt
     assert "<description>\nRead PDF files\n</description>" in prompt
+    assert str(skill_md) in prompt
+
+
+@pytest.mark.asyncio
+async def test_to_prompt_defaults_to_root_local_storage_when_toolkit_is_omitted(
+    tmp_path: Path,
+) -> None:
+    skill_dir = tmp_path / "pdf-reader"
+    skill_dir.mkdir()
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    prompt = await skills.to_prompt([skill_dir])
+
+    assert "<name>\npdf-reader\n</name>" in prompt
     assert str(skill_md) in prompt
 
 
@@ -122,6 +159,7 @@ async def test_to_prompt_can_retarget_skill_locations(tmp_path: Path) -> None:
 
     prompt = await skills.to_prompt(
         [skills_root],
+        storage_toolkit=_root_storage_toolkit(),
         location_mapper=lambda location: location.as_posix().replace(
             skills_root.as_posix(),
             "/skills",
@@ -148,7 +186,10 @@ async def test_to_prompt_includes_unloadable_skill_error_when_frontmatter_is_inv
 
     caplog.set_level("WARNING")
 
-    prompt = await skills.to_prompt([skill_dir])
+    prompt = await skills.to_prompt(
+        [skill_dir],
+        storage_toolkit=_root_storage_toolkit(),
+    )
 
     assert "<name>\nbroken-skill\n</name>" in prompt
     assert "Configured skill could not be loaded:" in prompt
@@ -201,14 +242,15 @@ async def test_to_prompt_discovers_subskills_when_parent_has_no_skill_md(
         encoding="utf-8",
     )
 
-    prompt = await skills.to_prompt([skills_root])
-    resolved_second_skill_md = await skills.find_skill_md(second_skill)
+    prompt = await skills.to_prompt(
+        [skills_root],
+        storage_toolkit=_root_storage_toolkit(),
+    )
 
     assert "<name>\ncsv-reader\n</name>" in prompt
     assert "<name>\npdf-reader\n</name>" in prompt
     assert str(first_skill_md) in prompt
-    assert resolved_second_skill_md is not None
-    assert str(resolved_second_skill_md) in prompt
+    assert str(second_skill_md) in prompt
 
 
 @pytest.mark.asyncio
@@ -236,7 +278,10 @@ async def test_to_prompt_keeps_discovered_valid_skills_when_one_subskill_is_inva
 
     caplog.set_level("WARNING")
 
-    prompt = await skills.to_prompt([skills_root])
+    prompt = await skills.to_prompt(
+        [skills_root],
+        storage_toolkit=_root_storage_toolkit(),
+    )
 
     assert "<name>\npdf-reader\n</name>" in prompt
     assert str(valid_skill_md) in prompt
@@ -245,3 +290,34 @@ async def test_to_prompt_keeps_discovered_valid_skills_when_one_subskill_is_inva
     assert "Invalid YAML in frontmatter:" in prompt
     assert str(invalid_skill_md) in prompt
     assert f"unable to load skill from {invalid_skill_md}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_to_prompt_uses_provided_storage_toolkit_mounts(
+    tmp_path: Path,
+) -> None:
+    backing_root = tmp_path / "backing"
+    skill_dir = backing_root / "pdf-reader"
+    skill_dir.mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    prompt = await skills.to_prompt(
+        [Path("/skills/pdf-reader")],
+        storage_toolkit=StorageToolkit(
+            read_only=True,
+            mounts=[
+                StorageToolLocalMount(
+                    path="/skills",
+                    local_path=str(backing_root),
+                )
+            ],
+        ),
+    )
+
+    assert "<name>\npdf-reader\n</name>" in prompt
+    assert str(Path("/skills/pdf-reader/SKILL.md")) in prompt
+    assert str(skill_md) not in prompt

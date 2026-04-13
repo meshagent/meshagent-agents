@@ -15,6 +15,7 @@ import strictyaml
 from dataclasses import dataclass, field
 import unicodedata
 
+from meshagent.tools.storage import StorageToolLocalMount, StorageToolkit
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,96 @@ async def read_properties(skill_dir: Path) -> SkillProperties:
     return await _read_properties_from_skill_md(skill_md)
 
 
+def _normalize_prompt_path(path: Path) -> Path:
+    normalized = Path(path).expanduser()
+    if not normalized.is_absolute():
+        normalized = Path.cwd() / normalized
+    return normalized.absolute()
+
+
+def _prompt_storage_toolkit(
+    storage_toolkit: StorageToolkit | None,
+) -> StorageToolkit:
+    if storage_toolkit is not None:
+        return storage_toolkit
+
+    return StorageToolkit(
+        read_only=True,
+        mounts=[StorageToolLocalMount(path="/", local_path="/")],
+    )
+
+
+async def _find_skill_md_in_storage(
+    *,
+    storage_toolkit: StorageToolkit,
+    skill_dir: Path,
+) -> Optional[Path]:
+    entries = await storage_toolkit.list_entries(path=skill_dir.as_posix())
+    files = {entry.name for entry in entries if not entry.is_folder}
+
+    for name in ("SKILL.md", "skill.md"):
+        if name in files:
+            return skill_dir / name
+
+    return None
+
+
+async def _discover_skill_folders_in_storage(
+    *,
+    storage_toolkit: StorageToolkit,
+    path: Path,
+) -> list[Path]:
+    entries = await storage_toolkit.list_entries(path=path.as_posix())
+
+    discovered: list[Path] = []
+    for entry in sorted(entries, key=lambda item: item.name):
+        if not entry.is_folder:
+            continue
+
+        child = path / entry.name
+        if (
+            await _find_skill_md_in_storage(
+                storage_toolkit=storage_toolkit,
+                skill_dir=child,
+            )
+            is not None
+        ):
+            discovered.append(child)
+
+    return discovered
+
+
+async def _read_properties_from_skill_md_in_storage(
+    *,
+    storage_toolkit: StorageToolkit,
+    skill_md: Path,
+) -> SkillProperties:
+    content = await storage_toolkit.read_file(path=skill_md.as_posix())
+    metadata, _ = parse_frontmatter(content.data.decode("utf-8"))
+
+    if "name" not in metadata:
+        raise ValidationError("Missing required field in frontmatter: name")
+    if "description" not in metadata:
+        raise ValidationError("Missing required field in frontmatter: description")
+
+    name = metadata["name"]
+    description = metadata["description"]
+
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError("Field 'name' must be a non-empty string")
+    if not isinstance(description, str) or not description.strip():
+        raise ValidationError("Field 'description' must be a non-empty string")
+
+    return SkillProperties(
+        name=name.strip(),
+        description=description.strip(),
+        license=metadata.get("license"),
+        compatibility=metadata.get("compatibility"),
+        allowed_tools=metadata.get("allowed-tools"),
+        metadata=metadata.get("metadata"),
+    )
+
+
 """Generate <available_skills> XML prompt block for agent system prompts."""
 
 
@@ -229,11 +320,15 @@ async def _append_skill_prompt_entry(
     *,
     lines: list[str],
     skill_md_path: Path,
+    storage_toolkit: StorageToolkit,
     missing_ok: bool,
     location_mapper: SkillLocationMapper | None,
 ) -> None:
     try:
-        props = await _read_properties_from_skill_md(skill_md_path)
+        props = await _read_properties_from_skill_md_in_storage(
+            storage_toolkit=storage_toolkit,
+            skill_md=skill_md_path,
+        )
     except (OSError, ParseError, ValidationError, UnicodeError) as exc:
         if not missing_ok:
             raise
@@ -273,6 +368,7 @@ def _render_prompt_location(
 async def to_prompt(
     skill_dirs: list[Path],
     *,
+    storage_toolkit: StorageToolkit | None = None,
     missing_ok: bool = True,
     location_mapper: SkillLocationMapper | None = None,
 ) -> str:
@@ -284,6 +380,8 @@ async def to_prompt(
 
     Args:
         skill_dirs: List of paths to skill directories
+        storage_toolkit: Optional storage toolkit used to inspect and read skill
+            files. When omitted, a default local toolkit mounts `/` to `/`.
         missing_ok: When True, include a prompt entry for missing SKILL.md files
             instead of failing.
         location_mapper: Optional path remapper for emitted <location> values.
@@ -304,21 +402,32 @@ async def to_prompt(
     if not skill_dirs:
         return "<available_skills>\n</available_skills>"
 
+    prompt_storage_toolkit = _prompt_storage_toolkit(storage_toolkit)
     lines = ["<available_skills>"]
 
     for skill_dir in skill_dirs:
-        skill_dir = Path(skill_dir).resolve()
-        skill_md_path = await find_skill_md(skill_dir)
+        skill_dir = _normalize_prompt_path(skill_dir)
+        skill_md_path = await _find_skill_md_in_storage(
+            storage_toolkit=prompt_storage_toolkit,
+            skill_dir=skill_dir,
+        )
         if skill_md_path is None:
-            discovered_skill_dirs = await discover_skill_folders(skill_dir)
+            discovered_skill_dirs = await _discover_skill_folders_in_storage(
+                storage_toolkit=prompt_storage_toolkit,
+                path=skill_dir,
+            )
             if discovered_skill_dirs:
                 for discovered_skill_dir in discovered_skill_dirs:
-                    discovered_skill_md_path = await find_skill_md(discovered_skill_dir)
+                    discovered_skill_md_path = await _find_skill_md_in_storage(
+                        storage_toolkit=prompt_storage_toolkit,
+                        skill_dir=discovered_skill_dir,
+                    )
                     if discovered_skill_md_path is None:
                         continue
                     await _append_skill_prompt_entry(
                         lines=lines,
                         skill_md_path=discovered_skill_md_path,
+                        storage_toolkit=prompt_storage_toolkit,
                         missing_ok=missing_ok,
                         location_mapper=location_mapper,
                     )
@@ -345,6 +454,7 @@ async def to_prompt(
         await _append_skill_prompt_entry(
             lines=lines,
             skill_md_path=skill_md_path,
+            storage_toolkit=prompt_storage_toolkit,
             missing_ok=missing_ok,
             location_mapper=location_mapper,
         )

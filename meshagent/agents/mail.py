@@ -329,7 +329,12 @@ class MailBot(Worker):
             rules.append(
                 "You have access to to following skills which follow the agentskills spec:"
             )
-            rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
+            rules.append(
+                await to_prompt(
+                    [*(Path(p) for p in self._skill_dirs)],
+                    storage_toolkit=self.get_skills_storage_toolkit(),
+                )
+            )
             rules.append(
                 "Use the shell or storage tool to find out more about skills and execute them when they are required"
             )
@@ -420,9 +425,7 @@ class MailBot(Worker):
 
                             if len(storage_toolkits) > 0:
                                 attachment_data.append(
-                                    await storage_toolkits[0].read_file(
-                                        context=context, path=path
-                                    )
+                                    await storage_toolkits[0].read_file(path=path)
                                 )
                             else:
                                 attachment_data.append(

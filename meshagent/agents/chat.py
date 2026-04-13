@@ -51,6 +51,7 @@ from meshagent.tools.strict_schema import ensure_strict_json_schema
 from pathlib import Path
 from meshagent.agents.skills import to_prompt
 from meshagent.agents.thread_schema import thread_list_schema, thread_schema
+from meshagent.tools.storage import StorageToolkit
 
 
 tracer = trace.get_tracer("meshagent.chatbot")
@@ -1304,6 +1305,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
 
         return results
 
+    def get_skills_storage_toolkit(self) -> StorageToolkit | None:
+        return None
+
     async def get_rules(
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
     ):
@@ -1313,7 +1317,12 @@ class ChatBotBase(SingleRoomAgent, ABC):
             rules.append(
                 "You have access to to following skills which follow the agentskills spec:"
             )
-            rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
+            rules.append(
+                await to_prompt(
+                    [*(Path(p) for p in self._skill_dirs)],
+                    storage_toolkit=self.get_skills_storage_toolkit(),
+                )
+            )
             rules.append(
                 "Use the shell or storage tool to find out more about skills and execute them when they are required"
             )

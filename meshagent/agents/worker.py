@@ -25,6 +25,7 @@ from .completions_thread_adapter import CompletionsThreadAdapter
 from .responses_thread_adapter import ResponsesThreadAdapter
 from .thread_adapter import ThreadAdapter
 from .threaded_task_runner import ThreadedTaskRunner, ThreadingMode
+from meshagent.tools.storage import StorageToolkit
 
 logger = logging.getLogger("worker")
 InitialMessageMode = Literal["summary", "code", "none"]
@@ -393,6 +394,9 @@ class Worker(SingleRoomAgent):
 
         await super().stop()
 
+    def get_skills_storage_toolkit(self) -> StorageToolkit | None:
+        return None
+
     async def get_rules(self):
         rules = [*self._rules]
 
@@ -400,7 +404,12 @@ class Worker(SingleRoomAgent):
             rules.append(
                 "You have access to to following skills which follow the agentskills spec:"
             )
-            rules.append(await to_prompt([*(Path(p) for p in self._skill_dirs)]))
+            rules.append(
+                await to_prompt(
+                    [*(Path(p) for p in self._skill_dirs)],
+                    storage_toolkit=self.get_skills_storage_toolkit(),
+                )
+            )
             rules.append(
                 "Use the shell or storage tool to find out more about skills and execute them when they are required"
             )
