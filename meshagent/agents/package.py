@@ -509,7 +509,7 @@ def _runtime_entrypoint_source(
         *[f"    {line}" for line in resolve_export_lines],
         "    if not isinstance(package, MeshagentPackage):",
         "        raise TypeError('package export must resolve to MeshagentPackage')",
-        "    package.main()",
+        "    package.serve()",
         "",
     ]
     return "\n".join(body_lines)
@@ -1693,10 +1693,10 @@ class MeshagentPackage(PythonPackage):
             return AnthropicOpenAIResponsesStreamAdapter(model=self.model)
         return OpenAIResponsesAdapter(model=self.model)
 
-    def main(self, *, room: str | None = None) -> None:
-        asyncio.run(self._main_async(room=room))
+    def serve(self, *, room: str | None = None) -> None:
+        asyncio.run(self._serve_async(room=room))
 
-    async def _main_async(self, *, room: str | None = None) -> None:
+    async def _serve_async(self, *, room: str | None = None) -> None:
         from meshagent.anthropic.mcp import AnthropicMessagesMCPToolkit
         from meshagent.anthropic.web_fetch import WebFetchTool as AnthropicWebFetchTool
         from meshagent.anthropic.web_search import (
@@ -1730,13 +1730,13 @@ class MeshagentPackage(PythonPackage):
         resolved_room = room or os.getenv("MESHAGENT_ROOM")
         if resolved_room is None or resolved_room.strip() == "":
             raise ValueError(
-                "MeshagentPackage.main() requires a room or MESHAGENT_ROOM"
+                "MeshagentPackage.serve() requires a room or MESHAGENT_ROOM"
             )
 
         token = os.getenv("MESHAGENT_TOKEN")
         if token is None or token.strip() == "":
             raise ValueError(
-                "MeshagentPackage.main() requires MESHAGENT_TOKEN to be set"
+                "MeshagentPackage.serve() requires MESHAGENT_TOKEN to be set"
             )
         deploy_assets = self._resolve_deploy_assets()
         self._validate_model_tool_compatibility(deploy_assets=deploy_assets)

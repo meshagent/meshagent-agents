@@ -694,7 +694,7 @@ async def test_build_package_image_allows_builder_name_override(
 
 
 @pytest.mark.asyncio
-async def test_meshagent_package_main_adds_image_generation_toolkit(
+async def test_meshagent_package_serve_adds_image_generation_toolkit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -755,7 +755,7 @@ async def test_meshagent_package_main_adds_image_generation_toolkit(
 
     package = Package.meshagent(name="assistant").image_gen(model="gpt-image-1")
 
-    await package._main_async(room="demo-room")
+    await package._serve_async(room="demo-room")
 
     toolkits = captured["toolkits"]
     assert isinstance(toolkits, list)
@@ -768,7 +768,7 @@ async def test_meshagent_package_main_adds_image_generation_toolkit(
 
 
 @pytest.mark.asyncio
-async def test_meshagent_package_main_adds_other_requested_toolkits(
+async def test_meshagent_package_serve_adds_other_requested_toolkits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -930,7 +930,7 @@ async def test_meshagent_package_main_adds_other_requested_toolkits(
         .computer_use(starting_url="https://example.com", allow_goto_url=True)
     )
 
-    await package._main_async(room="demo-room")
+    await package._serve_async(room="demo-room")
 
     toolkits = captured["toolkits"]
     assert isinstance(toolkits, list)
@@ -949,7 +949,7 @@ async def test_meshagent_package_main_adds_other_requested_toolkits(
 
 
 @pytest.mark.asyncio
-async def test_meshagent_package_main_rejects_image_generation_for_claude(
+async def test_meshagent_package_serve_rejects_image_generation_for_claude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MESHAGENT_TOKEN", "test-token")
@@ -960,11 +960,11 @@ async def test_meshagent_package_main_rejects_image_generation_for_claude(
     with pytest.raises(
         ValueError, match="image generation is only supported by openai models"
     ):
-        await package._main_async(room="demo-room")
+        await package._serve_async(room="demo-room")
 
 
 @pytest.mark.asyncio
-async def test_meshagent_package_main_rejects_apply_patch_for_claude(
+async def test_meshagent_package_serve_rejects_apply_patch_for_claude(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -981,7 +981,7 @@ async def test_meshagent_package_main_rejects_apply_patch_for_claude(
     with pytest.raises(
         ValueError, match="apply patch is only supported by openai models"
     ):
-        await package._main_async(room="demo-room")
+        await package._serve_async(room="demo-room")
 
 
 @pytest.mark.asyncio
