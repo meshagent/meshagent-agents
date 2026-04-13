@@ -189,10 +189,22 @@ async def read_properties(skill_dir: Path) -> SkillProperties:
 
 
 def _normalize_prompt_path(path: Path) -> Path:
-    normalized = Path(path).expanduser()
-    if not normalized.is_absolute():
-        normalized = Path.cwd() / normalized
-    return normalized.absolute()
+    normalized = Path(path)
+    if normalized.is_absolute():
+        return normalized
+    return Path("/") / normalized
+
+
+def _default_prompt_storage_toolkit() -> StorageToolkit:
+    return StorageToolkit(
+        read_only=True,
+        mounts=[
+            StorageToolLocalMount(
+                path="/",
+                local_path=str(Path.cwd()),
+            )
+        ],
+    )
 
 
 def _prompt_storage_toolkit(
@@ -200,11 +212,7 @@ def _prompt_storage_toolkit(
 ) -> StorageToolkit:
     if storage_toolkit is not None:
         return storage_toolkit
-
-    return StorageToolkit(
-        read_only=True,
-        mounts=[StorageToolLocalMount(path="/", local_path="/")],
-    )
+    return _default_prompt_storage_toolkit()
 
 
 async def _find_skill_md_in_storage(
@@ -381,7 +389,8 @@ async def to_prompt(
     Args:
         skill_dirs: List of paths to skill directories
         storage_toolkit: Optional storage toolkit used to inspect and read skill
-            files. When omitted, a default local toolkit mounts `/` to `/`.
+            files. When omitted, a default local toolkit mounts the current
+            working directory to `/`.
         missing_ok: When True, include a prompt entry for missing SKILL.md files
             instead of failing.
         location_mapper: Optional path remapper for emitted <location> values.

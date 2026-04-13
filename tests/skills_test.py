@@ -129,9 +129,12 @@ async def test_to_prompt_keeps_valid_skill_entries_unchanged(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_to_prompt_defaults_to_root_local_storage_when_toolkit_is_omitted(
+async def test_to_prompt_defaults_to_current_working_directory_when_toolkit_is_omitted(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
+
     skill_dir = tmp_path / "pdf-reader"
     skill_dir.mkdir()
     skill_md = skill_dir / "SKILL.md"
@@ -140,10 +143,11 @@ async def test_to_prompt_defaults_to_root_local_storage_when_toolkit_is_omitted(
         encoding="utf-8",
     )
 
-    prompt = await skills.to_prompt([skill_dir])
+    prompt = await skills.to_prompt([Path("pdf-reader")])
 
     assert "<name>\npdf-reader\n</name>" in prompt
-    assert str(skill_md) in prompt
+    assert "/pdf-reader/SKILL.md" in prompt
+    assert str(skill_md) not in prompt
 
 
 @pytest.mark.asyncio
@@ -320,4 +324,35 @@ async def test_to_prompt_uses_provided_storage_toolkit_mounts(
 
     assert "<name>\npdf-reader\n</name>" in prompt
     assert str(Path("/skills/pdf-reader/SKILL.md")) in prompt
+    assert str(skill_md) not in prompt
+
+
+@pytest.mark.asyncio
+async def test_to_prompt_resolves_relative_paths_from_storage_root(
+    tmp_path: Path,
+) -> None:
+    backing_root = tmp_path / "backing"
+    skill_dir = backing_root / "pdf-reader"
+    skill_dir.mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    prompt = await skills.to_prompt(
+        [Path("pdf-reader")],
+        storage_toolkit=StorageToolkit(
+            read_only=True,
+            mounts=[
+                StorageToolLocalMount(
+                    path="/",
+                    local_path=str(backing_root),
+                )
+            ],
+        ),
+    )
+
+    assert "<name>\npdf-reader\n</name>" in prompt
+    assert "/pdf-reader/SKILL.md" in prompt
     assert str(skill_md) not in prompt
