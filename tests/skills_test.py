@@ -151,6 +151,29 @@ async def test_to_prompt_defaults_to_current_working_directory_when_toolkit_is_o
 
 
 @pytest.mark.asyncio
+async def test_to_prompt_allows_parent_relative_skill_dir_when_toolkit_is_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
+
+    skill_dir = tmp_path / "shared-skills" / "pdf-reader"
+    skill_dir.mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: pdf-reader\ndescription: Read PDF files\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    prompt = await skills.to_prompt([Path("../shared-skills/pdf-reader")])
+
+    assert "<name>\npdf-reader\n</name>" in prompt
+    assert str(skill_md) in prompt
+
+
+@pytest.mark.asyncio
 async def test_to_prompt_can_retarget_skill_locations(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
     skill_dir = skills_root / "pdf-reader"

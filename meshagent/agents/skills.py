@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import posixpath
 from typing import Optional
 import html
 import logging
@@ -188,31 +189,55 @@ async def read_properties(skill_dir: Path) -> SkillProperties:
     return await _read_properties_from_skill_md(skill_md)
 
 
-def _normalize_prompt_path(path: Path) -> Path:
-    normalized = Path(path)
-    if normalized.is_absolute():
-        return normalized
-    return Path("/") / normalized
+def _resolve_configured_local_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path.resolve()
+    return (Path.cwd() / path).resolve()
 
 
-def _default_prompt_storage_toolkit() -> StorageToolkit:
-    return StorageToolkit(
-        read_only=True,
-        mounts=[
-            StorageToolLocalMount(
-                path="/",
-                local_path=str(Path.cwd()),
-            )
-        ],
-    )
+def _normalize_configured_storage_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+
+    normalized = posixpath.normpath(f"/{path.as_posix()}")
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return Path(normalized)
 
 
-def _prompt_storage_toolkit(
-    storage_toolkit: StorageToolkit | None,
-) -> StorageToolkit:
-    if storage_toolkit is not None:
-        return storage_toolkit
-    return _default_prompt_storage_toolkit()
+def _default_prompt_storage(
+    skill_dirs: list[Path],
+) -> tuple[StorageToolkit, list[Path]]:
+    cwd = Path.cwd().resolve()
+    mounts = [
+        StorageToolLocalMount(
+            path="/",
+            local_path=str(cwd),
+        )
+    ]
+    normalized_skill_dirs: list[Path] = []
+    mounted_paths = {"/"}
+
+    for skill_dir in skill_dirs:
+        resolved = _resolve_configured_local_path(skill_dir)
+        if resolved.is_relative_to(cwd):
+            relative = resolved.relative_to(cwd)
+            virtual_path = Path("/") if relative == Path(".") else Path("/") / relative
+        else:
+            virtual_path = resolved
+            mount_path = virtual_path.as_posix()
+            if mount_path not in mounted_paths:
+                mounts.append(
+                    StorageToolLocalMount(
+                        path=mount_path,
+                        local_path=str(resolved),
+                    )
+                )
+                mounted_paths.add(mount_path)
+
+        normalized_skill_dirs.append(virtual_path)
+
+    return StorageToolkit(read_only=True, mounts=mounts), normalized_skill_dirs
 
 
 async def _find_skill_md_in_storage(
@@ -411,11 +436,18 @@ async def to_prompt(
     if not skill_dirs:
         return "<available_skills>\n</available_skills>"
 
-    prompt_storage_toolkit = _prompt_storage_toolkit(storage_toolkit)
+    if storage_toolkit is None:
+        prompt_storage_toolkit, normalized_skill_dirs = _default_prompt_storage(
+            skill_dirs
+        )
+    else:
+        prompt_storage_toolkit = storage_toolkit
+        normalized_skill_dirs = [
+            _normalize_configured_storage_path(skill_dir) for skill_dir in skill_dirs
+        ]
     lines = ["<available_skills>"]
 
-    for skill_dir in skill_dirs:
-        skill_dir = _normalize_prompt_path(skill_dir)
+    for skill_dir in normalized_skill_dirs:
         skill_md_path = await _find_skill_md_in_storage(
             storage_toolkit=prompt_storage_toolkit,
             skill_dir=skill_dir,
