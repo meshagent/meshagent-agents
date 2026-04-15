@@ -1,6 +1,7 @@
 import pytest
 import base64
 from typing import Optional
+import asyncio
 
 import meshagent.agents.thread_adapter as thread_adapter_module
 from meshagent.agents.thread_adapter import ThreadAdapter
@@ -92,7 +93,6 @@ async def test_thread_adapter_stop_flushes_state_before_close(monkeypatch) -> No
     ]
     assert room.sync.close_calls == ["/threads/test"]
 
-
 @pytest.mark.asyncio
 async def test_thread_adapter_stop_skips_flush_when_room_is_closed(monkeypatch) -> None:
     sleep_calls: list[float] = []
@@ -111,3 +111,38 @@ async def test_thread_adapter_stop_skips_flush_when_room_is_closed(monkeypatch) 
     assert room.sync.sync_calls == []
     assert room.sync.close_calls == ["/threads/test"]
     assert sleep_calls == []
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_stop_times_out_stalled_sync_close(monkeypatch) -> None:
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+    monkeypatch.setattr(
+        thread_adapter_module,
+        "_THREAD_SYNC_CLOSE_TIMEOUT_SEC",
+        0.01,
+    )
+
+    class _HangingSync(_FakeSync):
+        async def close(self, *, path: str) -> None:
+            self.close_calls.append(path)
+            await asyncio.Event().wait()
+
+    class _HangingRoom:
+        def __init__(self) -> None:
+            self.sync = _HangingSync()
+            self.is_closed = False
+
+    room = _HangingRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+    adapter._thread = _FakeMeshDocument(state=b"state")
+
+    await adapter.stop()
+
+    assert room.sync.sync_calls == [
+        {"path": "/threads/test", "data": base64.standard_b64encode(b"state")}
+    ]
+    assert room.sync.close_calls == ["/threads/test"]
+    assert adapter.thread is None
