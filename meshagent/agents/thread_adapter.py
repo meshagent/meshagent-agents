@@ -24,6 +24,8 @@ from meshagent.agents.thread_schema import thread_schema
 tracer = trace.get_tracer("meshagent.thread_adapter")
 logger = logging.getLogger("thread_adapter")
 
+_THREAD_SYNC_CLOSE_TIMEOUT_SEC = 5.0
+
 
 def default_format_message(*, user_name: str, message: str, iso_timestamp: str) -> str:
     return f"{user_name} said at {iso_timestamp}: {message}"
@@ -132,9 +134,20 @@ class ThreadAdapter(ABC):
                         )
 
             if not self._room.is_closed:
-                # TODO: Wait for pending changes to sync
                 await asyncio.sleep(3)
-            await self._room.sync.close(path=self._thread_path)
+            # Do not let a stalled close handshake block agent shutdown
+            # indefinitely.
+            try:
+                await asyncio.wait_for(
+                    self._room.sync.close(path=self._thread_path),
+                    timeout=_THREAD_SYNC_CLOSE_TIMEOUT_SEC,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "timed out closing thread sync stream for %s after %.1fs",
+                    self._thread_path,
+                    _THREAD_SYNC_CLOSE_TIMEOUT_SEC,
+                )
             self._thread = None
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
