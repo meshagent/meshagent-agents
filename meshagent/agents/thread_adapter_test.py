@@ -93,6 +93,7 @@ async def test_thread_adapter_stop_flushes_state_before_close(monkeypatch) -> No
     ]
     assert room.sync.close_calls == ["/threads/test"]
 
+
 @pytest.mark.asyncio
 async def test_thread_adapter_stop_skips_flush_when_room_is_closed(monkeypatch) -> None:
     sleep_calls: list[float] = []
