@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from email.message import EmailMessage
+import logging
 import uuid
 
 import pytest
@@ -201,6 +202,7 @@ class _FakeRoom:
         self.storage = _FakeStorage()
         self.database = database if database is not None else _FakeDatabase()
         self.sync = _FakeSync()
+        self.is_closed = False
 
 
 class _RecordingSupervisor:
@@ -789,3 +791,36 @@ async def test_mail_channel_uses_roompool_hostname_fallback_for_smtp(
         }
     finally:
         await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_mail_channel_receive_loop_exits_quietly_after_room_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    room = _FakeRoom()
+    room.is_closed = True
+
+    async def _closed_receive(*, name: str, create: bool, wait: bool):
+        del name
+        del create
+        del wait
+        raise RoomException("room connection closed before request completed")
+
+    room.queues.receive = _closed_receive  # type: ignore[method-assign]
+
+    channel = MailChannel(
+        room=room,
+        queue_name="mailbox@mail.meshagent.com",
+        email_address="mailbox@mail.meshagent.com",
+    )
+
+    with caplog.at_level(logging.ERROR, logger="mail-channel"):
+        receive_task = asyncio.create_task(channel._receive_loop())
+        await asyncio.wait_for(receive_task, timeout=1.0)
+
+    assert receive_task.done()
+    assert [
+        record
+        for record in caplog.records
+        if record.name == "mail-channel" and record.levelno >= logging.ERROR
+    ] == []

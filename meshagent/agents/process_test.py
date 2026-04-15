@@ -819,6 +819,7 @@ class _DownloadRecordingRoom:
     def __init__(self, *, files: dict[str, FileContent] | None = None) -> None:
         self.storage = _DownloadRecordingStorage(files=files or {})
         self.local_participant = _ThreadLocalParticipant()
+        self.is_closed = False
 
 
 def _normalize_room_content_path(*, url: str) -> str:

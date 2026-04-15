@@ -2056,10 +2056,10 @@ class MeshagentPackage(PythonPackage):
                 return process
 
         async with RoomClient(
-            protocol=WebSocketClientProtocol(
+            protocol_factory=WebSocketClientProtocol(
                 url=websocket_room_url(room_name=resolved_room),
                 token=token,
-            )
+            ).create_factory()
         ) as room_client:
             channels: list[
                 ChatChannel | MailChannel | QueueChannel | ToolkitChannel
@@ -2262,10 +2262,10 @@ async def deploy_package(
             room=resolved_room,
         )
         room_client = RoomClient(
-            protocol=WebSocketClientProtocol(
+            protocol_factory=WebSocketClientProtocol(
                 url=connection.room_url,
                 token=connection.jwt,
-            )
+            ).create_factory()
         )
         _bind_room_status_callback(
             room_client=room_client,
@@ -2403,10 +2403,10 @@ async def run_package(
             room=resolved_room,
         )
         room_client = RoomClient(
-            protocol=WebSocketClientProtocol(
+            protocol_factory=WebSocketClientProtocol(
                 url=connection.room_url,
                 token=connection.jwt,
-            )
+            ).create_factory()
         )
         _bind_room_status_callback(
             room_client=room_client,

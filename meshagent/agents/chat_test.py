@@ -202,6 +202,7 @@ class _FakeRoom:
         self.messaging = _FakeMessaging()
         self.sync = sync or _FakeSync()
         self.agents = _FakeAgents()
+        self.is_closed = False
 
 
 class _FakeQueue:

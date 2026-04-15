@@ -198,16 +198,8 @@ class Worker(SingleRoomAgent):
         self._rules = rules
         self._done = False
 
-        if toolkit_name is not None:
-            logger.info(f"worker will start toolkit {toolkit_name}")
-            self._worker_toolkit = Toolkit(
-                name=toolkit_name,
-                tools=[
-                    SubmitWork(queue=self._queue, agent=self),
-                ],
-            )
-        else:
-            self._worker_toolkit = None
+        self._worker_toolkit_name = toolkit_name
+        self._worker_toolkit: Toolkit | None = None
         self._hosted_worker_toolkit: _RemoteToolkitWrapper | None = None
 
     def _serialize_initial_message_payload(
@@ -351,21 +343,34 @@ class Worker(SingleRoomAgent):
     async def preflight_start(self, *, room: RoomClient) -> None:
         del room
 
+    def _create_worker_toolkit(self, *, room: RoomClient) -> Toolkit | None:
+        if self._worker_toolkit_name is None:
+            return None
+
+        logger.info(f"worker will start toolkit {self._worker_toolkit_name}")
+        return Toolkit(
+            name=self._worker_toolkit_name,
+            tools=[
+                SubmitWork(queue=self._queue, agent=self, room=room),
+            ],
+        )
+
     async def start(self, *, room: RoomClient):
         self._done = False
 
         worker_toolkit_started = False
         room_agent_started = False
         try:
+            await super().start(room=room)
+            room_agent_started = True
+
+            self._worker_toolkit = self._create_worker_toolkit(room=room)
             if self._worker_toolkit is not None:
                 self._hosted_worker_toolkit = await _start_hosted_toolkit(
                     room=room,
                     toolkit=self._worker_toolkit,
                 )
                 worker_toolkit_started = True
-
-            await super().start(room=room)
-            room_agent_started = True
 
             await self.preflight_start(room=room)
 
@@ -381,6 +386,7 @@ class Worker(SingleRoomAgent):
                 with contextlib.suppress(Exception):
                     await self._hosted_worker_toolkit.stop()
                 self._hosted_worker_toolkit = None
+            self._worker_toolkit = None
             raise
 
     async def stop(self):
@@ -391,6 +397,7 @@ class Worker(SingleRoomAgent):
         if self._hosted_worker_toolkit is not None:
             await self._hosted_worker_toolkit.stop()
             self._hosted_worker_toolkit = None
+        self._worker_toolkit = None
 
         await super().stop()
 

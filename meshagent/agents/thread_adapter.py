@@ -110,7 +110,7 @@ class ThreadAdapter(ABC):
                     exc_info=ex,
                 )
 
-            if final_state is not None:
+            if final_state is not None and not self._room.is_closed:
                 try:
                     encoded_state = base64.standard_b64encode(final_state)
                     await self._room.sync.sync(
@@ -118,14 +118,22 @@ class ThreadAdapter(ABC):
                         data=encoded_state,
                     )
                 except Exception as ex:
-                    logger.warning(
-                        "unable to flush final thread state for %s",
-                        self._thread_path,
-                        exc_info=ex,
-                    )
+                    if self._room.is_closed:
+                        logger.debug(
+                            "skipping final thread state flush for closed room %s",
+                            self._thread_path,
+                            exc_info=ex,
+                        )
+                    else:
+                        logger.warning(
+                            "unable to flush final thread state for %s",
+                            self._thread_path,
+                            exc_info=ex,
+                        )
 
-            # TODO: Wait for pending changes to sync
-            await asyncio.sleep(3)
+            if not self._room.is_closed:
+                # TODO: Wait for pending changes to sync
+                await asyncio.sleep(3)
             await self._room.sync.close(path=self._thread_path)
             self._thread = None
 

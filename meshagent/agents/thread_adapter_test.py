@@ -51,8 +51,9 @@ class _FakeSync:
 
 
 class _FakeRoom:
-    def __init__(self) -> None:
+    def __init__(self, *, is_closed: bool = False) -> None:
         self.sync = _FakeSync()
+        self.is_closed = is_closed
 
 
 class _FakeMeshDocument:
@@ -90,3 +91,23 @@ async def test_thread_adapter_stop_flushes_state_before_close(monkeypatch) -> No
         {"path": "/threads/test", "data": base64.standard_b64encode(b"state")}
     ]
     assert room.sync.close_calls == ["/threads/test"]
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_stop_skips_flush_when_room_is_closed(monkeypatch) -> None:
+    sleep_calls: list[float] = []
+
+    async def _fast_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _FakeRoom(is_closed=True)
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+    adapter._thread = _FakeMeshDocument(state=b"state")
+
+    await adapter.stop()
+
+    assert room.sync.sync_calls == []
+    assert room.sync.close_calls == ["/threads/test"]
+    assert sleep_calls == []

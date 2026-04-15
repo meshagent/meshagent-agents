@@ -3,6 +3,7 @@ from typing import Optional
 import pytest
 
 from meshagent.agents.adapter import LLMAdapter
+from meshagent.agents.worker import SubmitWork
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.worker import Worker
 
@@ -219,6 +220,14 @@ class _FakeDecisionLLMAdapter(LLMAdapter):
         return {"summary": self._summary}
 
 
+class _FakeHostedToolkit:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 @pytest.mark.asyncio
 async def test_worker_auto_threading_creates_thread_and_index_entry() -> None:
     _FakeThreadAdapter.instances.clear()
@@ -420,3 +429,63 @@ async def test_worker_none_threading_does_not_open_thread_adapter() -> None:
     assert _FakeThreadAdapter.instances == []
     assert room.sync.open_calls == []
     assert room.sync.close_calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_start_builds_room_bound_toolkit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hosted_toolkit = _FakeHostedToolkit()
+    started: dict[str, object] = {}
+
+    async def fake_single_room_start(self, *, room) -> None:
+        self._room = room
+
+    async def fake_single_room_stop(self) -> None:
+        self._room = None
+
+    async def fake_start_hosted_toolkit(*, room, toolkit):
+        started["room"] = room
+        started["toolkit"] = toolkit
+        return hosted_toolkit
+
+    async def fake_run(self, *, room) -> None:
+        del room
+
+    monkeypatch.setattr(
+        "meshagent.agents.agent.SingleRoomAgent.start",
+        fake_single_room_start,
+    )
+    monkeypatch.setattr(
+        "meshagent.agents.agent.SingleRoomAgent.stop",
+        fake_single_room_stop,
+    )
+    monkeypatch.setattr(
+        "meshagent.agents.worker._start_hosted_toolkit",
+        fake_start_hosted_toolkit,
+    )
+    monkeypatch.setattr(Worker, "run", fake_run)
+
+    room = _FakeRoom()
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=_FakeLLMAdapter(),
+        toolkit_name="assistant_tools",
+    )
+
+    await worker.start(room=room)  # type: ignore[arg-type]
+
+    toolkit = started["toolkit"]
+    assert started["room"] is room
+    assert worker._worker_toolkit is toolkit
+    assert toolkit.name == "assistant_tools"
+    assert len(toolkit.tools) == 1
+    tool = toolkit.tools[0]
+    assert isinstance(tool, SubmitWork)
+    assert tool.room is room
+    assert tool.name == "queue_assistant_task"
+
+    await worker.stop()
+
+    assert hosted_toolkit.stopped is True
+    assert worker._worker_toolkit is None

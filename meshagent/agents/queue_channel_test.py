@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import logging
 import uuid
 
 import pytest
@@ -11,6 +12,7 @@ from meshagent.agents.queue_channel import QueueChannel
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.api import Participant
 from meshagent.api.messaging import FileContent
+from meshagent.api.room_server_client import RoomException
 
 
 class _FakeLocalParticipant(Participant):
@@ -110,6 +112,7 @@ class _FakeRoom:
         self.queues = _FakeQueues()
         self.sync = _FakeSync()
         self.storage = _FakeStorage(files=files)
+        self.is_closed = False
 
 
 class _RecordingSupervisor:
@@ -433,3 +436,32 @@ async def test_queue_channel_default_new_uses_llm_thread_name() -> None:
         assert entries[0].get_attribute("name") == "Billing Follow Up"
     finally:
         await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_queue_channel_receive_loop_exits_quietly_after_room_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    room = _FakeRoom()
+    room.is_closed = True
+
+    async def _closed_receive(*, name: str, create: bool, wait: bool):
+        del name
+        del create
+        del wait
+        raise RoomException("room connection closed before request completed")
+
+    room.queues.receive = _closed_receive  # type: ignore[method-assign]
+
+    channel = QueueChannel(room=room, queue_name="jobs")
+
+    with caplog.at_level(logging.ERROR, logger="queue-channel"):
+        receive_task = asyncio.create_task(channel._receive_loop())
+        await asyncio.wait_for(receive_task, timeout=1.0)
+
+    assert receive_task.done()
+    assert [
+        record
+        for record in caplog.records
+        if record.name == "queue-channel" and record.levelno >= logging.ERROR
+    ] == []

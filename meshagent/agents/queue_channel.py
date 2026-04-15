@@ -84,6 +84,12 @@ class QueueChannel(ThreadedChannel):
             except asyncio.CancelledError:
                 raise
             except Exception:
+                if self._room.is_closed:
+                    logger.debug(
+                        "stopping queue receive loop after room close for queue %s",
+                        self._queue_name,
+                    )
+                    return
                 logger.exception(
                     "queue receive failed for queue %s",
                     self._queue_name,
