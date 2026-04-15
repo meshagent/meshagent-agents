@@ -23,6 +23,7 @@ from typing import Literal, Optional
 import json
 
 import logging
+import contextlib
 
 import os
 
@@ -207,19 +208,8 @@ class MailBot(Worker):
         )
         self._email_address = email_address
         self._whitelist = whitelist
-
-        if toolkit_name is not None:
-            logger.info(f"mailbox will start toolkit {toolkit_name}")
-            self._toolkit = Toolkit(
-                name=toolkit_name,
-                tools=[
-                    NewEmailThreadWithAttachments(agent=self)
-                    if enable_attachments
-                    else NewEmailThread(agent=self),
-                ],
-            )
-        else:
-            self._toolkit = None
+        self._toolkit_name = toolkit_name
+        self._toolkit: Toolkit | None = None
         self._hosted_toolkit: _RemoteToolkitWrapper | None = None
 
         self._skill_dirs = skill_dirs
@@ -460,6 +450,18 @@ class MailBot(Worker):
     def render_markdown(self, body: str):
         return mail_common.render_mail_markdown(body=body)
 
+    def _create_toolkit(self, *, room: RoomClient) -> Toolkit | None:
+        if self._toolkit_name is None:
+            return None
+
+        logger.info(f"mailbox will start toolkit {self._toolkit_name}")
+        tools: list[FunctionTool | LocalRoomTool] = [
+            NewEmailThreadWithAttachments(agent=self, room=room)
+            if self._enable_attachments
+            else NewEmailThread(agent=self),
+        ]
+        return Toolkit(name=self._toolkit_name, tools=tools)
+
     def create_email_message(
         self,
         *,
@@ -478,17 +480,32 @@ class MailBot(Worker):
         )
 
     async def start(self, *, room: RoomClient):
-        await super().start(room=room)
-        if self._toolkit is not None:
-            self._hosted_toolkit = await _start_hosted_toolkit(
-                room=room,
-                toolkit=self._toolkit,
-            )
+        room_agent_started = False
+        try:
+            await super().start(room=room)
+            room_agent_started = True
+            self._toolkit = self._create_toolkit(room=room)
+            if self._toolkit is not None:
+                self._hosted_toolkit = await _start_hosted_toolkit(
+                    room=room,
+                    toolkit=self._toolkit,
+                )
+        except Exception:
+            if self._hosted_toolkit is not None:
+                with contextlib.suppress(Exception):
+                    await self._hosted_toolkit.stop()
+                self._hosted_toolkit = None
+            self._toolkit = None
+            if room_agent_started:
+                with contextlib.suppress(Exception):
+                    await super().stop()
+            raise
 
     async def stop(self):
         if self._hosted_toolkit is not None:
             await self._hosted_toolkit.stop()
             self._hosted_toolkit = None
+        self._toolkit = None
         await super().stop()
 
     async def start_thread(
