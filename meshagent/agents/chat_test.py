@@ -1252,6 +1252,47 @@ def test_touch_thread_in_index_forces_modified_at_forward_when_clock_does_not_ad
     )
 
 
+def test_sorted_thread_list_entries_uses_created_at_then_path_for_ties() -> None:
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    doc = _FakeThreadListDocument()
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "beta",
+            "path": "custom/b.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2025-01-01T00:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "newer-created",
+            "path": "custom/c.thread",
+            "created_at": "2024-01-02T00:00:00Z",
+            "modified_at": "2025-01-01T00:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "alpha",
+            "path": "custom/a.thread",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2025-01-01T00:00:00Z",
+        },
+    )
+    bot._thread_list_document = doc
+
+    entries = bot._sorted_thread_list_entries()
+    assert [entry.get_attribute("name") for entry in entries] == [
+        "newer-created",
+        "alpha",
+        "beta",
+    ]
+
+
 def test_record_new_thread_in_index_is_noop_without_explicit_thread_dir() -> None:
     adapter = _CaptureChatAdapter()
     bot = ChatBot(llm_adapter=adapter)

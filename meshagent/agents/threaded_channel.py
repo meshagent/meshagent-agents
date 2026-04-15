@@ -363,12 +363,30 @@ class ThreadedChannel(Channel):
             return created_at
         return datetime.min.replace(tzinfo=timezone.utc)
 
+    def _thread_created_sort_datetime(self, *, entry: Element) -> datetime:
+        created_at = self._parse_iso_datetime(value=entry.get_attribute("created_at"))
+        if created_at is not None:
+            return created_at
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    def _thread_sort_path(self, *, entry: Element) -> str:
+        path_value = entry.get_attribute("path")
+        if not isinstance(path_value, str):
+            return ""
+        return path_value.strip()
+
     def _sorted_thread_list_entries(self) -> list[Element]:
-        return sorted(
-            self._thread_list_entries(),
+        entries = self._thread_list_entries()
+        entries.sort(key=lambda entry: self._thread_sort_path(entry=entry))
+        entries.sort(
+            key=lambda entry: self._thread_created_sort_datetime(entry=entry),
+            reverse=True,
+        )
+        entries.sort(
             key=lambda entry: self._thread_sort_datetime(entry=entry),
             reverse=True,
         )
+        return entries
 
     @staticmethod
     def _thread_list_slice(

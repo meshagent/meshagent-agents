@@ -290,9 +290,7 @@ class LegacyChatChannel(ThreadedChannel):
                 thread_id=thread_id,
                 participant_id=sender.id,
             )
-            if self._should_touch_thread_index_for_room_message(
-                message_type=message.type
-            ):
+            if self._should_touch_thread_index_for_room_message(message=message):
                 self.bump_thread(path=thread_id)
 
         try:
@@ -775,9 +773,14 @@ class LegacyChatChannel(ThreadedChannel):
 
         return False
 
-    @staticmethod
-    def _should_touch_thread_index_for_room_message(*, message_type: str) -> bool:
-        return message_type not in {
+    @classmethod
+    def _should_touch_thread_index_for_room_message(
+        cls,
+        *,
+        message: RoomMessage,
+    ) -> bool:
+        del cls
+        return message.type not in {
             "opened",
             "cleared",
             "typing",

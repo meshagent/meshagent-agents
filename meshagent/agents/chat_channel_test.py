@@ -641,6 +641,101 @@ async def test_agent_chat_channel_translates_capabilities_request_agent_message(
 
 
 @pytest.mark.asyncio
+async def test_agent_chat_channel_does_not_bump_thread_index_on_capabilities_request() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    existing_entry = sync.document.root.append_child(
+        tag_name="thread",
+        attributes={
+            "path": "/threads/chat/example.thread",
+            "name": "Example",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
+        },
+    )
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = AgentChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_CAPABILITIES_REQUEST,
+                        "thread_id": "/threads/chat/example.thread",
+                        "message_id": "capabilities-1",
+                    }
+                },
+            )
+        )
+
+        assert existing_entry.get_attribute("modified_at") == "2024-01-01T00:00:00Z"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_channel_bumps_thread_index_on_turn_start() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    existing_entry = sync.document.root.append_child(
+        tag_name="thread",
+        attributes={
+            "path": "/threads/chat/example.thread",
+            "name": "Example",
+            "created_at": "2024-01-01T00:00:00Z",
+            "modified_at": "2024-01-01T00:00:00Z",
+        },
+    )
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = AgentChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_START,
+                        "thread_id": "/threads/chat/example.thread",
+                        "message_id": "turn-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
+        )
+
+        assert existing_entry.get_attribute("modified_at") != "2024-01-01T00:00:00Z"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_tracks_turn_state_for_steer_cancel_and_approval() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
