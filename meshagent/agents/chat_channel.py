@@ -51,6 +51,11 @@ _OUTBOUND_AGENT_MESSAGE_TYPES = {
 
 
 class ChatChannel(LegacyChatChannel):
+    _THREAD_INDEX_BUMP_AGENT_MESSAGE_TYPES = {
+        AGENT_MESSAGE_TURN_START,
+        AGENT_MESSAGE_TURN_STEER,
+    }
+
     def get_exposed_toolkits(self) -> list[Toolkit]:
         return [self.make_toolkit()]
 
@@ -61,6 +66,29 @@ class ChatChannel(LegacyChatChannel):
         if message_type in _OUTBOUND_AGENT_MESSAGE_TYPES:
             return True
         return message_type.startswith("meshagent.agent.")
+
+    @classmethod
+    def _should_touch_thread_index_for_room_message(
+        cls,
+        *,
+        message: RoomMessage,
+    ) -> bool:
+        if not super()._should_touch_thread_index_for_room_message(message=message):
+            return False
+
+        if message.type != "agent-message":
+            return True
+
+        try:
+            envelope = _AgentMessageEnvelope.model_validate(message.message)
+        except Exception:
+            return True
+
+        payload_type = envelope.payload.get("type")
+        if not isinstance(payload_type, str):
+            return True
+
+        return payload_type in cls._THREAD_INDEX_BUMP_AGENT_MESSAGE_TYPES
 
     async def on_start(self) -> None:
         await super().on_start()
