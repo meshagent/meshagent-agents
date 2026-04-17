@@ -5166,8 +5166,7 @@ async def test_agent_process_thread_adapter_renders_new_thread_tool_as_thread_re
                 item_id="new-thread-1",
                 result=JsonContent(
                     json={
-                        "path": "/threads/generated.thread",
-                        "name": "Anthropic Website",
+                        "path": "/threads/12345678-1234-5678-1234-567812345678.thread",
                     }
                 ),
             )
@@ -5181,9 +5180,12 @@ async def test_agent_process_thread_adapter_renders_new_thread_tool_as_thread_re
         )
         await _wait_for(lambda: thread_event.get_attribute("state") == "completed")
         assert thread_event.get_attribute("kind") == "thread"
-        assert thread_event.get_attribute("headline") == "Anthropic Website"
+        assert thread_event.get_attribute("headline") == "New Thread"
         assert thread_event.get_attribute("details") == ""
-        assert thread_event.get_attribute("path") == "/threads/generated.thread"
+        assert (
+            thread_event.get_attribute("path")
+            == "/threads/12345678-1234-5678-1234-567812345678.thread"
+        )
     finally:
         await adapter.stop()
 

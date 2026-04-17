@@ -71,6 +71,7 @@ class QueueChannel(ThreadedChannel):
             receive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await receive_task
+        await self._cancel_thread_list_background_tasks()
         await self.close_thread_list_document()
 
     async def _receive_loop(self) -> None:

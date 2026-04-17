@@ -426,6 +426,8 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_contexts: dict[str, ChatThreadContext] = {}
         self._thread_list_document: Optional[MeshDocument] = None
         self._thread_list_path: Optional[str] = None
+        self._pending_thread_list_paths: set[str] = set()
+        self._thread_list_background_tasks: set[asyncio.Task[None]] = set()
 
         self._skill_dirs = skill_dirs
         self._thread_status_values: dict[str, str] = {}
@@ -560,6 +562,12 @@ class ChatBotBase(SingleRoomAgent, ABC):
         provided_name = name.strip() if isinstance(name, str) else ""
 
         entry = self._find_thread_list_entry(path=path)
+        if (
+            entry is None
+            and provided_name == ""
+            and path in self._pending_thread_list_paths
+        ):
+            return
         if entry is None:
             resolved_name = (
                 provided_name
@@ -634,6 +642,78 @@ class ChatBotBase(SingleRoomAgent, ABC):
             path=path,
             modified_at=self._utc_now_iso(),
         )
+
+    def _begin_pending_thread_list_entry(self, *, path: str) -> None:
+        if self._thread_list_dir() is None:
+            return
+        self._pending_thread_list_paths.add(path)
+
+    def _track_thread_list_background_task(
+        self,
+        *,
+        task: asyncio.Task[None],
+    ) -> None:
+        self._thread_list_background_tasks.add(task)
+
+        def _cleanup(done_task: asyncio.Task[None]) -> None:
+            self._thread_list_background_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            exc = done_task.exception()
+            if exc is not None:
+                logger.error(
+                    "deferred chat thread list update failed",
+                    exc_info=exc,
+                )
+
+        task.add_done_callback(_cleanup)
+
+    def _schedule_pending_thread_list_entry(
+        self,
+        *,
+        context: ToolContext,
+        path: str,
+        text: str,
+    ) -> None:
+        if self._thread_list_dir() is None:
+            return
+
+        async def run() -> None:
+            try:
+                try:
+                    friendly_name = await self._generate_thread_friendly_name(
+                        context=context,
+                        text=text,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as ex:
+                    logger.warning(
+                        "unable to determine deferred chat thread name for %s, using fallback",
+                        path,
+                        exc_info=ex,
+                    )
+                    friendly_name = self._fallback_thread_name(text=text)
+
+                self._record_new_thread_in_index(path=path, name=friendly_name)
+            finally:
+                self._pending_thread_list_paths.discard(path)
+
+        self._track_thread_list_background_task(task=asyncio.create_task(run()))
+
+    async def _cancel_thread_list_background_tasks(self) -> None:
+        tasks = list(self._thread_list_background_tasks)
+        for task in tasks:
+            task.cancel()
+        if len(tasks) > 0:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._thread_list_background_tasks.clear()
+        self._pending_thread_list_paths.clear()
+
+    async def _wait_for_thread_list_background_tasks(self) -> None:
+        while len(self._thread_list_background_tasks) > 0:
+            tasks = list(self._thread_list_background_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _next_thread_list_modified_at(
         self,
@@ -872,23 +952,14 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     )
         return generated_name
 
-    async def _generate_new_thread_info(
-        self,
-        *,
-        context: ToolContext,
-        text: str,
-    ) -> tuple[str, str]:
-        friendly_name = await self._generate_thread_friendly_name(
-            context=context,
-            text=text,
-        )
+    async def _new_thread_path(self) -> str:
         guid_name = str(uuid.uuid4())
         path = self._thread_path_for_name(
             thread_name=guid_name,
             thread_dir=self._get_thread_dir(),
         )
         path = await self._next_available_thread_path(base_path=path)
-        return path, friendly_name
+        return path
 
     def _thread_status_attribute_name(self, *, path: str) -> str:
         return f"thread.status.{path}"
@@ -1715,6 +1786,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._message_channels.clear()
 
         await self._clear_all_thread_statuses()
+        await self._cancel_thread_list_background_tasks()
         await self._close_thread_list_document(room=room)
         await super().stop()
 
@@ -2037,7 +2109,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             def __init__(self):
                 super().__init__(
                     name="new_thread",
-                    description=f"creates a new thread for {outer.room.local_participant.get_attribute('name')} and sends the first chat message, returning the new thread path and name",
+                    description=f"creates a new thread for {outer.room.local_participant.get_attribute('name')} and sends the first chat message, returning the new thread path. The thread list entry is named and added asynchronously.",
                     input_schema=tools_schema,
                 )
 
@@ -2051,10 +2123,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 text = text_value if isinstance(text_value, str) else ""
                 payload = {**message, "text": text}
 
-                path, friendly_name = await outer._generate_new_thread_info(
-                    context=context,
-                    text=text,
-                )
+                path = await outer._new_thread_path()
                 await outer._seed_new_thread_members(
                     path=path,
                     members=[
@@ -2062,14 +2131,19 @@ class ChatBotBase(SingleRoomAgent, ABC):
                         context.on_behalf_of or context.caller,
                     ],
                 )
-                outer._record_new_thread_in_index(path=path, name=friendly_name)
+                outer._begin_pending_thread_list_entry(path=path)
                 await outer._queue_chat_message(
                     context=context,
                     path=path,
                     message=payload,
                     wait_for_result=False,
                 )
-                return JsonContent(json={"path": path, "name": friendly_name})
+                outer._schedule_pending_thread_list_entry(
+                    context=context,
+                    path=path,
+                    text=text,
+                )
+                return JsonContent(json={"path": path})
 
         tools: list[FunctionTool] = [
             ask,

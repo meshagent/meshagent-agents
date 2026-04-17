@@ -158,6 +158,7 @@ class MailChannel(ThreadedChannel):
             receive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await receive_task
+        await self._cancel_thread_list_background_tasks()
         await self.close_thread_list_document()
         self._pending_messages_by_source_id.clear()
         self._active_turns_by_turn_id.clear()

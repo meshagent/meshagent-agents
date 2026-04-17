@@ -179,7 +179,19 @@ def _new_thread_tool_call_display(
     name = raw_name.strip() if isinstance(raw_name, str) else ""
     if name == "":
         fallback_name = Path(path).stem.strip()
-        name = fallback_name if fallback_name != "" else path
+        if fallback_name != "":
+            try:
+                parsed_uuid = uuid.UUID(fallback_name)
+            except ValueError:
+                name = fallback_name
+            else:
+                name = (
+                    "New Thread"
+                    if str(parsed_uuid) == fallback_name.lower()
+                    else fallback_name
+                )
+        else:
+            name = path
 
     return _NewThreadToolCallDisplay(path=path, name=name)
 

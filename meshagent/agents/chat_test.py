@@ -547,7 +547,7 @@ def _assert_uuid_thread_path(*, path: str, prefix: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None:
+async def test_new_thread_tool_returns_path_and_queues_message() -> None:
     adapter = _FakeThreadNameAdapter(generated_thread_name="Release Planning / Q1")
     bot = ChatBot(llm_adapter=adapter)
     room = _FakeRoom()
@@ -576,7 +576,7 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
 
     assert isinstance(result, JsonContent)
     result_path = result.json["path"]
-    assert result.json["name"] == "Release Planning Q1"
+    assert result.json == {"path": result_path}
     _assert_uuid_thread_path(path=result_path, prefix=".threads/assistant/")
 
     assert len(queue.items) == 1
@@ -592,9 +592,6 @@ async def test_new_thread_tool_creates_named_thread_and_queues_message() -> None
     assert seeded_members.await_args.kwargs["path"] == result_path
     assert seeded_members.await_args.kwargs["members"][0] is room.local_participant
     assert seeded_members.await_args.kwargs["members"][1] is context.caller
-
-    assert len(adapter.calls) == 1
-    assert adapter.calls[0]["output_schema"] is not None
 
 
 @pytest.mark.asyncio
@@ -636,7 +633,7 @@ async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
 @pytest.mark.asyncio
 async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() -> None:
     adapter = _SessionRequiredThreadNameAdapter(generated_thread_name="Adapter Context")
-    bot = ChatBot(llm_adapter=adapter)
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
     room = _FakeRoom()
     bot._room = room
     _stub_new_thread_member_seed(bot)
@@ -669,9 +666,10 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     assert isinstance(result, JsonContent)
     _assert_uuid_thread_path(
         path=result.json["path"],
-        prefix=".threads/assistant/",
+        prefix="custom/",
     )
-    assert result.json["name"] == "Adapter Context"
+    assert result.json == {"path": result.json["path"]}
+    await bot._wait_for_thread_list_background_tasks()
     assert adapter.last_context_type is _SessionRequiredContext
     assert [m.get("content") for m in adapter.last_messages] == [
         "prior context",
@@ -709,7 +707,9 @@ async def test_new_thread_tool_records_friendly_name_in_thread_list() -> None:
     )
 
     path = result.json["path"]
-    assert result.json["name"] == "Friendly Plan Name"
+    assert result.json == {"path": path}
+    assert doc.root.get_children() == []
+    await bot._wait_for_thread_list_background_tasks()
     _assert_uuid_thread_path(path=path, prefix="custom/")
     entries = doc.root.get_children()
     assert len(entries) == 1

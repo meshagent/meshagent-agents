@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from unittest import mock
 
@@ -247,6 +248,11 @@ class _FakeThreadNameAdapter(LLMAdapter):
         return {"thread_name": self.generated_thread_name}
 
 
+async def _drain_background_tasks() -> None:
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
 def _assert_uuid_thread_path(*, path: str, prefix: str) -> None:
     assert path.startswith(prefix)
     assert path.endswith(".thread")
@@ -302,7 +308,7 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
 
         assert isinstance(result, JsonContent)
         result_path = result.json["path"]
-        assert result.json["name"] == "Plan this friendly thread"
+        assert result.json == {"path": result_path}
         assert isinstance(result_path, str)
         _assert_uuid_thread_path(path=result_path, prefix="/threads/chat/")
 
@@ -319,6 +325,10 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
             AgentFileContent(type="file", url="room:///uploads/plan.md"),
         ]
 
+        entries = sync.document.root.get_children()
+        assert entries == []
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
         entries = sync.document.root.get_children()
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
@@ -377,7 +387,8 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
         )
 
         assert isinstance(result, JsonContent)
-        assert result.json["name"] == "Release Plan"
+        assert result.json == {"path": result.json["path"]}
+        await channel._wait_for_thread_list_background_tasks()
         assert adapter.prompts == [
             "Message:\nPlan the release work\n\nAttachments:\n- release-plan.md\n- screenshot.png"
         ]

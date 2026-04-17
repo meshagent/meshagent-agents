@@ -142,6 +142,7 @@ class LegacyChatChannel(ThreadedChannel):
 
     async def on_stop(self) -> None:
         self._room.messaging.off("message", self._on_room_message)
+        await self._cancel_thread_list_background_tasks()
         await self.close_thread_list_document()
         self._active_turn_ids_by_thread.clear()
         self._pending_approval_turn_ids_by_thread.clear()
@@ -615,7 +616,7 @@ class LegacyChatChannel(ThreadedChannel):
             def __init__(self) -> None:
                 super().__init__(
                     name="new_thread",
-                    description=f"starts a new thread for {local_name}, posts a message to the thread, and then returns the path and name of the new thread. Since work will continue asynchronously on that thread, an agent should not invoke this if it will check the result of the work, it should generally be invoked as fire and forget.",
+                    description=f"starts a new thread for {local_name}, posts a message to the thread, and then returns the new thread path. The thread list entry is named and added asynchronously, so an agent should invoke this as fire and forget.",
                     input_schema=tools_schema,
                 )
 
@@ -649,11 +650,7 @@ class LegacyChatChannel(ThreadedChannel):
                             and attachment_value.get("path", "").strip() != ""
                         ]
 
-                path, friendly_name = await outer.new_thread(
-                    message_text=text,
-                    attachments=attachment_paths,
-                    on_behalf_of=context.on_behalf_of or context.caller,
-                )
+                path = await outer._new_thread_path()
 
                 chat_message = _ChatMessagePayload.model_validate(
                     {
@@ -662,6 +659,7 @@ class LegacyChatChannel(ThreadedChannel):
                         "attachments": payload.get("attachments"),
                     }
                 )
+                outer._begin_pending_thread_list_entry(path=path)
                 outer.emit(
                     sender=context.on_behalf_of or context.caller,
                     payload=TurnStart(
@@ -670,7 +668,13 @@ class LegacyChatChannel(ThreadedChannel):
                         content=outer._content_from_chat_message(payload=chat_message),
                     ),
                 )
-                return JsonContent(json={"path": path, "name": friendly_name})
+                outer._schedule_pending_thread_list_entry(
+                    path=path,
+                    message_text=text,
+                    attachments=attachment_paths,
+                    on_behalf_of=context.on_behalf_of or context.caller,
+                )
+                return JsonContent(json={"path": path})
 
         return NewThreadTool()
 

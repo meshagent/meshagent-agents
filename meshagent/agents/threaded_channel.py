@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
 import re
@@ -48,6 +49,8 @@ class ThreadedChannel(Channel):
             self._thread_name_rules = [*DEFAULT_CHANNEL_THREAD_NAME_RULES]
         self._thread_list_document: MeshDocument | None = None
         self._thread_list_path: str | None = None
+        self._pending_thread_list_paths: set[str] = set()
+        self._thread_list_background_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def room(self) -> RoomClient:
@@ -223,6 +226,12 @@ class ThreadedChannel(Channel):
         now = self._utc_now_iso()
         provided_name = name.strip() if isinstance(name, str) else ""
         entry = self._find_thread_list_entry(path=path)
+        if (
+            entry is None
+            and provided_name == ""
+            and path in self._pending_thread_list_paths
+        ):
+            return
         if entry is None:
             resolved_created_at = (
                 created_at.strip()
@@ -598,6 +607,83 @@ class ThreadedChannel(Channel):
                 )
 
         return generated_name
+
+    def _begin_pending_thread_list_entry(self, *, path: str) -> None:
+        if self._thread_list_dir() is None:
+            return
+        self._pending_thread_list_paths.add(path)
+
+    def _track_thread_list_background_task(
+        self,
+        *,
+        task: asyncio.Task[None],
+    ) -> None:
+        self._thread_list_background_tasks.add(task)
+
+        def _cleanup(done_task: asyncio.Task[None]) -> None:
+            self._thread_list_background_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            exc = done_task.exception()
+            if exc is not None:
+                logger.error(
+                    "deferred thread list update failed",
+                    exc_info=exc,
+                )
+
+        task.add_done_callback(_cleanup)
+
+    def _schedule_pending_thread_list_entry(
+        self,
+        *,
+        path: str,
+        message_text: str,
+        attachments: Sequence[str] | None = None,
+        on_behalf_of: Participant | None = None,
+    ) -> None:
+        if self._thread_list_dir() is None:
+            return
+
+        async def run() -> None:
+            try:
+                try:
+                    friendly_name = await self._determine_thread_name(
+                        message_text=message_text,
+                        attachments=attachments,
+                        on_behalf_of=on_behalf_of,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as ex:
+                    logger.warning(
+                        "unable to determine deferred thread name for %s, using fallback",
+                        path,
+                        exc_info=ex,
+                    )
+                    friendly_name = self._fallback_thread_name(
+                        message_text=message_text,
+                        attachments=attachments,
+                    )
+
+                self.bump_thread(path=path, name=friendly_name)
+            finally:
+                self._pending_thread_list_paths.discard(path)
+
+        self._track_thread_list_background_task(task=asyncio.create_task(run()))
+
+    async def _cancel_thread_list_background_tasks(self) -> None:
+        tasks = list(self._thread_list_background_tasks)
+        for task in tasks:
+            task.cancel()
+        if len(tasks) > 0:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._thread_list_background_tasks.clear()
+        self._pending_thread_list_paths.clear()
+
+    async def _wait_for_thread_list_background_tasks(self) -> None:
+        while len(self._thread_list_background_tasks) > 0:
+            tasks = list(self._thread_list_background_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _new_thread_path(self) -> str:
         base_path = self._thread_path_for_name(
