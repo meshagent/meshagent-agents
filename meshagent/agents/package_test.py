@@ -475,9 +475,21 @@ def test_package_meshagent_default_base_image_renders_docker_args() -> None:
     assert (
         dockerfile
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"ARG MESHAGENT_DEFAULT_TAG={package_module._DEFAULT_MESHAGENT_IMAGE_TAG}\n"
-        "FROM ${MESHAGENT_IMAGE_PREFIX}python-sdk-slim:${MESHAGENT_DEFAULT_TAG}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}python-sdk-slim:{package_module.__version__}\n"
         "RUN uv pip install requests\n"
+    )
+
+
+def test_package_shell_default_base_image_keeps_estargz_tag() -> None:
+    dockerfile = package_module._package_dockerfile_text(
+        package=Package(name="assistant"),
+        base_image="meshagent/shell-codex:default",
+    )
+
+    assert (
+        dockerfile
+        == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}shell-codex:{package_module.__version__}-esgz\n"
     )
 
 
@@ -590,8 +602,7 @@ async def test_build_package_image_uses_room_image_build_api(
     assert (
         captured["dockerfile"]
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"ARG MESHAGENT_DEFAULT_TAG={package_module._DEFAULT_MESHAGENT_IMAGE_TAG}\n"
-        "FROM ${MESHAGENT_IMAGE_PREFIX}cli:${MESHAGENT_DEFAULT_TAG}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}cli:{package_module.__version__}\n"
         "RUN uv pip install requests\n"
         "RUN echo hello\n"
     )
@@ -663,8 +674,7 @@ async def test_build_meshagent_package_image_uses_python_sdk_base(
     assert (
         captured["dockerfile"]
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"ARG MESHAGENT_DEFAULT_TAG={package_module._DEFAULT_MESHAGENT_IMAGE_TAG}\n"
-        "FROM ${MESHAGENT_IMAGE_PREFIX}python-sdk-slim:${MESHAGENT_DEFAULT_TAG}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}python-sdk-slim:{package_module.__version__}\n"
         "RUN uv pip install requests\n"
     )
 
