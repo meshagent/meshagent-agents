@@ -61,12 +61,17 @@ _RESERVED_ENV_NAMES = {"MESHAGENT_TOKEN", "MESHAGENT_ROOM"}
 _DEFAULT_PACKAGE_IMAGE = "meshagent/cli:default"
 _DEFAULT_MESHAGENT_PACKAGE_BUILD_IMAGE = "meshagent/python-sdk-slim:default"
 _DEFAULT_MESHAGENT_IMAGE_PREFIX = "us-central1-docker.pkg.dev/meshagent-public/images/"
-_DEFAULT_MESHAGENT_IMAGE_TAG = f"{__version__}-esgz"
 _DEFAULT_DATABASE_NAMESPACE = (".database",)
 _PACKAGE_RUNTIME_DIR = PurePosixPath("/package")
 _PACKAGE_ENTRYPOINT_NAME = "__meshagent_entrypoint__.py"
 
 logger = logging.getLogger("package")
+
+
+def _meshagent_default_image_tag_for_repository(*, repository: str) -> str:
+    if repository.startswith("shell-"):
+        return f"{__version__}-esgz"
+    return __version__
 
 
 @dataclass(frozen=True, slots=True)
@@ -2135,10 +2140,10 @@ Package.meshagent = MeshagentPackage
 def _package_dockerfile_base_lines(*, base_image: str) -> list[str]:
     if base_image.startswith("meshagent/") and base_image.endswith(":default"):
         repository = base_image.removeprefix("meshagent/").removesuffix(":default")
+        default_tag = _meshagent_default_image_tag_for_repository(repository=repository)
         return [
             f"ARG MESHAGENT_IMAGE_PREFIX={_DEFAULT_MESHAGENT_IMAGE_PREFIX}",
-            f"ARG MESHAGENT_DEFAULT_TAG={_DEFAULT_MESHAGENT_IMAGE_TAG}",
-            f"FROM ${{MESHAGENT_IMAGE_PREFIX}}{repository}:${{MESHAGENT_DEFAULT_TAG}}",
+            f"FROM ${{MESHAGENT_IMAGE_PREFIX}}{repository}:{default_tag}",
         ]
 
     return [f"FROM {base_image}"]
