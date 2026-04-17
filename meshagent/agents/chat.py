@@ -2121,7 +2121,30 @@ class ChatBotBase(SingleRoomAgent, ABC):
             ) -> JsonContent:
                 text_value = message.get("text")
                 text = text_value if isinstance(text_value, str) else ""
-                payload = {**message, "text": text}
+                attachment_paths: list[str] = []
+                raw_attachments = message.get("attachments")
+                if isinstance(raw_attachments, list):
+                    for attachment in raw_attachments:
+                        if not isinstance(attachment, dict):
+                            continue
+                        path_value = attachment.get("path")
+                        if not isinstance(path_value, str):
+                            continue
+                        normalized_path = path_value.strip()
+                        if normalized_path == "":
+                            continue
+                        attachment_paths.append(normalized_path)
+
+                if text.strip() == "" and len(attachment_paths) == 0:
+                    raise RoomException(
+                        "chat.new_thread requires non-empty text or at least one attachment"
+                    )
+
+                payload = {
+                    **message,
+                    "text": text,
+                    "attachments": [{"path": path} for path in attachment_paths],
+                }
 
                 path = await outer._new_thread_path()
                 await outer._seed_new_thread_members(
