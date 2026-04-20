@@ -591,7 +591,7 @@ async def test_build_package_image_uses_room_image_build_api(
         resolved_room="demo-room",
     )
 
-    assert image_tag == "room.meshagent.com/packages/assistant:latest"
+    assert image_tag == "registry.meshagent.com/packages/assistant:latest"
     assert captured["tag"] == image_tag
     assert captured["resolved_project_id"] == "project-123"
     assert captured["resolved_room"] == "demo-room"
@@ -767,8 +767,8 @@ async def test_meshagent_package_serve_adds_image_generation_toolkit(
             return package_module.Toolkit(name="thread", tools=[])
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.local_participant = object()
             self.protocol = type(
                 "_Protocol", (), {"wait_for_close": staticmethod(_wait_for_close)}
@@ -854,8 +854,8 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
             return package_module.Toolkit(name="thread", tools=[])
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.local_participant = object()
             self.protocol = type(
                 "_Protocol", (), {"wait_for_close": staticmethod(_wait_for_close)}
@@ -1030,8 +1030,8 @@ async def test_meshagent_package_serve_resolves_instructions_from_root_path(
             return package_module.Toolkit(name="thread", tools=[])
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.local_participant = object()
             self.protocol = type(
                 "_Protocol", (), {"wait_for_close": staticmethod(_wait_for_close)}
@@ -1148,8 +1148,8 @@ async def test_agent_package_run_uploads_assets_and_starts_container(
             uploaded.append((path, data, overwrite))
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.storage = _FakeRoomStorage()
             self.containers = _FakeContainers()
 
@@ -1288,8 +1288,8 @@ async def test_run_package_uses_built_image_when_commands_configured(
             return "container-123"
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
 
             class _Storage:
                 async def upload(
@@ -1346,7 +1346,7 @@ async def test_run_package_uses_built_image_when_commands_configured(
 
     async def _fake_build_package_image(**kwargs) -> str:
         captured["build_kwargs"] = kwargs
-        return "room.meshagent.com/packages/assistant:latest"
+        return "registry.meshagent.com/packages/assistant:latest"
 
     monkeypatch.setattr(helper_module, "resolve_room", lambda room: room)
     monkeypatch.setattr(helper_module, "resolve_project_id", _fake_resolve_project_id)
@@ -1375,7 +1375,7 @@ async def test_run_package_uses_built_image_when_commands_configured(
         "builder_name": None,
         "status_callback": None,
     }
-    assert captured["image"] == "room.meshagent.com/packages/assistant:latest"
+    assert captured["image"] == "registry.meshagent.com/packages/assistant:latest"
     assert captured["command"] == "python agent.py"
     assert captured["working_dir"] == "/package"
 
@@ -1423,8 +1423,8 @@ async def test_agent_package_deploy_builds_service_spec_with_kind(
             return None
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.storage = _FakeRoomStorage()
 
         def on(self, event_name: str, func) -> None:
@@ -1517,8 +1517,8 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
             return None
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.storage = _FakeRoomStorage()
 
         def on(self, event_name: str, func) -> None:
@@ -1541,7 +1541,7 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
 
     async def _fake_build_package_image(**kwargs) -> str:
         captured["build_kwargs"] = kwargs
-        return "room.meshagent.com/packages/assistant:latest"
+        return "registry.meshagent.com/packages/assistant:latest"
 
     monkeypatch.setattr(helper_module, "resolve_room", lambda room: room)
     monkeypatch.setattr(helper_module, "resolve_project_id", _fake_resolve_project_id)
@@ -1570,7 +1570,7 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
     }
     assert (
         captured["service"].container.image
-        == "room.meshagent.com/packages/assistant:latest"
+        == "registry.meshagent.com/packages/assistant:latest"
     )
     assert captured["service"].container.command == "python agent.py"
     assert captured["service"].container.working_dir == "/package"
@@ -1635,8 +1635,8 @@ async def test_agent_package_deploy_updates_existing_service_by_service_id_annot
             return None
 
     class _FakeRoomClient:
-        def __init__(self, *, protocol) -> None:
-            del protocol
+        def __init__(self, *, protocol_factory) -> None:
+            del protocol_factory
             self.storage = _FakeRoomStorage()
 
         def on(self, event_name: str, func) -> None:

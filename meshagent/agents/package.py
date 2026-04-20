@@ -928,7 +928,7 @@ class Package:
 
     def _custom_image_tag(self) -> str:
         slug = _slugify_segment(self.name)
-        return f"room.meshagent.com/packages/{slug}:latest"
+        return f"registry.meshagent.com/packages/{slug}:latest"
 
     def _custom_builder_name(self) -> str:
         slug = _slugify_segment(self.name)
