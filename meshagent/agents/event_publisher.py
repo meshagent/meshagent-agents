@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
-from meshagent.api.messaging import JsonContent, TextContent
+from meshagent.api.messaging import BinaryContent, Content, JsonContent, TextContent
 
 from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -211,7 +212,62 @@ def _content_kind_from_part(part: dict[str, Any]) -> _ContentKind | None:
     return None
 
 
+def _mime_type_from_image_output_format(output_format: Any) -> str:
+    normalized = _as_str(output_format)
+    if normalized is None:
+        return "image/png"
+
+    normalized = normalized.lower().lstrip(".")
+    if normalized == "jpg":
+        normalized = "jpeg"
+    if normalized == "":
+        return "image/png"
+    return f"image/{normalized}"
+
+
+def _content_from_image_generation_item(item: dict[str, Any]) -> BinaryContent | None:
+    headers: dict[str, str] = {
+        "mime_type": _mime_type_from_image_output_format(item.get("output_format"))
+    }
+    for key in ("background", "output_format", "quality", "size", "status"):
+        value = _as_str(item.get(key))
+        if value is not None:
+            headers[key] = value
+
+    for key in ("result", "image_base64", "image_b64", "b64_json", "data"):
+        value = item.get(key)
+        if isinstance(value, bytes):
+            return BinaryContent(data=value, headers=headers)
+        if isinstance(value, bytearray):
+            return BinaryContent(data=bytes(value), headers=headers)
+        if isinstance(value, str) and value.strip() != "":
+            try:
+                return BinaryContent(
+                    data=base64.b64decode(value),
+                    headers=headers,
+                )
+            except Exception:
+                return None
+        if isinstance(value, list):
+            for entry in value:
+                if not isinstance(entry, str) or entry.strip() == "":
+                    continue
+                try:
+                    return BinaryContent(
+                        data=base64.b64decode(entry),
+                        headers=headers,
+                    )
+                except Exception:
+                    return None
+
+    return None
+
+
 def _content_from_tool_item(item: dict[str, Any]):
+    item_type = _as_str(item.get("type"))
+    if item_type == "image_generation_call":
+        return _content_from_image_generation_item(item)
+
     result = item.get("result")
     if isinstance(result, dict):
         return JsonContent(json=result)
@@ -256,7 +312,7 @@ class _ToolCallInfo:
     call_id: str | None = None
     arguments: dict[str, Any] | None = None
     error: AgentError | None = None
-    result: TextContent | JsonContent | None = None
+    result: Content | None = None
 
 
 def _filtered_tool_arguments(

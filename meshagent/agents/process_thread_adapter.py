@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -16,11 +17,14 @@ from urllib.parse import urlparse
 from meshagent.api import Element, Participant, RemoteParticipant, RoomException
 from meshagent.api.chan import ChanClosed
 from meshagent.api.messaging import (
+    BinaryContent,
     Content,
     JsonContent,
+    TextContent,
 )
 
 from .context import AgentSessionContext
+from .images_database import ImagesDatabase
 from .messages import (
     AGENT_EVENT_TURN_INTERRUPTED,
     AgentError,
@@ -68,6 +72,7 @@ _APPLY_PATCH_PATH_RES = (
     re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (?P<path>.+)$", re.MULTILINE),
     re.compile(r"^(?:\+\+\+ b/|--- a/)(?P<path>.+)$", re.MULTILINE),
 )
+_IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +259,61 @@ def _humanize_name(name: str) -> str:
     return name.replace("_", " ").strip().title()
 
 
+def _normalize_positive_dimension(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        value = int(value)
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _parse_image_dimensions_from_size(value: Any) -> tuple[int | None, int | None]:
+    if isinstance(value, str):
+        match = _IMAGE_SIZE_RE.match(value)
+        if match is None:
+            return (None, None)
+        width = int(match.group(1))
+        height = int(match.group(2))
+        return (
+            width if width > 0 else None,
+            height if height > 0 else None,
+        )
+
+    if isinstance(value, dict):
+        return (
+            _normalize_positive_dimension(value.get("width")),
+            _normalize_positive_dimension(value.get("height")),
+        )
+
+    if isinstance(value, list) and len(value) >= 2:
+        return (
+            _normalize_positive_dimension(value[0]),
+            _normalize_positive_dimension(value[1]),
+        )
+
+    return (None, None)
+
+
+def _mime_type_from_output_format(output_format: Any) -> str:
+    if not isinstance(output_format, str):
+        return "image/png"
+
+    normalized = output_format.strip().lower().lstrip(".")
+    if normalized == "":
+        return "image/png"
+    if normalized == "jpg":
+        normalized = "jpeg"
+    return f"image/{normalized}"
+
+
 def _terminal_state_from_error(error: AgentError | None) -> str:
     if error is None:
         return "completed"
@@ -305,12 +365,14 @@ def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
 class AgentProcessThreadAdapter(ThreadAdapter):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._images_db = ImagesDatabase(room=self._room)
         self._active_message_elements_by_key: dict[str, Element] = {}
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}
         self._active_event_elements_by_item_id: dict[str, Element] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
         self._pending_turn_ids_by_message_id: dict[str, str] = {}
+        self._saved_image_ids_by_item_id: dict[str, str] = {}
         self._thread_status_lock = asyncio.Lock()
         self._thread_status_generation = 0
         self._thread_status_key: str | None = None
@@ -336,6 +398,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_event_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
         self._pending_turn_ids_by_message_id.clear()
+        self._saved_image_ids_by_item_id.clear()
 
     async def clear_thread(self) -> None:
         if self._processor_task is None or self._processor_task.done():
@@ -539,6 +602,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 lines=message.lines,
             )
         else:
+            if isinstance(message, AgentToolCallEnded):
+                await self._persist_generated_image_result(message=message)
             normalized_event = self._normalized_event_from_message(message)
             if normalized_event is not None:
                 self._upsert_event(messages=messages, event=normalized_event)
@@ -887,6 +952,143 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     def _message_event_data(self, *, message: AgentMessage) -> str:
         return _truncate_text(
             self._stringify_json(message.model_dump(mode="json")),
+        )
+
+    def _tool_call_event_data(
+        self,
+        *,
+        message: AgentMessage,
+        active_tool_call: _ActiveToolCall | None = None,
+    ) -> str:
+        if not isinstance(message, AgentToolCallEnded):
+            return self._message_event_data(message=message)
+
+        if (
+            active_tool_call is None
+            or active_tool_call.tool.strip().lower() != "image_generation"
+        ):
+            return self._message_event_data(message=message)
+
+        payload = message.model_dump(mode="json")
+        result = payload.get("result")
+        if isinstance(result, dict) and result.get("type") == "text":
+            text = result.get("text")
+            if isinstance(text, str) and text.strip() != "":
+                result["text"] = "[generated image omitted]"
+
+        return _truncate_text(self._stringify_json(payload))
+
+    async def _persist_generated_image_result(
+        self,
+        *,
+        message: AgentToolCallEnded,
+    ) -> None:
+        if message.item_id in self._saved_image_ids_by_item_id:
+            return
+
+        active_tool_call = self._active_tool_calls_by_item_id.get(message.item_id)
+        if active_tool_call is None:
+            return
+        if active_tool_call.tool.strip().lower() != "image_generation":
+            return
+        if message.error is not None:
+            return
+
+        image_bytes: bytes | None = None
+        mime_type: str | None = None
+        annotations: dict[str, str] = {}
+
+        if isinstance(message.result, BinaryContent):
+            image_bytes = message.result.get_data()
+            headers = message.result.headers
+            raw_mime_type = headers.get("mime_type")
+            if isinstance(raw_mime_type, str) and raw_mime_type.strip() != "":
+                mime_type = raw_mime_type.strip()
+            for key in ("background", "output_format", "quality", "size", "status"):
+                value = headers.get(key)
+                if isinstance(value, str) and value.strip() != "":
+                    annotations[key] = value.strip()
+        elif isinstance(message.result, TextContent):
+            encoded_image = message.result.text.strip()
+            if encoded_image != "":
+                try:
+                    image_bytes = base64.b64decode(encoded_image)
+                except Exception:
+                    logger.warning(
+                        "unable to decode image_generation tool result for %s",
+                        message.item_id,
+                    )
+                    return
+
+        if image_bytes is None:
+            return
+
+        arguments = active_tool_call.arguments or {}
+        if mime_type is None:
+            mime_type = _mime_type_from_output_format(arguments.get("output_format"))
+        for key in (
+            "background",
+            "model",
+            "moderation",
+            "output_format",
+            "quality",
+            "size",
+        ):
+            value = arguments.get(key)
+            if (
+                isinstance(value, str)
+                and value.strip() != ""
+                and key not in annotations
+            ):
+                annotations[key] = value.strip()
+
+        width = _normalize_positive_dimension(arguments.get("width"))
+        height = _normalize_positive_dimension(arguments.get("height"))
+        if width is None or height is None:
+            parsed_width, parsed_height = _parse_image_dimensions_from_size(
+                arguments.get("size")
+            )
+            if width is None:
+                width = parsed_width
+            if height is None:
+                height = parsed_height
+
+        created_by = self._room.local_participant.get_attribute("name")
+        if not isinstance(created_by, str):
+            created_by = ""
+
+        try:
+            saved_image = await self._images_db.save(
+                data=image_bytes,
+                mime_type=mime_type,
+                created_by=created_by,
+                annotations=annotations,
+            )
+            self.write_image(
+                message_id=message.item_id,
+                turn_id=message.turn_id,
+                image_id=saved_image.id,
+                mime_type=saved_image.mime_type,
+                created_at=saved_image.created_at,
+                created_by=saved_image.created_by,
+                width=width,
+                height=height,
+                status="completed",
+                status_detail="Image saved",
+            )
+        except Exception as ex:
+            logger.error(
+                "failed to persist generated image for tool call %s",
+                message.item_id,
+                exc_info=ex,
+            )
+            return
+
+        self._saved_image_ids_by_item_id[message.item_id] = saved_image.id
+        logger.info(
+            "saved process-generated image %s for tool call %s",
+            saved_image.id,
+            message.item_id,
         )
 
     def _status_event_details(
@@ -1813,6 +2015,10 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                     tool="tool",
                     arguments=None,
                 )
+            data = self._tool_call_event_data(
+                message=message,
+                active_tool_call=active_tool_call,
+            )
             return self._tool_event(
                 turn_id=message.turn_id,
                 message_type=message.type,

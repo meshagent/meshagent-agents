@@ -1,3 +1,23 @@
+## [0.38.2]
+- Image generation tool events now emit binary image results, persist them with metadata to the images database, and redact inline image payloads in event data.
+- OpenAI image generation now defaults to `gpt-image-2`, and the pricing catalog adds `gpt-image-2` plus text-embedding-3/ada token rates.
+- OpenAI and Anthropic adapters now normalize extra headers and only send `Meshagent-On-Behalf-Of` when a valid name is present.
+- Room container models now include a `ports` list in container responses.
+- Breaking change: CLI runtime containers no longer inherit Dockerfile `ENV`; environment variables must be provided explicitly.
+
+## [0.38.1]
+- Added profile-aware CLI settings with multi-account support, per-profile API URLs, and new `auth switch`/`auth login --api-url` flows, with migration from legacy local state.
+- Breaking: `meshagent image` has been replaced by top-level `meshagent build` and `meshagent deploy`, and build/deploy now take the build context as a positional PATH instead of `--pack`.
+- Image build/deploy now resolve registry hosts from deployment config or API base URL, normalize shorthand image tags to project registries, and can auto-create missing repositories with permission-aware guidance.
+- Registry deletion now accepts repository names or ids with clearer errors.
+- Harbor now routes OpenAI adapter calls through the room’s OpenAI endpoint using room tokens and adds extensive diagnostics, including debug event telemetry, build/exec log capture, preserved agent logs, and new terminal-bench audit/report tooling.
+- API URL helpers and room connections now respect profile API URL overrides and strip trailing slashes; Python REST/room examples were updated to use CLI token helpers and current messaging callback shapes.
+- OpenAI responses adapter now logs unhandled reasoning events at debug level to reduce warning noise.
+
+## [0.38.0]
+- Added deployment config models and a `get_config()` API call to retrieve MeshAgent domain/registry settings.
+- CLI image build/pack/deploy now validates and targets the configured registry host (from deployment config, with default fallback) instead of a hard‑coded registry host, and uses that registry for credential resolution.
+
 ## [0.37.2]
 - MailBot and Worker now build room-bound toolkits at startup and cleanly stop/clear hosted toolkits on startup failures and shutdown.
 
