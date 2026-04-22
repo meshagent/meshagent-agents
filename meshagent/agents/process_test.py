@@ -81,9 +81,7 @@ from meshagent.agents.process import (
 )
 from meshagent.agents.thread_adapter import ThreadAdapter
 from meshagent.api import Participant, RemoteParticipant
-from meshagent.api.messaging import FileContent
-from meshagent.api.messaging import JsonContent
-from meshagent.api.messaging import TextContent
+from meshagent.api.messaging import BinaryContent, FileContent, JsonContent, TextContent
 from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
 
 
@@ -815,9 +813,83 @@ class _DownloadRecordingStorage:
         return self.files[path]
 
 
+class _RecordingDatabase:
+    def __init__(self) -> None:
+        self.schemas: dict[str, dict[str, Any]] = {}
+        self.rows: dict[str, list[dict[str, Any]]] = {}
+
+    async def create_table_with_schema(
+        self,
+        *,
+        name: str,
+        schema: dict[str, Any],
+        mode: str,
+    ) -> None:
+        del mode
+        self.schemas.setdefault(name, dict(schema))
+        self.rows.setdefault(name, [])
+
+    async def inspect(self, *, table: str) -> dict[str, Any]:
+        return dict(self.schemas.get(table, {}))
+
+    async def add_columns(
+        self,
+        *,
+        table: str,
+        new_columns: dict[str, Any],
+    ) -> None:
+        schema = self.schemas.setdefault(table, {})
+        schema.update(new_columns)
+        for row in self.rows.setdefault(table, []):
+            for key in new_columns:
+                row.setdefault(key, None)
+
+    async def create_scalar_index(self, *, table: str, column: str) -> None:
+        del table
+        del column
+
+    async def insert(self, *, table: str, records: list[dict[str, Any]]) -> None:
+        stored_rows = self.rows.setdefault(table, [])
+        for record in records:
+            stored_rows.append(dict(record))
+
+    async def search(
+        self,
+        *,
+        table: str,
+        where: str | dict[str, Any] | None = None,
+        limit: int | None = None,
+        select: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if isinstance(where, str):
+            raise AssertionError("string where clauses are not supported in tests")
+
+        results: list[dict[str, Any]] = []
+        for row in self.rows.get(table, []):
+            if isinstance(where, dict):
+                matches = True
+                for key, expected_value in where.items():
+                    if row.get(key) != expected_value:
+                        matches = False
+                        break
+                if not matches:
+                    continue
+
+            if select is None:
+                results.append(dict(row))
+            else:
+                results.append({column: row.get(column) for column in select})
+
+            if limit is not None and len(results) >= limit:
+                break
+
+        return results
+
+
 class _DownloadRecordingRoom:
     def __init__(self, *, files: dict[str, FileContent] | None = None) -> None:
         self.storage = _DownloadRecordingStorage(files=files or {})
+        self.database = _RecordingDatabase()
         self.local_participant = _ThreadLocalParticipant()
         self.is_closed = False
 
@@ -5115,6 +5187,132 @@ async def test_agent_process_thread_adapter_omits_inline_computer_result_payload
         assert tool_event.get_attribute("state") == "completed"
         assert tool_event.get_attribute("preview") == ""
         assert "Result:" not in (tool_event.get_attribute("details") or "")
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_persists_generated_images(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallStarted(
+                type=AGENT_EVENT_TOOL_CALL_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="image-1",
+                toolkit="openai",
+                tool="image_generation",
+                arguments={
+                    "output_format": "png",
+                    "quality": "high",
+                    "size": "1024x1024",
+                },
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="image-1",
+                result=BinaryContent(
+                    data=b"fake-image-bytes",
+                    headers={
+                        "mime_type": "image/png",
+                        "output_format": "png",
+                        "quality": "high",
+                        "size": "1024x1024",
+                    },
+                ),
+            )
+        )
+        await real_sleep(0)
+
+        await _wait_for(
+            lambda: (
+                len(
+                    [
+                        message
+                        for message in room.sync.document.message_elements
+                        if message.get_attribute("id") == "image-1"
+                    ]
+                )
+                == 1
+                and len(
+                    [
+                        event
+                        for event in room.sync.document.event_elements
+                        if event.get_attribute("item_id") == "image-1"
+                    ]
+                )
+                == 1
+            )
+        )
+
+        image_message = next(
+            message
+            for message in room.sync.document.message_elements
+            if message.get_attribute("id") == "image-1"
+        )
+        image = image_message.get_children_by_tag_name("image")[0]
+        tool_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "image-1"
+        )
+
+        assert image_message.get_attribute("id") == "image-1"
+        assert image_message.get_attribute("turn_id") == "turn-1"
+        assert image.get_attribute("mime_type") == "image/png"
+        assert image.get_attribute("width") == 1024
+        assert image.get_attribute("height") == 1024
+        assert image.get_attribute("status") == "completed"
+        assert image.get_attribute("status_detail") == "Image saved"
+
+        image_id = image.get_attribute("id")
+        assert isinstance(image_id, str) and image_id != ""
+
+        stored_rows = await room.database.search(
+            table="images",
+            where={"id": image_id},
+            limit=1,
+            select=["data", "mime_type", "created_by"],
+        )
+        assert stored_rows == [
+            {
+                "data": b"fake-image-bytes",
+                "mime_type": "image/png",
+                "created_by": "assistant",
+            }
+        ]
+        stored_annotations = room.database.rows["images"][0]["annotations"]
+        assert len(stored_annotations) == 3
+        assert "fake-image-bytes" not in (tool_event.get_attribute("data") or "")
     finally:
         await adapter.stop()
 
