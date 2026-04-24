@@ -6,6 +6,7 @@ from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.worker import SubmitWork
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.worker import Worker
+from meshagent.openai.tools.responses_adapter import OpenAIResponsesAdapter
 
 
 class _FakeParticipant:
@@ -106,14 +107,25 @@ class _FakeStorage:
         return path in self._existing_paths
 
 
+class _FakeProtocol:
+    def __init__(self, *, token: str | None = None):
+        self.token = token
+
+
 class _FakeRoom:
-    def __init__(self, *, existing_paths: Optional[set[str]] = None):
+    def __init__(
+        self,
+        *,
+        existing_paths: Optional[set[str]] = None,
+        token: str | None = None,
+    ):
         self.local_participant = _FakeParticipant(
             name="assistant",
             participant_id="assistant-id",
         )
         self.sync = _FakeSync()
         self.storage = _FakeStorage(existing_paths=existing_paths)
+        self.protocol = _FakeProtocol(token=token)
 
 
 class _FakeThreadAdapter:
@@ -489,3 +501,64 @@ async def test_worker_start_builds_room_bound_toolkit(
 
     assert hosted_toolkit.stopped is True
     assert worker._worker_toolkit is None
+
+
+def test_worker_bind_runtime_credentials_swaps_distinct_adapters() -> None:
+    adapter = OpenAIResponsesAdapter(model="gpt-4o")
+    decision_adapter = OpenAIResponsesAdapter(model="gpt-4o-mini")
+    thread_name_adapter = OpenAIResponsesAdapter(model="gpt-4.1")
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=adapter,
+        decision_llm_adapter=decision_adapter,
+        threading_mode="auto",
+        thread_name_adapter=thread_name_adapter,
+    )
+
+    worker.bind_runtime_credentials(room=_FakeRoom(token="service-token"))
+
+    assert worker._llm_adapter is not adapter
+    assert worker._decision_llm_adapter is not decision_adapter
+    assert worker._threading_helper._thread_name_adapter is not thread_name_adapter
+    assert worker._llm_adapter._api_key == "service-token"
+    assert worker._decision_llm_adapter is not None
+    assert worker._decision_llm_adapter._api_key == "service-token"
+    assert worker._threading_helper._thread_name_adapter is not None
+    assert worker._threading_helper._thread_name_adapter._api_key == "service-token"
+
+
+def test_worker_bind_runtime_credentials_preserves_main_adapter_aliases() -> None:
+    adapter = OpenAIResponsesAdapter(model="gpt-4o")
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=adapter,
+        decision_llm_adapter=adapter,
+        threading_mode="auto",
+    )
+
+    worker.bind_runtime_credentials(room=_FakeRoom(token="service-token"))
+
+    assert worker._llm_adapter is not adapter
+    assert worker._decision_llm_adapter is worker._llm_adapter
+    assert worker._threading_helper._thread_name_adapter is worker._llm_adapter
+    assert worker._llm_adapter._api_key == "service-token"
+
+
+def test_worker_bind_runtime_credentials_preserves_decision_thread_alias() -> None:
+    adapter = OpenAIResponsesAdapter(model="gpt-4o")
+    decision_adapter = OpenAIResponsesAdapter(model="gpt-4o-mini")
+    worker = Worker(
+        queue="tasks",
+        llm_adapter=adapter,
+        decision_llm_adapter=decision_adapter,
+        threading_mode="auto",
+        thread_name_adapter=decision_adapter,
+    )
+
+    worker.bind_runtime_credentials(room=_FakeRoom(token="service-token"))
+
+    assert worker._llm_adapter is not adapter
+    assert worker._decision_llm_adapter is not decision_adapter
+    assert worker._decision_llm_adapter is not None
+    assert worker._threading_helper._thread_name_adapter is worker._decision_llm_adapter
+    assert worker._decision_llm_adapter._api_key == "service-token"

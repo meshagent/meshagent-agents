@@ -4,7 +4,7 @@ from meshagent.agents.writer import Writer, WriterContext
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.api.schema_util import prompt_schema, merge
 from typing import Optional
-from meshagent.api import Requirement
+from meshagent.api import Requirement, RoomClient
 
 import logging
 
@@ -52,6 +52,12 @@ class SingleShotWriter(Writer):
         context = self._llm_adapter.create_session()
         context.append_rules(self._rules)
         return context
+
+    def bind_runtime_credentials(self, *, room: RoomClient) -> None:
+        super().bind_runtime_credentials(room=room)
+        self._llm_adapter = self._llm_adapter.with_runtime_api_key(
+            api_key=self.resolve_runtime_api_key(room=room)
+        )
 
     async def write(self, writer_context: WriterContext, arguments: dict):
         arguments = arguments.copy()

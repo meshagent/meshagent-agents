@@ -7,7 +7,7 @@ from meshagent.api import Requirement
 from typing import Optional
 import asyncio
 import logging
-from meshagent.agents.agent import TaskRunner
+from meshagent.agents.task_runner import TaskRunner
 
 logger = logging.getLogger("writer_agent")
 

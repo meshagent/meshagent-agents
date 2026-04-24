@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from meshagent.api.schema_util import merge
-from meshagent.api import Element, MeshDocument
+from meshagent.api import Element, MeshDocument, RoomClient
 from meshagent.tools import Toolkit
 
 from .adapter import LLMAdapter
@@ -102,6 +102,16 @@ class ThreadedTaskRunner(TaskRunner):
             output_schema=output_schema,
             annotations=annotations,
             toolkits=toolkits,
+        )
+
+    def bind_runtime_credentials(self, *, room: RoomClient) -> None:
+        super().bind_runtime_credentials(room=room)
+
+        if self._thread_name_adapter is None:
+            return
+
+        self._thread_name_adapter = self._thread_name_adapter.with_runtime_api_key(
+            api_key=self.resolve_runtime_api_key(room=room)
         )
 
     def _sanitize_thread_name(self, *, value: str) -> str:

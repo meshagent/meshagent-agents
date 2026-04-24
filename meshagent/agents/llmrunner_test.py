@@ -7,6 +7,7 @@ from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.llmrunner import LLMTaskRunner
 from meshagent.agents.task_runner import TaskContext
+from meshagent.openai.tools.responses_adapter import OpenAIResponsesAdapter
 
 
 class _FakeParticipant:
@@ -107,14 +108,25 @@ class _FakeStorage:
         return path in self._existing_paths
 
 
+class _FakeProtocol:
+    def __init__(self, *, token: str | None = None):
+        self.token = token
+
+
 class _FakeRoom:
-    def __init__(self, *, existing_paths: Optional[set[str]] = None):
+    def __init__(
+        self,
+        *,
+        existing_paths: Optional[set[str]] = None,
+        token: str | None = None,
+    ):
         self.local_participant = _FakeParticipant(
             name="assistant",
             participant_id="assistant-id",
         )
         self.sync = _FakeSync()
         self.storage = _FakeStorage(existing_paths=existing_paths)
+        self.protocol = _FakeProtocol(token=token)
 
 
 class _FakeThreadAdapter:
@@ -353,3 +365,32 @@ async def test_llm_task_runner_auto_threading_uses_custom_name_rules(
         "pick a kebab-case name from this task prompt"
         in thread_name_call["context"].instructions
     )
+
+
+def test_llm_task_runner_bind_runtime_credentials_swaps_shared_adapter() -> None:
+    adapter = OpenAIResponsesAdapter(model="gpt-4o")
+    runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="auto")
+
+    runner.bind_runtime_credentials(room=_FakeRoom(token="service-token"))
+
+    assert runner._llm_adapter is not adapter
+    assert runner._thread_name_adapter is runner._llm_adapter
+    assert runner._llm_adapter._api_key == "service-token"
+
+
+def test_llm_task_runner_bind_runtime_credentials_swaps_distinct_thread_adapter() -> (
+    None
+):
+    adapter = OpenAIResponsesAdapter(model="gpt-4o")
+    thread_name_adapter = OpenAIResponsesAdapter(model="gpt-4o-mini")
+    runner = LLMTaskRunner(llm_adapter=adapter, threading_mode="auto")
+    runner._thread_name_adapter = thread_name_adapter
+
+    runner.bind_runtime_credentials(room=_FakeRoom(token="service-token"))
+
+    assert runner._llm_adapter is not adapter
+    assert runner._thread_name_adapter is not thread_name_adapter
+    assert runner._thread_name_adapter is not runner._llm_adapter
+    assert runner._llm_adapter._api_key == "service-token"
+    assert runner._thread_name_adapter is not None
+    assert runner._thread_name_adapter._api_key == "service-token"

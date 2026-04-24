@@ -355,6 +355,34 @@ class Worker(SingleRoomAgent):
             ],
         )
 
+    def bind_runtime_credentials(self, *, room: RoomClient) -> None:
+        super().bind_runtime_credentials(room=room)
+
+        api_key = self.resolve_runtime_api_key(room=room)
+        original_llm_adapter = self._llm_adapter
+        original_decision_llm_adapter = self._decision_llm_adapter
+        original_thread_name_adapter = self._threading_helper._thread_name_adapter
+
+        self._llm_adapter = original_llm_adapter.with_runtime_api_key(api_key=api_key)
+
+        if original_decision_llm_adapter is original_llm_adapter:
+            self._decision_llm_adapter = self._llm_adapter
+        elif original_decision_llm_adapter is not None:
+            self._decision_llm_adapter = (
+                original_decision_llm_adapter.with_runtime_api_key(api_key=api_key)
+            )
+
+        if original_thread_name_adapter is original_llm_adapter:
+            self._threading_helper._thread_name_adapter = self._llm_adapter
+        elif (
+            original_decision_llm_adapter is not None
+            and original_thread_name_adapter is original_decision_llm_adapter
+            and self._decision_llm_adapter is not None
+        ):
+            self._threading_helper._thread_name_adapter = self._decision_llm_adapter
+        else:
+            self._threading_helper.bind_runtime_credentials(room=room)
+
     async def start(self, *, room: RoomClient):
         self._done = False
 
