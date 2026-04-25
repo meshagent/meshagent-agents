@@ -73,7 +73,7 @@ class _FakeStorage:
         )
 
 
-class _FakeDatabase:
+class _FakeDatasets:
     def __init__(self) -> None:
         self.tables: dict[tuple[tuple[str, ...], str], list[dict[str, object]]] = {}
         self.create_calls: list[dict[str, object]] = []
@@ -122,10 +122,10 @@ class _FakeDatabase:
                 for row in rows
                 if all(row.get(key) == value for key, value in where.items())
             ]
-        raise AssertionError("test database only supports dict where clauses")
+        raise AssertionError("test datasets only supports dict where clauses")
 
 
-class _NamespaceRejectingDatabase(_FakeDatabase):
+class _NamespaceRejectingDatasets(_FakeDatasets):
     async def create_table_with_schema(
         self,
         *,
@@ -195,12 +195,12 @@ class _FakeSync:
 
 
 class _FakeRoom:
-    def __init__(self, *, database: _FakeDatabase | None = None) -> None:
+    def __init__(self, *, datasets: _FakeDatasets | None = None) -> None:
         self.local_participant = _FakeLocalParticipant()
         self.protocol = _FakeProtocol()
         self.queues = _FakeQueues()
         self.storage = _FakeStorage()
-        self.database = database if database is not None else _FakeDatabase()
+        self.datasets = datasets if datasets is not None else _FakeDatasets()
         self.sync = _FakeSync()
         self.is_closed = False
 
@@ -321,14 +321,14 @@ async def test_mail_channel_creates_new_thread_and_persists_thread_mapping() -> 
         )
         assert outbound.sender is not None
         assert outbound.sender.get_attribute("name") == "Alice"
-        assert room.database.create_calls == [
+        assert room.datasets.create_calls == [
             {
                 "name": "emails",
                 "mode": "create_if_not_exists",
                 "namespace": [".threads", "assistant"],
             }
         ]
-        stored_rows = room.database.tables[(((".threads", "assistant")), "emails")]
+        stored_rows = room.datasets.tables[(((".threads", "assistant")), "emails")]
         assert len(stored_rows) == 1
         assert stored_rows[0]["thread_id"] == outbound.data.thread_id
         assert any(
@@ -513,7 +513,7 @@ async def test_mail_channel_default_new_reply_keeps_existing_thread_list_name() 
         )
         await _drain()
 
-        stored_rows = room.database.tables[(((".threads", "assistant")), "emails")]
+        stored_rows = room.datasets.tables[(((".threads", "assistant")), "emails")]
         reply_message = _email_bytes(
             from_address="Alice <alice@example.com>",
             to_address="mailbox@mail.meshagent.com",
@@ -537,8 +537,8 @@ async def test_mail_channel_default_new_reply_keeps_existing_thread_list_name() 
 async def test_mail_channel_falls_back_to_flat_table_when_namespace_create_is_rejected() -> (
     None
 ):
-    database = _NamespaceRejectingDatabase()
-    room = _FakeRoom(database=database)
+    datasets = _NamespaceRejectingDatasets()
+    room = _FakeRoom(datasets=datasets)
     supervisor = _RecordingSupervisor()
     channel = MailChannel(
         room=room,
@@ -559,7 +559,7 @@ async def test_mail_channel_falls_back_to_flat_table_when_namespace_create_is_re
         )
         await _drain()
 
-        assert database.create_calls == [
+        assert datasets.create_calls == [
             {
                 "name": "emails",
                 "mode": "create_if_not_exists",
@@ -571,7 +571,7 @@ async def test_mail_channel_falls_back_to_flat_table_when_namespace_create_is_re
                 "namespace": [],
             },
         ]
-        stored_rows = database.tables[((), "emails__threads__helpdesk")]
+        stored_rows = datasets.tables[((), "emails__threads__helpdesk")]
         assert len(stored_rows) == 1
         thread_id = stored_rows[0]["thread_id"]
         assert isinstance(thread_id, str)
@@ -678,7 +678,7 @@ async def test_mail_channel_sends_reply_when_turn_ends(
             "Thanks for the note."
             in sent_messages[0].get_body(("plain",)).get_content()
         )
-        stored_rows = room.database.tables[(((".threads", "assistant")), "emails")]
+        stored_rows = room.datasets.tables[(((".threads", "assistant")), "emails")]
         assert len(stored_rows) == 2
         assert stored_rows[-1]["thread_id"] == turn_start.thread_id
     finally:
@@ -725,7 +725,7 @@ async def test_new_email_thread_tool_uses_current_thread_id(
 
         assert len(sent_messages) == 1
         assert sent_messages[0]["To"] == "customer@example.com"
-        rows = room.database.tables[(((".threads", "assistant")), "emails")]
+        rows = room.datasets.tables[(((".threads", "assistant")), "emails")]
         assert len(rows) == 1
         assert rows[0]["thread_id"] == ".threads/assistant/customer.thread"
     finally:

@@ -8,14 +8,14 @@ from typing import Any, Optional
 from meshagent.api import RoomClient
 from meshagent.api.room_server_client import (
     BinaryDataType,
-    DatabaseStruct,
+    DatasetStruct,
     ListDataType,
     StructDataType,
     TextDataType,
     TimestampDataType,
 )
 
-logger = logging.getLogger("images_database")
+logger = logging.getLogger("images_dataset")
 _IMAGE_SAVE_MAX_RETRIES = 6
 _IMAGE_SAVE_RETRY_BASE_DELAY_SECONDS = 0.2
 
@@ -29,7 +29,7 @@ class SavedImage:
     annotations: dict[str, str]
 
 
-class ImagesDatabase:
+class ImagesDataset:
     TABLE_NAME = "images"
     _METADATA_COLUMNS = ["id", "mime_type", "created_at", "created_by", "annotations"]
 
@@ -68,9 +68,9 @@ class ImagesDatabase:
         return normalized
 
     @staticmethod
-    def _encode_annotations(annotations: dict[str, str]) -> list[DatabaseStruct]:
+    def _encode_annotations(annotations: dict[str, str]) -> list[DatasetStruct]:
         return [
-            DatabaseStruct({"key": key, "value": value})
+            DatasetStruct({"key": key, "value": value})
             for key, value in annotations.items()
         ]
 
@@ -87,7 +87,7 @@ class ImagesDatabase:
 
         decoded: dict[str, str] = {}
         for item in value:
-            if isinstance(item, DatabaseStruct):
+            if isinstance(item, DatasetStruct):
                 item = item.fields
             if not isinstance(item, dict):
                 continue
@@ -105,7 +105,7 @@ class ImagesDatabase:
             mime_type=str(record.get("mime_type") or "application/octet-stream"),
             created_at=str(record.get("created_at") or ""),
             created_by=str(record.get("created_by") or ""),
-            annotations=ImagesDatabase._decode_annotations(record.get("annotations")),
+            annotations=ImagesDataset._decode_annotations(record.get("annotations")),
         )
 
     @staticmethod
@@ -126,26 +126,26 @@ class ImagesDatabase:
                 return
 
             schema = self._schema()
-            await self._room.database.create_table_with_schema(
+            await self._room.datasets.create_table_with_schema(
                 name=self.TABLE_NAME,
                 schema=schema,
                 mode="create_if_not_exists",
             )
 
-            existing_schema = await self._room.database.inspect(table=self.TABLE_NAME)
+            existing_schema = await self._room.datasets.inspect(table=self.TABLE_NAME)
             missing_columns = {
                 key: value
                 for key, value in schema.items()
                 if key not in existing_schema
             }
             if len(missing_columns) > 0:
-                await self._room.database.add_columns(
+                await self._room.datasets.add_columns(
                     table=self.TABLE_NAME,
                     new_columns=missing_columns,
                 )
 
             try:
-                await self._room.database.create_scalar_index(
+                await self._room.datasets.create_scalar_index(
                     table=self.TABLE_NAME,
                     column="id",
                 )
@@ -186,7 +186,7 @@ class ImagesDatabase:
 
         for attempt in range(_IMAGE_SAVE_MAX_RETRIES):
             try:
-                await self._room.database.insert(
+                await self._room.datasets.insert(
                     table=self.TABLE_NAME,
                     records=[record],
                 )
@@ -217,7 +217,7 @@ class ImagesDatabase:
     async def read(self, *, image_id: str) -> Optional[SavedImage]:
         await self._ensure_ready()
 
-        rows = await self._room.database.search(
+        rows = await self._room.datasets.search(
             table=self.TABLE_NAME,
             where={"id": image_id},
             limit=1,
@@ -236,7 +236,7 @@ class ImagesDatabase:
     ) -> list[SavedImage]:
         await self._ensure_ready()
 
-        rows = await self._room.database.search(
+        rows = await self._room.datasets.search(
             table=self.TABLE_NAME,
             where=where,
             limit=limit,
@@ -247,7 +247,7 @@ class ImagesDatabase:
     async def read_data(self, *, image_id: str) -> Optional[bytes]:
         await self._ensure_ready()
 
-        rows = await self._room.database.search(
+        rows = await self._room.datasets.search(
             table=self.TABLE_NAME,
             where={"id": image_id},
             limit=1,
@@ -265,4 +265,4 @@ class ImagesDatabase:
 
     async def optimize(self) -> None:
         await self._ensure_ready()
-        await self._room.database.optimize(table=self.TABLE_NAME)
+        await self._room.datasets.optimize(table=self.TABLE_NAME)

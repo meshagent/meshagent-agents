@@ -99,14 +99,14 @@ class RemoteRoomTool(LocalRoomTool):
 
 
 async def install_required_table(*, room: RoomClient, table: RequiredTable):
-    await room.database.create_table_with_schema(
+    await room.datasets.create_table_with_schema(
         name=table.name,
         mode="create_if_not_exists",
         schema=table.schema,
         namespace=table.namespace,
     )
 
-    indexes = await room.database.list_indexes(
+    indexes = await room.datasets.list_indexes(
         table=table.name, namespace=table.namespace
     )
 
@@ -120,7 +120,7 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     for vi in table.vector_indexes or []:
         if not index_exists(vi):
             try:
-                await room.database.create_vector_index(
+                await room.datasets.create_vector_index(
                     table=table.name,
                     column=vi,
                     namespace=table.namespace,
@@ -132,7 +132,7 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     for ti in table.full_text_search_indexes or []:
         if not index_exists(ti):
             try:
-                await room.database.create_full_text_search_index(
+                await room.datasets.create_full_text_search_index(
                     table=table.name,
                     column=ti,
                     namespace=table.namespace,
@@ -147,7 +147,7 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     for si in table.scalar_indexes or []:
         if not index_exists(si):
             try:
-                await room.database.create_scalar_index(
+                await room.datasets.create_scalar_index(
                     table=table.name,
                     column=si,
                     namespace=table.namespace,
@@ -159,7 +159,7 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     logger.info(f"optimizing table {table.name} in {table.namespace}")
 
     # TODO: use index_stats to determine when indexes need to be updated
-    await room.database.optimize(table=table.name, namespace=table.namespace)
+    await room.datasets.optimize(table=table.name, namespace=table.namespace)
 
 
 class SingleRoomAgent:

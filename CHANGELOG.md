@@ -43,7 +43,7 @@
 - Harbor environments can delegate the room token into container env and now prefer API-key auth over ambient room tokens.
 
 ## [0.37.0]
-- Breaking: Database API now supports `json`, `uuid`, `list`, and `struct` types with typed wrappers (DatabaseJson/DatabaseStruct/DatabaseExpression/DatabaseDate/Uuid), and query results/params use structured encoding instead of JSON strings.
+- Breaking: Datasets API now supports `json`, `uuid`, `list`, and `struct` types with typed wrappers (DatasetJson/DatasetStruct/DatasetExpression/DatasetDate/Uuid), and query results/params use structured encoding instead of JSON strings.
 - Breaking: Containers build now streams build contexts (start/data chunks) with `mount_path`/`chunks` and removes `start_build`.
 - Breaking: Toolkit/hosting refactor removes toolkit config/builders and `supports_context`, introduces room-bound `Toolkit` with public/hidden/client options, and adds LocalRoomTool plus new hosted-toolkit start/stop flow.
 - Storage and skills updates: storage toolkits now require explicit mounts (with delete support) and skills prompt generation reads skills through storage mounts.
@@ -357,7 +357,7 @@
 - OpenAI Responses adapter adds context window tracking, compaction via responses.compact, input-token counting, usage storage, max_output_tokens control, and shell tool env injection.
 - RoomClient can auto-initialize from MESHAGENT_ROOM/MESHAGENT_TOKEN; websocket URL helper added.
 - Schema documents add grep/tag queries and ChatBotClient; chat reply routing now targets the requesting participant reliably.
-- Database toolkit now expects update values as a list of column updates and defaults to advanced search/delete tools.
+- Datasets toolkit now expects update values as a list of column updates and defaults to advanced search/delete tools.
 - Dependency addition: prompt-toolkit~=3.0.52 added to CLI 'all' extras.
 
 ## [0.21.0]

@@ -226,7 +226,7 @@ class MailBot(Worker):
 
     async def load_message(self, *, message_id: str) -> dict | None:
         room = self.room
-        messages = await room.database.search(table="emails", where={"id": message_id})
+        messages = await room.datasets.search(table="emails", where={"id": message_id})
 
         if len(messages) == 0:
             return None
@@ -278,7 +278,7 @@ class MailBot(Worker):
             data=json.dumps(queued_message, indent=4).encode("utf-8"),
         )
 
-        await room.database.insert(
+        await room.datasets.insert(
             table="emails",
             records=[{"id": message_id, "json": json.dumps(queued_message)}],
         )

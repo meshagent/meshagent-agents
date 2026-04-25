@@ -124,7 +124,7 @@ class MailChannel(ThreadedChannel):
         self._receive_task: asyncio.Task[None] | None = None
         self._pending_messages_by_source_id: dict[str, _PendingInboundMail] = {}
         self._active_turns_by_turn_id: dict[str, _ActiveMailTurn] = {}
-        self._database_namespace_supported: bool = True
+        self._dataset_namespace_supported: bool = True
 
     def _default_thread_dir_fallback_name(self) -> str:
         return "mail"
@@ -148,7 +148,7 @@ class MailChannel(ThreadedChannel):
     async def on_start(self) -> None:
         await self.publish_thread_attributes()
         await self.open_thread_list_document()
-        await self._ensure_database_table()
+        await self._ensure_dataset_table()
         self._receive_task = asyncio.create_task(self._receive_loop())
 
     async def on_stop(self) -> None:
@@ -386,10 +386,10 @@ class MailChannel(ThreadedChannel):
             payload=turn_start,
         )
 
-    async def _ensure_database_table(self) -> None:
-        table_name, namespace = self._database_table_ref()
+    async def _ensure_dataset_table(self) -> None:
+        table_name, namespace = self._dataset_table_ref()
         try:
-            await self._room.database.create_table_with_schema(
+            await self._room.datasets.create_table_with_schema(
                 name=table_name,
                 schema={
                     "id": TextDataType(nullable=False),
@@ -405,17 +405,17 @@ class MailChannel(ThreadedChannel):
             if (
                 namespace is None
                 or not self._is_namespace_location_error(exc=exc)
-                or not self._database_namespace_supported
+                or not self._dataset_namespace_supported
             ):
                 raise
 
-            self._database_namespace_supported = False
-            fallback_table_name, fallback_namespace = self._database_table_ref()
+            self._dataset_namespace_supported = False
+            fallback_table_name, fallback_namespace = self._dataset_table_ref()
             logger.warning(
-                "mail channel falling back to flat database table %s because the room server rejected namespaced table creation",
+                "mail channel falling back to flat dataset table %s because the room server rejected namespaced table creation",
                 fallback_table_name,
             )
-            await self._room.database.create_table_with_schema(
+            await self._room.datasets.create_table_with_schema(
                 name=fallback_table_name,
                 schema={
                     "id": TextDataType(nullable=False),
@@ -429,8 +429,8 @@ class MailChannel(ThreadedChannel):
             )
 
     async def _load_message(self, *, message_id: str) -> dict[str, Any] | None:
-        table_name, namespace = self._database_table_ref()
-        results = await self._room.database.search(
+        table_name, namespace = self._dataset_table_ref()
+        results = await self._room.datasets.search(
             table=table_name,
             where={"id": message_id},
             namespace=namespace,
@@ -499,8 +499,8 @@ class MailChannel(ThreadedChannel):
             path=posixpath.join(base_path, "message.json"),
             data=json.dumps(queued_message, indent=4).encode("utf-8"),
         )
-        table_name, namespace = self._database_table_ref()
-        await self._room.database.insert(
+        table_name, namespace = self._dataset_table_ref()
+        await self._room.datasets.insert(
             table=table_name,
             namespace=namespace,
             records=[
@@ -623,7 +623,7 @@ class MailChannel(ThreadedChannel):
             ),
         )
 
-    def _database_namespace(self) -> list[str]:
+    def _dataset_namespace(self) -> list[str]:
         return [part for part in self.get_thread_dir().split("/") if part != ""]
 
     @staticmethod
@@ -639,7 +639,7 @@ class MailChannel(ThreadedChannel):
         return normalized
 
     def _flat_mail_table_name(self) -> str:
-        namespace = self._database_namespace()
+        namespace = self._dataset_namespace()
         if len(namespace) == 0:
             return _MAIL_TABLE_NAME
 
@@ -648,9 +648,9 @@ class MailChannel(ThreadedChannel):
         )
         return f"{_MAIL_TABLE_NAME}__{suffix}"
 
-    def _database_table_ref(self) -> tuple[str, list[str] | None]:
-        namespace = self._database_namespace()
-        if self._database_namespace_supported:
+    def _dataset_table_ref(self) -> tuple[str, list[str] | None]:
+        namespace = self._dataset_namespace()
+        if self._dataset_namespace_supported:
             return _MAIL_TABLE_NAME, namespace
         return self._flat_mail_table_name(), None
 

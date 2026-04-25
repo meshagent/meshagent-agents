@@ -158,12 +158,12 @@ class RagTool(LocalRoomTool):
     async def execute(self, context: ToolContext, query: str):
         del context
         if self._embedder is None:
-            results = await self.room.database.search(
+            results = await self.room.datasets.search(
                 table=self.table, text=query, limit=10
             )
         else:
             embedding = await self._embedder.embed(text=query)
-            results = await self.room.database.search(
+            results = await self.room.datasets.search(
                 table=self.table, text=query, vector=embedding, limit=10
             )
 
@@ -254,7 +254,7 @@ class StorageIndexer(SingleRoomAgent):
     async def refresh_index(self):
         self.room.developer.log_nowait(type="indexer.rebuild", data={})
 
-        indexes = await self.room.database.list_indexes(table=self.table)
+        indexes = await self.room.datasets.list_indexes(table=self.table)
 
         logger.info(f"existing indexes {indexes}")
 
@@ -268,7 +268,7 @@ class StorageIndexer(SingleRoomAgent):
         if not self._vector_index_created:
             try:
                 logger.info("attempting to create embedding index")
-                await self.room.database.create_vector_index(
+                await self.room.datasets.create_vector_index(
                     table=self.table, column="embedding", replace=False
                 )
                 self._vector_index_created = True
@@ -279,7 +279,7 @@ class StorageIndexer(SingleRoomAgent):
         if not self._fts_created:
             try:
                 logger.info("attempting to create fts index")
-                await self.room.database.create_full_text_search_index(
+                await self.room.datasets.create_full_text_search_index(
                     table=self.table, column="text", replace=False
                 )
                 self._fts_created = True
@@ -289,7 +289,7 @@ class StorageIndexer(SingleRoomAgent):
 
         if self._fts_created or self._vector_index_created:
             logger.info("optimizing existing index")
-            await self.room.database.optimize(table=self.table)
+            await self.room.datasets.optimize(table=self.table)
 
     async def start(self, *, room):
         if self.embedder is None:
@@ -300,7 +300,7 @@ class StorageIndexer(SingleRoomAgent):
         room.storage.on("file.updated", self._on_file_updated)
         room.storage.on("file.deleted", self._on_file_deleted)
 
-        await room.database.create_table_with_schema(
+        await room.datasets.create_table_with_schema(
             name=self.table,
             schema={
                 "url": TextDataType(),
@@ -340,7 +340,7 @@ class StorageIndexer(SingleRoomAgent):
                     self.room.developer.log_nowait(
                         type="indexer.delete", data={"path": e.path}
                     )
-                    await self.room.database.delete(
+                    await self.room.datasets.delete(
                         table=self.table, where=f"url='{escape_sql_string(e.path)}'"
                     )
 
@@ -351,7 +351,7 @@ class StorageIndexer(SingleRoomAgent):
 
                     async def lookup_or_embed(*, sha: str, text: str) -> list[float]:
                         # if we already indexed this chunk, lets use the existing embedding instead of generating a new one
-                        results = await self.room.database.search(
+                        results = await self.room.datasets.search(
                             table=self.table,
                             where={
                                 "sha": sha,
@@ -410,7 +410,7 @@ class StorageIndexer(SingleRoomAgent):
                                     "sha": chunk_sha,
                                 }
                             )
-                    await self.room.database.merge(
+                    await self.room.datasets.merge(
                         table=self.table, on="sha", records=rows
                     )
                     await self.refresh_index()
@@ -482,7 +482,7 @@ class SiteIndexer(TaskRunner):
         table = arguments["table"]
         url = arguments["url"]
 
-        tables = await context.room.database.list_tables()
+        tables = await context.room.datasets.list_tables()
 
         exists = False
         try:
@@ -493,7 +493,7 @@ class SiteIndexer(TaskRunner):
         async def lookup_or_embed(*, sha: str, text: str) -> list[float]:
             # if we already indexed this chunk, lets use the existing embedding instead of generating a new one
             if exists:
-                results = await self.room.database.search(
+                results = await self.room.datasets.search(
                     table=self.table,
                     where={
                         "sha": sha,
@@ -597,7 +597,7 @@ class SiteIndexer(TaskRunner):
 
         logger.info(f"saving crawl: {url}")
 
-        await context.room.database.create_table_with_schema(
+        await context.room.datasets.create_table_with_schema(
             name=table,
             schema={
                 "id": IntDataType(),
@@ -613,11 +613,11 @@ class SiteIndexer(TaskRunner):
         )
 
         if len(rows) > 255:
-            await context.room.database.create_vector_index(
+            await context.room.datasets.create_vector_index(
                 table=table, column="embedding"
             )
 
-        await context.room.database.create_full_text_search_index(
+        await context.room.datasets.create_full_text_search_index(
             table=table, column="text"
         )
 

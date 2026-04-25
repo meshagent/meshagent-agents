@@ -61,7 +61,7 @@ _RESERVED_ENV_NAMES = {"MESHAGENT_TOKEN", "MESHAGENT_ROOM"}
 _DEFAULT_PACKAGE_IMAGE = "meshagent/cli:default"
 _DEFAULT_MESHAGENT_PACKAGE_BUILD_IMAGE = "meshagent/python-sdk-slim:default"
 _DEFAULT_MESHAGENT_IMAGE_PREFIX = "us-central1-docker.pkg.dev/meshagent-public/images/"
-_DEFAULT_DATABASE_NAMESPACE = (".database",)
+_DEFAULT_DATABASE_NAMESPACE = (".datasets",)
 _PACKAGE_RUNTIME_DIR = PurePosixPath("/package")
 _PACKAGE_ENTRYPOINT_NAME = "__meshagent_entrypoint__.py"
 
@@ -728,7 +728,7 @@ def _normalize_named_values(
     return normalized_values
 
 
-def _parse_database_namespace(namespace: str | None) -> list[str]:
+def _parse_dataset_namespace(namespace: str | None) -> list[str]:
     if namespace is None:
         return [*_DEFAULT_DATABASE_NAMESPACE]
     normalized = _normalize_optional_string(namespace, field_name="namespace")
@@ -1403,7 +1403,7 @@ class MeshagentPackage(PythonPackage):
         self._storage_read_only = False
         self._table_read: list[str] = []
         self._table_write: list[str] = []
-        self._database_namespace: list[str] | None = None
+        self._dataset_namespace: list[str] | None = None
         self._time_enabled = False
         self._uuid_enabled = False
         self._memory_config: _MemoryToolConfig | None = None
@@ -1528,8 +1528,8 @@ class MeshagentPackage(PythonPackage):
             return self
 
         self._table_read = _normalize_named_values(tables, field_name="tables")
-        if namespace is not None or self._database_namespace is None:
-            self._database_namespace = _parse_database_namespace(namespace)
+        if namespace is not None or self._dataset_namespace is None:
+            self._dataset_namespace = _parse_dataset_namespace(namespace)
         return self
 
     def table_write(
@@ -1544,8 +1544,8 @@ class MeshagentPackage(PythonPackage):
             return self
 
         self._table_write = _normalize_named_values(tables, field_name="tables")
-        if namespace is not None or self._database_namespace is None:
-            self._database_namespace = _parse_database_namespace(namespace)
+        if namespace is not None or self._dataset_namespace is None:
+            self._dataset_namespace = _parse_dataset_namespace(namespace)
         return self
 
     def time(self, *, enable: bool = True) -> MeshagentPackage:
@@ -1821,7 +1821,7 @@ class MeshagentPackage(PythonPackage):
             ProcessShellTool,
         )
         from meshagent.tools.web_toolkit import WebFetchTool
-        from meshagent.tools.database import make_database_toolkit
+        from meshagent.tools.dataset import make_dataset_toolkit
         from meshagent.tools.datetime import DatetimeToolkit
         from meshagent.tools.discovery import DiscoveryToolkit
         from meshagent.tools.document_tools import (
@@ -1993,11 +1993,11 @@ class MeshagentPackage(PythonPackage):
                         )
                     if len(self_package._table_read) > 0:
                         toolkits.append(
-                            await make_database_toolkit(
+                            await make_dataset_toolkit(
                                 room=self._room,
                                 tables=self_package._table_read,
                                 read_only=True,
-                                namespace=self_package._database_namespace,
+                                namespace=self_package._dataset_namespace,
                             )
                         )
                     if self_package._time_enabled:
@@ -2015,11 +2015,11 @@ class MeshagentPackage(PythonPackage):
                         )
                     if len(self_package._table_write) > 0:
                         toolkits.append(
-                            await make_database_toolkit(
+                            await make_dataset_toolkit(
                                 room=self._room,
                                 tables=self_package._table_write,
                                 read_only=False,
-                                namespace=self_package._database_namespace,
+                                namespace=self_package._dataset_namespace,
                             )
                         )
                     if self_package._document_authoring_enabled:

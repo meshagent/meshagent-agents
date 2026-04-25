@@ -24,7 +24,7 @@ from meshagent.api.messaging import (
 )
 
 from .context import AgentSessionContext
-from .images_database import ImagesDatabase
+from .images_dataset import ImagesDataset
 from .messages import (
     AGENT_EVENT_TURN_INTERRUPTED,
     AgentError,
@@ -365,7 +365,7 @@ def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
 class AgentProcessThreadAdapter(ThreadAdapter):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._images_db = ImagesDatabase(room=self._room)
+        self._images_db = ImagesDataset(room=self._room)
         self._active_message_elements_by_key: dict[str, Element] = {}
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}

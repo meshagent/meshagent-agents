@@ -97,7 +97,7 @@ def test_package_meshagent_tool_methods_configure_runtime_flags() -> None:
     assert package._storage_read_only is True
     assert package._table_read == ["users"]
     assert package._table_write == ["events"]
-    assert package._database_namespace == ["prod", "analytics"]
+    assert package._dataset_namespace == ["prod", "analytics"]
     assert package._time_enabled is True
     assert package._uuid_enabled is True
     assert package._memory_config == package_module._MemoryToolConfig(
@@ -826,7 +826,7 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
     import meshagent.computers.agent as computer_agent_module
     import meshagent.openai.tools.responses_adapter as responses_adapter_module
     import meshagent.tools.container_shell as container_shell_module
-    import meshagent.tools.database as database_module
+    import meshagent.tools.dataset as datasets_module
     import meshagent.tools.datetime as datetime_tools_module
     import meshagent.tools.discovery as discovery_module
     import meshagent.tools.document_tools as document_tools_module
@@ -884,7 +884,7 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
     async def _fake_stop(self) -> None:
         self._state = "stopped"
 
-    async def _fake_make_database_toolkit(
+    async def _fake_make_dataset_toolkit(
         *,
         room,
         tables,
@@ -895,7 +895,7 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
         suffix = "read" if read_only else "write"
         namespace_suffix = "::".join(namespace) if namespace is not None else "none"
         return package_module.Toolkit(
-            name=f"database.{suffix}.{','.join(tables)}.{namespace_suffix}",
+            name=f"dataset.{suffix}.{','.join(tables)}.{namespace_suffix}",
             tools=[],
         )
 
@@ -961,9 +961,9 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
         ),
     )
     monkeypatch.setattr(
-        database_module,
-        "make_database_toolkit",
-        _fake_make_database_toolkit,
+        datasets_module,
+        "make_dataset_toolkit",
+        _fake_make_dataset_toolkit,
     )
 
     package = (
@@ -988,8 +988,8 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
     toolkit_names = [toolkit.name for toolkit in toolkits]
     assert "apply_patch" in toolkit_names
     assert "container" in toolkit_names
-    assert "database.read.users.prod::analytics" in toolkit_names
-    assert "database.write.events.prod::analytics" in toolkit_names
+    assert "dataset.read.users.prod::analytics" in toolkit_names
+    assert "dataset.write.events.prod::analytics" in toolkit_names
     assert "datetime" in toolkit_names
     assert "uuid" in toolkit_names
     assert "memories" in toolkit_names

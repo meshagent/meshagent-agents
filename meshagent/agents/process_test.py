@@ -813,7 +813,7 @@ class _DownloadRecordingStorage:
         return self.files[path]
 
 
-class _RecordingDatabase:
+class _RecordingDatasets:
     def __init__(self) -> None:
         self.schemas: dict[str, dict[str, Any]] = {}
         self.rows: dict[str, list[dict[str, Any]]] = {}
@@ -889,7 +889,7 @@ class _RecordingDatabase:
 class _DownloadRecordingRoom:
     def __init__(self, *, files: dict[str, FileContent] | None = None) -> None:
         self.storage = _DownloadRecordingStorage(files=files or {})
-        self.database = _RecordingDatabase()
+        self.datasets = _RecordingDatasets()
         self.local_participant = _ThreadLocalParticipant()
         self.is_closed = False
 
@@ -5297,7 +5297,7 @@ async def test_agent_process_thread_adapter_persists_generated_images(
         image_id = image.get_attribute("id")
         assert isinstance(image_id, str) and image_id != ""
 
-        stored_rows = await room.database.search(
+        stored_rows = await room.datasets.search(
             table="images",
             where={"id": image_id},
             limit=1,
@@ -5310,7 +5310,7 @@ async def test_agent_process_thread_adapter_persists_generated_images(
                 "created_by": "assistant",
             }
         ]
-        stored_annotations = room.database.rows["images"][0]["annotations"]
+        stored_annotations = room.datasets.rows["images"][0]["annotations"]
         assert len(stored_annotations) == 3
         assert "fake-image-bytes" not in (tool_event.get_attribute("data") or "")
     finally:

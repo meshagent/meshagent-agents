@@ -117,7 +117,7 @@ thread_schema = MeshSchema(
         ),
         ElementType(
             tag_name="image",
-            description="an image attachment stored in the images database",
+            description="an image attachment stored in the images dataset",
             properties=[
                 ValueProperty(
                     name="status",

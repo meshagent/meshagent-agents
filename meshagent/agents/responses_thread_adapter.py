@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from meshagent.api import Element, RoomException
 
-from .images_database import ImagesDatabase
+from .images_dataset import ImagesDataset
 from .image_captioner import ImageCaptioner
 from .thread_adapter import ThreadAdapter, tracer
 
@@ -868,7 +868,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
     ):
         super().__init__(**kwargs)
         self._active_events_by_key: dict[str, Element] = {}
-        self._images_db = ImagesDatabase(room=self._room)
+        self._images_db = ImagesDataset(room=self._room)
         self._image_captioner = image_captioner
         self._saved_image_ids_by_item_id: dict[str, str] = {}
         self._saved_image_stage_by_item_id: dict[str, str] = {}
@@ -1491,7 +1491,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 timeout=_IMAGE_DB_SAVE_TIMEOUT_SECONDS,
             )
         except Exception as ex:
-            logger.error("failed to save generated image to database", exc_info=ex)
+            logger.error("failed to save generated image to dataset", exc_info=ex)
             await self._emit_image_status_event(
                 messages=messages,
                 item_id=item_id,
@@ -1553,7 +1553,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
 
         self._saved_image_ids_by_item_id[item_id] = saved_image.id
         self._saved_image_stage_by_item_id[item_id] = incoming_stage
-        logger.info("Saved generated image %s to images database", saved_image.id)
+        logger.info("Saved generated image %s to images dataset", saved_image.id)
 
     async def handle_image_generation_started(
         self,
