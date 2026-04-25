@@ -21,6 +21,7 @@ from meshagent.api import RoomException
 from meshagent.api.chan import Chan
 from meshagent.api.messaging import JsonContent
 from meshagent.api.participant import Participant
+from meshagent.openai.tools.responses_adapter import OpenAIResponsesAdapter
 from meshagent.tools import ToolContext, Toolkit
 
 
@@ -190,18 +191,25 @@ class _FakeLocalParticipant(Participant):
         self.set_attribute_calls.append((name, value))
 
 
+class _FakeProtocol:
+    def __init__(self, *, token: str | None = None):
+        self.token = token
+
+
 class _FakeRoom:
     def __init__(
         self,
         *,
         existing_paths: Optional[set[str]] = None,
         sync: Optional[_FakeSync] = None,
+        token: str | None = None,
     ):
         self.local_participant = _FakeLocalParticipant()
         self.storage = _FakeStorage(existing_paths=existing_paths)
         self.messaging = _FakeMessaging()
         self.sync = sync or _FakeSync()
         self.agents = _FakeAgents()
+        self.protocol = _FakeProtocol(token=token)
         self.is_closed = False
 
 
@@ -1426,6 +1434,26 @@ async def test_chatbot_start_sets_thread_attributes_on_participant() -> None:
         "meshagent.chatbot.thread-list",
         "custom/index.threadl",
     ) in room.local_participant.set_attribute_calls
+
+    await bot.stop()
+
+
+@pytest.mark.asyncio
+async def test_chatbot_start_swaps_in_room_bound_llm_adapter() -> None:
+    adapter = OpenAIResponsesAdapter(model="gpt-4o")
+    bot = ChatBot(llm_adapter=adapter)
+    room = _FakeRoom(token="service-token")
+
+    with mock.patch.object(
+        bot,
+        "get_exposed_toolkits",
+        new=mock.AsyncMock(return_value=[]),
+    ):
+        await bot.start(room=room)
+
+    assert bot._llm_adapter is not adapter
+    assert isinstance(bot._llm_adapter, OpenAIResponsesAdapter)
+    assert bot._llm_adapter._api_key == "service-token"
 
     await bot.stop()
 

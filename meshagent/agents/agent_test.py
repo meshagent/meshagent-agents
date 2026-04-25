@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from meshagent.agents.agent import RemoteRoomTool
+from meshagent.agents.agent import RemoteRoomTool, SingleRoomAgent
 from meshagent.api import RoomException
 from meshagent.api.messaging import TextContent
 from meshagent.tools import ToolContext
@@ -56,8 +56,31 @@ class _FakeAgentsClient:
 
 
 class _FakeRoom:
-    def __init__(self, *, agents: _FakeAgentsClient):
+    def __init__(self, *, agents: _FakeAgentsClient, token: str | None = None):
         self.agents = agents
+        self.protocol = _FakeProtocol(token=token)
+
+
+class _FakeProtocol:
+    def __init__(self, *, token: str | None = None):
+        self.token = token
+
+
+class _CredentialBindingAgent(SingleRoomAgent):
+    def __init__(self) -> None:
+        super().__init__(name="helper")
+        self.bound_room = None
+        self.bound_api_key = None
+
+    async def install_requirements(self, participant_id: str | None = None):
+        del participant_id
+
+    async def get_exposed_toolkits(self) -> list:
+        return []
+
+    def bind_runtime_credentials(self, *, room) -> None:
+        self.bound_room = room
+        self.bound_api_key = self.resolve_runtime_api_key(room=room)
 
 
 @pytest.mark.asyncio
@@ -146,3 +169,19 @@ def test_remote_room_tool_preserves_explicit_non_strict_metadata() -> None:
     )
 
     assert tool.strict is False
+
+
+@pytest.mark.asyncio
+async def test_single_room_agent_start_binds_runtime_credentials() -> None:
+    room = _FakeRoom(
+        agents=_FakeAgentsClient(response=None),
+        token="  room-token  ",
+    )
+    agent = _CredentialBindingAgent()
+
+    await agent.start(room=room)
+
+    assert agent.bound_room is room
+    assert agent.bound_api_key == "room-token"
+
+    await agent.stop()

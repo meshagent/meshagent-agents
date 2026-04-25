@@ -253,11 +253,24 @@ class SingleRoomAgent:
     async def get_exposed_toolkits(self) -> list[Toolkit]:
         return []
 
+    @staticmethod
+    def resolve_runtime_api_key(*, room: RoomClient) -> str | None:
+        token = room.protocol.token
+        if token is None:
+            return None
+
+        normalized_token = token.strip()
+        return normalized_token or None
+
+    def bind_runtime_credentials(self, *, room: RoomClient) -> None:
+        del room
+
     async def start(self, *, room: RoomClient) -> None:
         if self._room is not None:
             raise RoomException("agent is already started")
 
         self._room = room
+        self.bind_runtime_credentials(room=room)
 
         await self.install_requirements()
 

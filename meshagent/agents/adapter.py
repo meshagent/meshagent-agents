@@ -197,6 +197,10 @@ class LLMAdapter(Generic[TEvent]):
     ) -> None:
         del handler
 
+    def with_runtime_api_key(self, *, api_key: str | None) -> "LLMAdapter[TEvent]":
+        del api_key
+        return self
+
     def make_agent_event_publisher(
         self,
         turn_id: str,
