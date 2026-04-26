@@ -14,8 +14,9 @@ import re
 from typing import Any
 import uuid
 
+import pyarrow as pa
+
 from meshagent.api import Participant, RoomClient, RoomException
-from meshagent.api.room_server_client import TextDataType
 from meshagent.tools import FileContent, FunctionTool, ToolContext, Toolkit
 from email.policy import default
 
@@ -391,13 +392,15 @@ class MailChannel(ThreadedChannel):
         try:
             await self._room.datasets.create_table_with_schema(
                 name=table_name,
-                schema={
-                    "id": TextDataType(nullable=False),
-                    "thread_id": TextDataType(nullable=False),
-                    "in_reply_to": TextDataType(),
-                    "role": TextDataType(nullable=False),
-                    "json": TextDataType(nullable=False),
-                },
+                schema=pa.schema(
+                    [
+                        pa.field("id", pa.string(), nullable=False),
+                        pa.field("thread_id", pa.string(), nullable=False),
+                        pa.field("in_reply_to", pa.string()),
+                        pa.field("role", pa.string(), nullable=False),
+                        pa.field("json", pa.string(), nullable=False),
+                    ]
+                ),
                 mode="create_if_not_exists",
                 namespace=namespace,
             )
@@ -417,13 +420,15 @@ class MailChannel(ThreadedChannel):
             )
             await self._room.datasets.create_table_with_schema(
                 name=fallback_table_name,
-                schema={
-                    "id": TextDataType(nullable=False),
-                    "thread_id": TextDataType(nullable=False),
-                    "in_reply_to": TextDataType(),
-                    "role": TextDataType(nullable=False),
-                    "json": TextDataType(nullable=False),
-                },
+                schema=pa.schema(
+                    [
+                        pa.field("id", pa.string(), nullable=False),
+                        pa.field("thread_id", pa.string(), nullable=False),
+                        pa.field("in_reply_to", pa.string()),
+                        pa.field("role", pa.string(), nullable=False),
+                        pa.field("json", pa.string(), nullable=False),
+                    ]
+                ),
                 mode="create_if_not_exists",
                 namespace=fallback_namespace,
             )
@@ -435,6 +440,7 @@ class MailChannel(ThreadedChannel):
             where={"id": message_id},
             namespace=namespace,
         )
+        results = results.to_pylist()
         if len(results) == 0:
             return None
         raw_json = results[0].get("json")

@@ -1,13 +1,8 @@
 from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
 from meshagent.tools import Toolkit, LocalRoomTool, ToolContext
 from meshagent.openai.proxy import get_client
-from meshagent.api.room_server_client import (
-    RoomClient,
-    TextDataType,
-    VectorDataType,
-    FloatDataType,
-    IntDataType,
-)
+from meshagent.api.room_server_client import RoomClient
+import pyarrow as pa
 from openai import AsyncOpenAI
 from typing import Optional
 from meshagent.api.chan import Chan
@@ -167,7 +162,9 @@ class RagTool(LocalRoomTool):
                 table=self.table, text=query, vector=embedding, limit=10
             )
 
-        results = list(map(lambda r: f"from {r['url']}: {r['text']}", results))
+        results = list(
+            map(lambda r: f"from {r['url']}: {r['text']}", results.to_pylist())
+        )
 
         return {"results": results}
 
@@ -302,14 +299,14 @@ class StorageIndexer(SingleRoomAgent):
 
         await room.datasets.create_table_with_schema(
             name=self.table,
-            schema={
-                "url": TextDataType(),
-                "text": TextDataType(),
-                "embedding": VectorDataType(
-                    size=self.embedder.size, element_type=FloatDataType()
-                ),
-                "sha": TextDataType(),
-            },
+            schema=pa.schema(
+                [
+                    pa.field("url", pa.string()),
+                    pa.field("text", pa.string()),
+                    pa.field("embedding", pa.list_(pa.float64(), self.embedder.size)),
+                    pa.field("sha", pa.string()),
+                ]
+            ),
             mode="create_if_not_exists",
             data=None,
         )
@@ -358,6 +355,7 @@ class StorageIndexer(SingleRoomAgent):
                             },
                             limit=1,
                         )
+                        results = results.to_pylist()
 
                         if len(results) != 0:
                             logger.info(
@@ -500,6 +498,7 @@ class SiteIndexer(TaskRunner):
                     },
                     limit=1,
                 )
+                results = results.to_pylist()
 
                 if len(results) != 0:
                     logger.info(f"chunk found from {url} {sha}, reusing embedding")
@@ -599,15 +598,15 @@ class SiteIndexer(TaskRunner):
 
         await context.room.datasets.create_table_with_schema(
             name=table,
-            schema={
-                "id": IntDataType(),
-                "url": TextDataType(),
-                "text": TextDataType(),
-                "embedding": VectorDataType(
-                    size=self.embedder.size, element_type=FloatDataType()
-                ),
-                "sha": TextDataType(),
-            },
+            schema=pa.schema(
+                [
+                    pa.field("id", pa.int64()),
+                    pa.field("url", pa.string()),
+                    pa.field("text", pa.string()),
+                    pa.field("embedding", pa.list_(pa.float64(), self.embedder.size)),
+                    pa.field("sha", pa.string()),
+                ]
+            ),
             mode="overwrite",
             data=rows,
         )

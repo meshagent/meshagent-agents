@@ -8,7 +8,7 @@ from meshagent.tools import (
 )
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from meshagent.tools.storage import StorageToolkit
-from meshagent.api.room_server_client import TextDataType, RoomException
+from meshagent.api.room_server_client import RoomException
 from email import message_from_bytes
 from email.message import EmailMessage
 from meshagent.api import RoomClient
@@ -18,6 +18,7 @@ from meshagent.agents import AgentSessionContext
 from datetime import datetime, timezone
 import base64
 import secrets
+import pyarrow as pa
 
 from typing import Literal, Optional
 import json
@@ -219,7 +220,12 @@ class MailBot(Worker):
             *super().get_requirements(),
             RequiredTable(
                 name="emails",
-                schema={"id": TextDataType(), "json": TextDataType()},
+                schema=pa.schema(
+                    [
+                        pa.field("id", pa.string()),
+                        pa.field("json", pa.string()),
+                    ]
+                ),
                 scalar_indexes=["id"],
             ),
         ]
@@ -227,6 +233,7 @@ class MailBot(Worker):
     async def load_message(self, *, message_id: str) -> dict | None:
         room = self.room
         messages = await room.datasets.search(table="emails", where={"id": message_id})
+        messages = messages.to_pylist()
 
         if len(messages) == 0:
             return None

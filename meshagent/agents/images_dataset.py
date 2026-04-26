@@ -5,15 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import pyarrow as pa
+
 from meshagent.api import RoomClient
-from meshagent.api.room_server_client import (
-    BinaryDataType,
-    DatasetStruct,
-    ListDataType,
-    StructDataType,
-    TextDataType,
-    TimestampDataType,
-)
+from meshagent.api.room_server_client import DatasetStruct
 
 logger = logging.getLogger("images_dataset")
 _IMAGE_SAVE_MAX_RETRIES = 6
@@ -38,22 +33,27 @@ class ImagesDataset:
         self._ready = False
         self._lock = asyncio.Lock()
 
-    def _schema(self) -> dict:
-        return {
-            "id": TextDataType(nullable=False),
-            "data": BinaryDataType(nullable=False),
-            "mime_type": TextDataType(nullable=False),
-            "created_at": TimestampDataType(nullable=False),
-            "created_by": TextDataType(nullable=False),
-            "annotations": ListDataType(
-                element_type=StructDataType(
-                    fields={
-                        "key": TextDataType(nullable=False),
-                        "value": TextDataType(),
-                    }
-                )
-            ),
-        }
+    def _schema(self) -> pa.Schema:
+        return pa.schema(
+            [
+                pa.field("id", pa.string(), nullable=False),
+                pa.field("data", pa.binary(), nullable=False),
+                pa.field("mime_type", pa.string(), nullable=False),
+                pa.field("created_at", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("created_by", pa.string(), nullable=False),
+                pa.field(
+                    "annotations",
+                    pa.list_(
+                        pa.struct(
+                            [
+                                pa.field("key", pa.string(), nullable=False),
+                                pa.field("value", pa.string()),
+                            ]
+                        )
+                    ),
+                ),
+            ]
+        )
 
     @staticmethod
     def _normalize_annotations(
@@ -133,10 +133,11 @@ class ImagesDataset:
             )
 
             existing_schema = await self._room.datasets.inspect(table=self.TABLE_NAME)
+            existing_names = set(existing_schema.names)
             missing_columns = {
-                key: value
-                for key, value in schema.items()
-                if key not in existing_schema
+                field.name: field.type
+                for field in schema
+                if field.name not in existing_names
             }
             if len(missing_columns) > 0:
                 await self._room.datasets.add_columns(
@@ -223,6 +224,7 @@ class ImagesDataset:
             limit=1,
             select=self._METADATA_COLUMNS,
         )
+        rows = rows.to_pylist()
         if len(rows) == 0:
             return None
 
@@ -242,6 +244,7 @@ class ImagesDataset:
             limit=limit,
             select=self._METADATA_COLUMNS,
         )
+        rows = rows.to_pylist()
         return [self._to_saved_image(row) for row in rows]
 
     async def read_data(self, *, image_id: str) -> Optional[bytes]:
@@ -253,6 +256,7 @@ class ImagesDataset:
             limit=1,
             select=["data"],
         )
+        rows = rows.to_pylist()
         if len(rows) == 0:
             return None
 
