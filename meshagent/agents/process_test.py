@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import pytest
 from pydantic import ValidationError
 
+import meshagent.agents.process as process_module
 import meshagent.agents.process_thread_adapter as process_thread_adapter_module
 import meshagent.agents.thread_adapter as thread_adapter_module
 from meshagent.agents import AgentProcessThreadAdapter
@@ -234,6 +235,36 @@ class _RecordingSupervisor(AgentSupervisor):
             if message.data.type == message_type:
                 payloads.append(message.data.model_dump(mode="json"))
         return payloads
+
+
+class _RecordedSpan:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.attributes: dict[str, object] = {}
+
+    def set_attribute(self, name: str, value: object) -> None:
+        self.attributes[name] = value
+
+
+class _RecordedSpanContext:
+    def __init__(self, spans: list[_RecordedSpan], name: str) -> None:
+        self._spans = spans
+        self._span = _RecordedSpan(name)
+
+    def __enter__(self) -> _RecordedSpan:
+        self._spans.append(self._span)
+        return self._span
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+
+class _RecordedTracer:
+    def __init__(self) -> None:
+        self.spans: list[_RecordedSpan] = []
+
+    def start_as_current_span(self, name: str) -> _RecordedSpanContext:
+        return _RecordedSpanContext(self.spans, name)
 
 
 class _PayloadMessage(AgentMessage):
@@ -1840,6 +1871,82 @@ def test_agent_tool_call_ended_serializes_result_and_error() -> None:
         "message": "failed",
         "code": "tool_failed",
     }
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_traces_turn_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_tracer = _RecordedTracer()
+    monkeypatch.setattr(process_module, "tracer", recorded_tracer)
+
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+
+    async def _initialize_session() -> AgentSessionContext:
+        session = AgentSessionContext(system_role=None)
+        session.instructions = "initial secret instructions"
+        return session
+
+    async def _load_turn_instructions(
+        sender: Participant | None,
+    ) -> str:
+        del sender
+        return "runtime secret instructions"
+
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        session_initializer=_initialize_session,
+        turn_instructions_provider=_load_turn_instructions,
+        toolkits=[Toolkit(name="storage", tools=[])],
+    )
+
+    await process.start(supervisor)
+
+    turn_start_message_id = "00000000-0000-0000-0000-000000000001"
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                message_id=turn_start_message_id,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+    await process.stop(supervisor)
+
+    span_names = [span.name for span in recorded_tracer.spans]
+    assert span_names == [
+        "agent.turn",
+        "agent.turn.context.load",
+        "agent.turn.context.initialize",
+        "agent.turn.context.restore_hooks",
+        "agent.turn.context.start",
+        "agent.turn.rules.load",
+        "agent.turn.toolkits.build",
+        "agent.turn.llm",
+    ]
+
+    turn_span = next(
+        span for span in recorded_tracer.spans if span.name == "agent.turn"
+    )
+    assert turn_span.attributes["thread_id"] == "thread-1"
+    assert turn_span.attributes["source_message_id"] == turn_start_message_id
+    assert turn_span.attributes["queued_message_count"] == 1
+    assert turn_span.attributes["model"] == "gpt-test"
+    assert turn_span.attributes["error"] is False
+
+    for span in recorded_tracer.spans:
+        for value in span.attributes.values():
+            assert "secret instructions" not in str(value)
 
 
 @pytest.mark.asyncio

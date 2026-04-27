@@ -15,6 +15,7 @@ from meshagent.api.messaging import FileContent
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.tools import ToolContext, Toolkit
+from opentelemetry import trace
 from .process_thread_adapter import AgentProcessThreadAdapter
 from .thread_adapter import ThreadAdapter, default_format_message
 from .version import __version__ as agents_version
@@ -65,6 +66,7 @@ from .messages import (
 )
 
 logger = logging.getLogger("agent-process")
+tracer = trace.get_tracer("meshagent.agents")
 _THREAD_STATUS_ACTIVE_STATES = {
     "queued",
     "in_progress",
@@ -842,14 +844,29 @@ class LLMAgentProcess(AgentProcess):
         return None
 
     async def ensure_session_context(self, *, turn_id: str) -> AgentSessionContext:
-        if self._session_context is None:
-            self._session_context = self.llm_adapter.create_session()
-            await self.on_session_context_created()
-            thread_adapter = self.thread_adapter
-            if thread_adapter is not None:
-                thread_adapter.restore_session_context(context=self._session_context)
-            await self.on_restore_session_context(turn_id, self._session_context)
-            await self._session_context.start()
+        with tracer.start_as_current_span("agent.turn.context.load") as span:
+            span.set_attribute("thread_id", self.thread_id)
+            span.set_attribute("turn_id", turn_id)
+            span.set_attribute("context.cached", self._session_context is not None)
+            if self._session_context is None:
+                self._session_context = self.llm_adapter.create_session()
+
+                with tracer.start_as_current_span("agent.turn.context.initialize"):
+                    await self.on_session_context_created()
+
+                thread_adapter = self.thread_adapter
+                if thread_adapter is not None:
+                    thread_adapter.restore_session_context(
+                        context=self._session_context
+                    )
+
+                with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
+                    await self.on_restore_session_context(
+                        turn_id, self._session_context
+                    )
+
+                with tracer.start_as_current_span("agent.turn.context.start"):
+                    await self._session_context.start()
 
         return self._session_context
 
@@ -1153,28 +1170,38 @@ class LLMAgentProcess(AgentProcess):
         sender: Participant | None = None,
         toolkit_client_options: dict[str, dict[str, Any]] | None = None,
     ) -> list[Toolkit]:
-        if self._turn_toolkits_builder is not None:
-            combined_toolkits = await self._turn_toolkits_builder(sender, model, turns)
-        else:
-            combined_toolkits = [*self._toolkits]
-            supervisor = self.supervisor
-            if supervisor is not None:
-                for channel in supervisor.channels:
-                    combined_toolkits.extend(channel.get_agent_toolkits())
+        with tracer.start_as_current_span("agent.turn.toolkits.build") as span:
+            span.set_attribute("thread_id", self.thread_id)
+            span.set_attribute("turn_count", len(turns))
+            span.set_attribute("model", model)
+            span.set_attribute(
+                "custom_builder", self._turn_toolkits_builder is not None
+            )
+            if self._turn_toolkits_builder is not None:
+                combined_toolkits = await self._turn_toolkits_builder(
+                    sender, model, turns
+                )
+            else:
+                combined_toolkits = [*self._toolkits]
+                supervisor = self.supervisor
+                if supervisor is not None:
+                    for channel in supervisor.channels:
+                        combined_toolkits.extend(channel.get_agent_toolkits())
 
-        resolved_toolkits: list[Toolkit] = []
-        for toolkit in combined_toolkits:
-            resolved_toolkits.append(
-                toolkit.with_client_options(
-                    client_options=(
-                        None
-                        if toolkit_client_options is None
-                        else toolkit_client_options.get(toolkit.name)
+            resolved_toolkits: list[Toolkit] = []
+            for toolkit in combined_toolkits:
+                resolved_toolkits.append(
+                    toolkit.with_client_options(
+                        client_options=(
+                            None
+                            if toolkit_client_options is None
+                            else toolkit_client_options.get(toolkit.name)
+                        )
                     )
                 )
-            )
 
-        return resolved_toolkits
+            span.set_attribute("toolkit_count", len(resolved_toolkits))
+            return resolved_toolkits
 
     @staticmethod
     def _guess_url_mime_type(*, url: str) -> str | None:
@@ -1335,13 +1362,23 @@ class LLMAgentProcess(AgentProcess):
         *,
         queued_turn: _QueuedTurn,
     ) -> str | None:
-        if queued_turn.request.instructions is not None:
-            return queued_turn.request.instructions
+        with tracer.start_as_current_span("agent.turn.rules.load") as span:
+            span.set_attribute("thread_id", queued_turn.request.thread_id)
+            span.set_attribute(
+                "inline_instructions",
+                queued_turn.request.instructions is not None,
+            )
+            span.set_attribute(
+                "provider_configured",
+                self._turn_instructions_provider is not None,
+            )
+            if queued_turn.request.instructions is not None:
+                return queued_turn.request.instructions
 
-        if self._turn_instructions_provider is None:
-            return None
+            if self._turn_instructions_provider is None:
+                return None
 
-        return await self._turn_instructions_provider(queued_turn.sender)
+            return await self._turn_instructions_provider(queued_turn.sender)
 
     def _drain_queued_turn_messages(
         self,
@@ -1554,22 +1591,28 @@ class LLMAgentProcess(AgentProcess):
         session.metadata["thread_id"] = thread_id
         session.metadata["turn_id"] = turn_id
         try:
-            next_task = asyncio.create_task(
-                self.llm_adapter.next(
-                    context=session,
-                    toolkits=combined_toolkits,
-                    caller=self._participant,
-                    event_handler=handle_event,
-                    steering_callback=lambda: self._apply_pending_turn_steers(
-                        session=session
-                    ),
-                    model=model,
-                    on_behalf_of=sender,
-                    tool_choice=tool_choice,
+            with tracer.start_as_current_span("agent.turn.llm") as span:
+                span.set_attribute("thread_id", thread_id)
+                span.set_attribute("turn_id", turn_id)
+                span.set_attribute("model", model)
+                span.set_attribute("toolkit_count", len(combined_toolkits))
+                span.set_attribute("tool_choice.configured", tool_choice is not None)
+                next_task = asyncio.create_task(
+                    self.llm_adapter.next(
+                        context=session,
+                        toolkits=combined_toolkits,
+                        caller=self._participant,
+                        event_handler=handle_event,
+                        steering_callback=lambda: self._apply_pending_turn_steers(
+                            session=session
+                        ),
+                        model=model,
+                        on_behalf_of=sender,
+                        tool_choice=tool_choice,
+                    )
                 )
-            )
-            self._active_next_task = next_task
-            await next_task
+                self._active_next_task = next_task
+                await next_task
         finally:
             if had_thread_id:
                 session.metadata["thread_id"] = previous_thread_id
@@ -1676,8 +1719,20 @@ class LLMAgentProcess(AgentProcess):
             ),
             *queued_turn.queued_messages,
         ]
-        await self._remove_pending_status_messages(queued_messages=queued_turn_messages)
         turn_id = str(uuid.uuid4())
+        turn_span_context = tracer.start_as_current_span("agent.turn")
+        turn_span = turn_span_context.__enter__()
+        turn_span.set_attribute("thread_id", queued_turn.request.thread_id)
+        turn_span.set_attribute("turn_id", turn_id)
+        turn_span.set_attribute("source_message_id", queued_turn.request.message_id)
+        turn_span.set_attribute("queued_message_count", len(queued_turn_messages))
+        try:
+            await self._remove_pending_status_messages(
+                queued_messages=queued_turn_messages
+            )
+        except BaseException as exc:
+            turn_span_context.__exit__(type(exc), exc, exc.__traceback__)
+            raise
         self._turn_id = turn_id
         self._interrupt_requested_turn_id = None
         self._interrupt_source_message_id = None
@@ -1705,6 +1760,7 @@ class LLMAgentProcess(AgentProcess):
                 if queued_turn.request.model is not None
                 else self.llm_adapter.default_model()
             )
+            turn_span.set_attribute("model", model)
             original_instructions = session.instructions
             turn_instructions = await self._resolve_turn_instructions(
                 queued_turn=queued_turn
@@ -1839,34 +1895,40 @@ class LLMAgentProcess(AgentProcess):
                 code=exc.__class__.__name__,
             )
         finally:
-            self._interrupt_requested_turn_id = None
-            self._interrupt_source_message_id = None
-            self._active_turn_queue = None
-            self._active_turn_toolkit_client_options = {}
-            self._active_turn_tool_choice = None
-            remaining_queued_messages = self._drain_queued_turn_messages(
-                active_turn_queue=active_turn_queue,
-            )
-            if len(remaining_queued_messages) > 0:
-                await self._remove_pending_status_messages(
-                    queued_messages=remaining_queued_messages
+            try:
+                self._interrupt_requested_turn_id = None
+                self._interrupt_source_message_id = None
+                self._active_turn_queue = None
+                self._active_turn_toolkit_client_options = {}
+                self._active_turn_tool_choice = None
+                remaining_queued_messages = self._drain_queued_turn_messages(
+                    active_turn_queue=active_turn_queue,
                 )
-                self._emit_rejected_queued_turn_steers(
-                    queued_messages=remaining_queued_messages,
-                    error=self._turn_ended_rejection(),
+                if len(remaining_queued_messages) > 0:
+                    await self._remove_pending_status_messages(
+                        queued_messages=remaining_queued_messages
+                    )
+                    self._emit_rejected_queued_turn_steers(
+                        queued_messages=remaining_queued_messages,
+                        error=self._turn_ended_rejection(),
+                    )
+                self._cancel_pending_tool_call_approvals()
+                if session is not None:
+                    session.instructions = original_instructions
+                self.emit(
+                    sender=queued_turn.sender,
+                    payload=TurnEnded(
+                        type=AGENT_EVENT_TURN_ENDED,
+                        thread_id=queued_turn.request.thread_id,
+                        turn_id=turn_id,
+                        error=error,
+                    ),
                 )
-            self._cancel_pending_tool_call_approvals()
-            if session is not None:
-                session.instructions = original_instructions
-            self.emit(
-                sender=queued_turn.sender,
-                payload=TurnEnded(
-                    type=AGENT_EVENT_TURN_ENDED,
-                    thread_id=queued_turn.request.thread_id,
-                    turn_id=turn_id,
-                    error=error,
-                ),
-            )
+            finally:
+                turn_span.set_attribute("error", error is not None)
+                if error is not None:
+                    turn_span.set_attribute("error.code", error.code or "unknown")
+                turn_span_context.__exit__(None, None, None)
 
     def _schedule_next_turn(self) -> None:
         if (
