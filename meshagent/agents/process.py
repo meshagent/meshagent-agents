@@ -853,7 +853,7 @@ class LLMAgentProcess(AgentProcess):
 
         return self._session_context
 
-    def _record_applied_turns(
+    def _record_accepted_turns(
         self,
         *,
         queued_messages: list[_QueuedTurnMessage],
@@ -1330,6 +1330,19 @@ class LLMAgentProcess(AgentProcess):
             code="turn_ended",
         )
 
+    async def _resolve_turn_instructions(
+        self,
+        *,
+        queued_turn: _QueuedTurn,
+    ) -> str | None:
+        if queued_turn.request.instructions is not None:
+            return queued_turn.request.instructions
+
+        if self._turn_instructions_provider is None:
+            return None
+
+        return await self._turn_instructions_provider(queued_turn.sender)
+
     def _drain_queued_turn_messages(
         self,
         *,
@@ -1439,7 +1452,6 @@ class LLMAgentProcess(AgentProcess):
             return False
 
         await self._remove_pending_status_messages(queued_messages=steer_messages)
-        self._record_applied_turns(queued_messages=steer_messages)
         await self._append_queued_turn_messages(
             session=session,
             queued_messages=steer_messages,
@@ -1459,7 +1471,6 @@ class LLMAgentProcess(AgentProcess):
         toolkit_client_options = self._resolve_turn_toolkit_client_options(turns=turns)
         tool_choice = self._resolve_turn_tool_choice(turns=turns)
 
-        self._record_applied_turns(queued_messages=queued_messages)
         await self._append_queued_turn_messages(
             session=session,
             queued_messages=queued_messages,
@@ -1695,8 +1706,11 @@ class LLMAgentProcess(AgentProcess):
                 else self.llm_adapter.default_model()
             )
             original_instructions = session.instructions
-            if queued_turn.request.instructions is not None:
-                session.instructions = queued_turn.request.instructions
+            turn_instructions = await self._resolve_turn_instructions(
+                queued_turn=queued_turn
+            )
+            if turn_instructions is not None:
+                session.instructions = turn_instructions
 
             continue_interrupted_turn = False
             while True:
@@ -1882,10 +1896,11 @@ class LLMAgentProcess(AgentProcess):
 
     async def on_turn_start(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnStart)
-        if turn.instructions is None and self._turn_instructions_provider is not None:
-            instructions = await self._turn_instructions_provider(message.sender)
-            if instructions is not None:
-                turn = turn.model_copy(update={"instructions": instructions})
+        queued_message = _QueuedTurnMessage(
+            sender=message.sender,
+            request=turn,
+        )
+        self._record_accepted_turns(queued_messages=[queued_message])
         should_track_pending_status = (
             self._turn_task is not None or self._has_pending_turns()
         )
@@ -1904,14 +1919,7 @@ class LLMAgentProcess(AgentProcess):
             ),
         )
         if should_track_pending_status:
-            await self._add_pending_status_messages(
-                queued_messages=[
-                    _QueuedTurnMessage(
-                        sender=message.sender,
-                        request=turn,
-                    )
-                ]
-            )
+            await self._add_pending_status_messages(queued_messages=[queued_message])
         self._schedule_next_turn()
 
     async def on_capabilities_request(self, message: Message) -> None:
@@ -1953,20 +1961,13 @@ class LLMAgentProcess(AgentProcess):
             )
             return
 
-        active_turn_queue.put_nowait(
-            _QueuedTurnMessage(
-                sender=message.sender,
-                request=turn,
-            )
+        queued_message = _QueuedTurnMessage(
+            sender=message.sender,
+            request=turn,
         )
-        await self._add_pending_status_messages(
-            queued_messages=[
-                _QueuedTurnMessage(
-                    sender=message.sender,
-                    request=turn,
-                )
-            ]
-        )
+        self._record_accepted_turns(queued_messages=[queued_message])
+        active_turn_queue.put_nowait(queued_message)
+        await self._add_pending_status_messages(queued_messages=[queued_message])
         self.emit(
             sender=message.sender,
             payload=TurnSteerAccepted(

@@ -19,6 +19,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TOOL_CALL_ENDED,
@@ -3069,6 +3070,155 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_thread_adapter_inserts_accepted_turn_before_session_initializer_finishes(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    initializer_started = asyncio.Event()
+    release_initializer = asyncio.Event()
+
+    async def _session_initializer() -> AgentSessionContext:
+        initializer_started.set()
+        await release_initializer.wait()
+        return _LifecycleSession()
+
+    document = _ThreadDocument()
+    document.root.messages.append_child(
+        "message",
+        {
+            "text": "Earlier question",
+            "created_at": "2026-03-11T00:00:00Z",
+            "author_name": "caller",
+            "role": "user",
+        },
+    )
+    room = _ThreadRoom(document=document)
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="/threads/test.thread",
+        llm_adapter=llm_adapter,
+        thread_adapter=adapter,
+        session_initializer=_session_initializer,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    message_id="00000000-0000-0000-0000-000000000101",
+                    thread_id="/threads/test.thread",
+                    content=[{"type": "text", "text": "hello from caller"}],
+                ),
+            )
+        )
+
+        await asyncio.wait_for(initializer_started.wait(), timeout=1)
+        await _wait_for(lambda: len(room.sync.document.message_elements) == 2)
+
+        started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
+        user_message = room.sync.document.message_elements[1]
+        assert user_message.get_attribute("id") == (
+            "00000000-0000-0000-0000-000000000101"
+        )
+        assert user_message.get_attribute("turn_id") == started_payload["turn_id"]
+        assert user_message.get_attribute("author_name") == "caller"
+        assert user_message.get_attribute("role") == "user"
+        assert user_message.get_attribute("text") == "hello from caller"
+        assert llm_adapter.calls == []
+
+        release_initializer.set()
+        await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
+
+        assert llm_adapter.calls[0]["messages"][0] == {
+            "role": "user",
+            "content": "caller said at 2026-03-11T00:00:00Z: Earlier question",
+        }
+        live_messages = [
+            message
+            for message in llm_adapter.calls[0]["messages"]
+            if message["role"] == "user"
+            and isinstance(message["content"], str)
+            and "hello from caller" in message["content"]
+        ]
+        assert len(live_messages) == 1
+    finally:
+        release_initializer.set()
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_accepts_turn_before_resolving_turn_instructions(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    async def _turn_instructions_provider(sender: Participant | None) -> str:
+        del sender
+        provider_started.set()
+        await release_provider.wait()
+        return "custom instructions"
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="/threads/test.thread",
+        llm_adapter=llm_adapter,
+        thread_adapter=adapter,
+        turn_instructions_provider=_turn_instructions_provider,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/test.thread",
+                    content=[{"type": "text", "text": "hello from caller"}],
+                ),
+            )
+        )
+
+        await asyncio.wait_for(provider_started.wait(), timeout=1)
+        await _wait_for(lambda: len(room.sync.document.message_elements) == 1)
+        assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_START_ACCEPTED))
+        assert llm_adapter.calls == []
+
+        release_provider.set()
+        await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
+        assert llm_adapter.calls[0]["context"].instructions == "custom instructions"
+    finally:
+        release_provider.set()
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messages_and_events(
     monkeypatch,
 ) -> None:
@@ -5437,6 +5587,12 @@ async def test_llm_agent_process_thread_adapter_inserts_applied_steer_before_pos
             lambda: (
                 len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STEER_ACCEPTED))
                 == 1
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                message.get_attribute("text") == "nevermind"
+                for message in room.sync.document.message_elements
             )
         )
         llm_adapter.release_tool_boundary.set()

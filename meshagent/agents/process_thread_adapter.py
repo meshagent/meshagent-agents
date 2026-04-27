@@ -382,9 +382,11 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._thread_status_turn_id_value: str | None = None
         self._thread_status_pending_messages_value: list[dict[str, Any]] = []
         self._thread_status_pending_item_id_value: str | None = None
+        self._restore_message_count: int | None = None
 
     async def start(self) -> None:
         await super().start()
+        self._restore_message_count = len(self._message_elements())
         self._ensure_local_member_on_thread()
 
     async def stop(self) -> None:
@@ -399,6 +401,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_tool_calls_by_item_id.clear()
         self._pending_turn_ids_by_message_id.clear()
         self._saved_image_ids_by_item_id.clear()
+        self._restore_message_count = None
 
     async def clear_thread(self) -> None:
         if self._processor_task is None or self._processor_task.done():
@@ -433,6 +436,8 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             raise RoomException("thread was not opened")
 
         messages = self._message_elements()
+        if self._restore_message_count is not None:
+            messages = messages[: self._restore_message_count]
         if len(messages) > self._max_append_message_count:
             first_message = len(messages) - self._max_append_message_count
             messages = messages[first_message:]
@@ -832,6 +837,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_event_elements_by_item_id.clear()
         for child in list(messages.get_children()):
             child.delete()
+        self._restore_message_count = 0
         await self.clear_thread_status()
 
     def _normalized_event_from_dict(
