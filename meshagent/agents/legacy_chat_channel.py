@@ -650,6 +650,11 @@ class LegacyChatChannel(ThreadedChannel):
                             and attachment_value.get("path", "").strip() != ""
                         ]
 
+                if text.strip() == "" and len(attachment_paths) == 0:
+                    raise RoomException(
+                        "chat.new_thread requires non-empty text or at least one attachment"
+                    )
+
                 path = await outer._new_thread_path()
 
                 chat_message = _ChatMessagePayload.model_validate(

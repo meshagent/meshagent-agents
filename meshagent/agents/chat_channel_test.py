@@ -401,6 +401,46 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_new_thread_rejects_empty_message_without_attachments() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = ChatChannel(
+        room=room,
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        new_thread_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "new_thread"
+        )
+
+        with pytest.raises(
+            RoomException,
+            match="requires non-empty text or at least one attachment",
+        ):
+            await new_thread_tool.execute(
+                context=ToolContext(caller=caller),
+                message={"text": "   ", "attachments": [{"path": "  "}]},
+            )
+
+        assert supervisor.sent == []
+        assert sync.document.root.get_children() == []
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_attach_file_emits_file_content_events() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(

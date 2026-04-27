@@ -639,6 +639,40 @@ async def test_new_thread_tool_uses_thread_dir_for_guid_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_thread_tool_rejects_empty_message_without_attachments() -> None:
+    adapter = _FakeThreadNameAdapter(generated_thread_name="Release Planning")
+    bot = ChatBot(llm_adapter=adapter)
+    room = _FakeRoom()
+    bot._room = room
+    seeded_members = _stub_new_thread_member_seed(bot)
+
+    queue = _FakeQueue()
+
+    def _ensure_thread(*, path: str):
+        del path
+        return queue
+
+    bot._ensure_thread = _ensure_thread  # type: ignore[method-assign]
+
+    tool = await _new_thread_tool(bot)
+    context = ToolContext(
+        caller=Participant(id="caller-id", attributes={"name": "alice"}),
+    )
+
+    with pytest.raises(
+        RoomException,
+        match="requires non-empty text or at least one attachment",
+    ):
+        await tool.execute(
+            context=context,
+            message={"text": "   ", "attachments": [{"path": "  "}]},
+        )
+
+    assert queue.items == []
+    seeded_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() -> None:
     adapter = _SessionRequiredThreadNameAdapter(generated_thread_name="Adapter Context")
     bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
