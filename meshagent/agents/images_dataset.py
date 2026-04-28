@@ -8,7 +8,7 @@ from typing import Any, Optional
 import pyarrow as pa
 
 from meshagent.api import RoomClient
-from meshagent.api.room_server_client import DatasetStruct
+from meshagent.api.room_server_client import DatasetIndexConfig, DatasetStruct
 
 logger = logging.getLogger("images_dataset")
 _IMAGE_SAVE_MAX_RETRIES = 6
@@ -146,9 +146,9 @@ class ImagesDataset:
                 )
 
             try:
-                await self._room.datasets.create_scalar_index(
+                await self._room.datasets.create_index(
                     table=self.TABLE_NAME,
-                    column="id",
+                    config=DatasetIndexConfig(column="id", index_type="BTREE"),
                 )
             except Exception:
                 logger.debug(

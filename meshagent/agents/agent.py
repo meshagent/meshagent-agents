@@ -2,6 +2,7 @@ from collections.abc import AsyncIterable
 from typing import Optional
 import json
 from meshagent.api.room_server_client import (
+    DatasetIndexConfig,
     RoomException,
     RequiredToolkit,
     Requirement,
@@ -120,11 +121,14 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     for vi in table.vector_indexes or []:
         if not index_exists(vi):
             try:
-                await room.datasets.create_vector_index(
+                await room.datasets.create_index(
                     table=table.name,
-                    column=vi,
+                    config=DatasetIndexConfig(
+                        column=vi,
+                        index_type="IVF_PQ",
+                        replace=True,
+                    ),
                     namespace=table.namespace,
-                    replace=True,
                 )
             except Exception as e:
                 logger.warning(f"unable to create vector index {e}", exec_info=e)
@@ -132,11 +136,14 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     for ti in table.full_text_search_indexes or []:
         if not index_exists(ti):
             try:
-                await room.datasets.create_full_text_search_index(
+                await room.datasets.create_index(
                     table=table.name,
-                    column=ti,
+                    config=DatasetIndexConfig(
+                        column=ti,
+                        index_type="INVERTED",
+                        replace=True,
+                    ),
                     namespace=table.namespace,
-                    replace=True,
                 )
             except Exception as e:
                 logger.warning(
@@ -147,11 +154,14 @@ async def install_required_table(*, room: RoomClient, table: RequiredTable):
     for si in table.scalar_indexes or []:
         if not index_exists(si):
             try:
-                await room.datasets.create_scalar_index(
+                await room.datasets.create_index(
                     table=table.name,
-                    column=si,
+                    config=DatasetIndexConfig(
+                        column=si,
+                        index_type="BTREE",
+                        replace=True,
+                    ),
                     namespace=table.namespace,
-                    replace=True,
                 )
             except Exception as e:
                 logger.warning(f"unable to create scalar index {e}", exec_info=e)

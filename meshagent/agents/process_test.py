@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 
 import pytest
+import pyarrow as pa
 from pydantic import ValidationError
 
 import meshagent.agents.process as process_module
@@ -847,22 +848,31 @@ class _DownloadRecordingStorage:
 
 class _RecordingDatasets:
     def __init__(self) -> None:
-        self.schemas: dict[str, dict[str, Any]] = {}
+        self.schemas: dict[str, pa.Schema] = {}
         self.rows: dict[str, list[dict[str, Any]]] = {}
 
     async def create_table_with_schema(
         self,
         *,
         name: str,
-        schema: dict[str, Any],
+        schema: dict[str, Any] | pa.Schema,
         mode: str,
     ) -> None:
         del mode
-        self.schemas.setdefault(name, dict(schema))
+        if isinstance(schema, pa.Schema):
+            arrow_schema = schema
+        else:
+            arrow_schema = pa.schema(
+                [
+                    pa.field(field_name, field_type)
+                    for field_name, field_type in schema.items()
+                ]
+            )
+        self.schemas.setdefault(name, arrow_schema)
         self.rows.setdefault(name, [])
 
-    async def inspect(self, *, table: str) -> dict[str, Any]:
-        return dict(self.schemas.get(table, {}))
+    async def inspect(self, *, table: str) -> pa.Schema:
+        return self.schemas.get(table, pa.schema([]))
 
     async def add_columns(
         self,
@@ -870,15 +880,19 @@ class _RecordingDatasets:
         table: str,
         new_columns: dict[str, Any],
     ) -> None:
-        schema = self.schemas.setdefault(table, {})
-        schema.update(new_columns)
+        schema = self.schemas.setdefault(table, pa.schema([]))
+        existing_names = set(schema.names)
+        for field_name, field_type in new_columns.items():
+            if field_name not in existing_names:
+                schema = schema.append(pa.field(field_name, field_type))
+        self.schemas[table] = schema
         for row in self.rows.setdefault(table, []):
             for key in new_columns:
                 row.setdefault(key, None)
 
-    async def create_scalar_index(self, *, table: str, column: str) -> None:
+    async def create_index(self, *, table: str, config: Any) -> None:
         del table
-        del column
+        del config
 
     async def insert(self, *, table: str, records: list[dict[str, Any]]) -> None:
         stored_rows = self.rows.setdefault(table, [])

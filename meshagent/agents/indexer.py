@@ -1,7 +1,7 @@
 from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
 from meshagent.tools import Toolkit, LocalRoomTool, ToolContext
 from meshagent.openai.proxy import get_client
-from meshagent.api.room_server_client import RoomClient
+from meshagent.api.room_server_client import DatasetIndexConfig, RoomClient
 import pyarrow as pa
 from openai import AsyncOpenAI
 from typing import Optional
@@ -265,8 +265,13 @@ class StorageIndexer(SingleRoomAgent):
         if not self._vector_index_created:
             try:
                 logger.info("attempting to create embedding index")
-                await self.room.datasets.create_vector_index(
-                    table=self.table, column="embedding", replace=False
+                await self.room.datasets.create_index(
+                    table=self.table,
+                    config=DatasetIndexConfig(
+                        column="embedding",
+                        index_type="IVF_PQ",
+                        replace=False,
+                    ),
                 )
                 self._vector_index_created = True
             except Exception:
@@ -276,8 +281,13 @@ class StorageIndexer(SingleRoomAgent):
         if not self._fts_created:
             try:
                 logger.info("attempting to create fts index")
-                await self.room.datasets.create_full_text_search_index(
-                    table=self.table, column="text", replace=False
+                await self.room.datasets.create_index(
+                    table=self.table,
+                    config=DatasetIndexConfig(
+                        column="text",
+                        index_type="INVERTED",
+                        replace=False,
+                    ),
                 )
                 self._fts_created = True
             except Exception:
@@ -612,12 +622,14 @@ class SiteIndexer(TaskRunner):
         )
 
         if len(rows) > 255:
-            await context.room.datasets.create_vector_index(
-                table=table, column="embedding"
+            await context.room.datasets.create_index(
+                table=table,
+                config=DatasetIndexConfig(column="embedding", index_type="IVF_PQ"),
             )
 
-        await context.room.datasets.create_full_text_search_index(
-            table=table, column="text"
+        await context.room.datasets.create_index(
+            table=table,
+            config=DatasetIndexConfig(column="text", index_type="INVERTED"),
         )
 
         return {}
