@@ -214,7 +214,12 @@ class _ThreadRecordingProcess(AgentProcess):
 
     def handles(self, message: Message) -> bool:
         return (
-            message.data.type in {AGENT_MESSAGE_TURN_START, AGENT_MESSAGE_THREAD_CLEAR}
+            message.data.type
+            in {
+                AGENT_MESSAGE_TURN_START,
+                AGENT_MESSAGE_TURN_STEER,
+                AGENT_MESSAGE_THREAD_CLEAR,
+            }
             and message.data.thread_id == self.thread_id
         )
 
@@ -1808,6 +1813,37 @@ async def test_agent_supervisor_creates_thread_processes_for_clear_thread() -> N
     assert isinstance(clear_message, ClearThread)
     assert clear_message.thread_id == "thread-1"
     uuid.UUID(clear_message.message_id)
+
+    await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_routes_turn_steer_to_thread_process_for_rejection() -> (
+    None
+):
+    supervisor = _ThreadCreatingSupervisor()
+
+    await supervisor.start()
+
+    supervisor.send(
+        Message(
+            data=TurnSteer(
+                type=AGENT_MESSAGE_TURN_STEER,
+                thread_id="thread-1",
+                turn_id="missing-turn",
+                content=[{"type": "text", "text": "translate"}],
+            )
+        )
+    )
+
+    await _wait_for(lambda: len(supervisor.created_processes) == 1)
+    process = supervisor.created_processes[0]
+    await _wait_for(lambda: len(process.received) == 1)
+
+    steer_message = process.received[0].data
+    assert isinstance(steer_message, TurnSteer)
+    assert steer_message.thread_id == "thread-1"
+    assert steer_message.turn_id == "missing-turn"
 
     await supervisor.stop()
 

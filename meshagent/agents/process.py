@@ -419,14 +419,14 @@ class AgentSupervisor:
         elif message_type == AGENT_MESSAGE_TURN_STEER:
             turn_steer = _coerce_message_data(message.data, TurnSteer)
             process = self._process_for_thread(thread_id=turn_steer.thread_id)
+            if process is None:
+                process = self.create_thread_process(turn_steer.thread_id)
+                self.add_process(process)
             routed_message = self._copy_message(
                 message,
                 data=turn_steer,
             )
-            if process is not None and process.turn_id == turn_steer.turn_id:
-                target_processes = [process]
-            else:
-                target_processes = []
+            target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TURN_INTERRUPT:
             turn_interrupt = _coerce_message_data(message.data, TurnInterrupt)
@@ -723,6 +723,7 @@ class _QueuedTurn:
 class _QueuedTurnMessage:
     sender: Participant | None
     request: TurnStart | TurnSteer
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class LLMAgentProcess(AgentProcess):
@@ -761,6 +762,7 @@ class LLMAgentProcess(AgentProcess):
         self._pending_turns: asyncio.Queue[_QueuedTurn] = asyncio.Queue()
         self._priority_turn: _QueuedTurn | None = None
         self._active_turn_queue: asyncio.Queue[_QueuedTurnMessage] | None = None
+        self._active_turn_queue_updated: asyncio.Event | None = None
         self._toolkits = list(toolkits or [])
         self._participant = participant
         self._content_schemes: list[ContentScheme] = []
@@ -949,6 +951,7 @@ class LLMAgentProcess(AgentProcess):
             "message_id": request.message_id,
             "message_type": request.type,
             "sender_name": cls._sender_name(queued_message.sender),
+            "created_at": queued_message.created_at.isoformat(),
             "content": content if isinstance(content, list) else [],
         }
 
@@ -1397,6 +1400,29 @@ class LLMAgentProcess(AgentProcess):
 
         return drained_messages
 
+    async def _wait_for_active_turn_queue_idle(
+        self,
+        *,
+        active_turn_queue: asyncio.Queue[_QueuedTurnMessage],
+    ) -> bool:
+        if not active_turn_queue.empty():
+            return False
+
+        active_turn_queue_updated = self._active_turn_queue_updated
+        if active_turn_queue_updated is None:
+            return True
+
+        active_turn_queue_updated.clear()
+        if not active_turn_queue.empty():
+            return False
+
+        try:
+            await asyncio.wait_for(active_turn_queue_updated.wait(), timeout=0.25)
+        except TimeoutError:
+            pass
+
+        return active_turn_queue.empty()
+
     def _drain_pending_turns(self) -> list[_QueuedTurn]:
         drained_turns: list[_QueuedTurn] = []
         if self._priority_turn is not None:
@@ -1738,6 +1764,7 @@ class LLMAgentProcess(AgentProcess):
         self._interrupt_source_message_id = None
         active_turn_queue: asyncio.Queue[_QueuedTurnMessage] = asyncio.Queue()
         self._active_turn_queue = active_turn_queue
+        self._active_turn_queue_updated = asyncio.Event()
         for queued_message in queued_turn_messages:
             active_turn_queue.put_nowait(queued_message)
         self.emit(
@@ -1811,7 +1838,9 @@ class LLMAgentProcess(AgentProcess):
                 if interrupt_action == "cancel":
                     error = self._turn_error(message="turn cancelled", code="cancelled")
                     break
-                if active_turn_queue.empty():
+                if await self._wait_for_active_turn_queue_idle(
+                    active_turn_queue=active_turn_queue
+                ):
                     break
         except asyncio.CancelledError:
             interrupt_action = await self._handle_interrupt(
@@ -1883,7 +1912,9 @@ class LLMAgentProcess(AgentProcess):
                             code="cancelled",
                         )
                         break
-                    if active_turn_queue.empty():
+                    if await self._wait_for_active_turn_queue_idle(
+                        active_turn_queue=active_turn_queue
+                    ):
                         break
             else:
                 error = self._turn_error(message="turn cancelled", code="cancelled")
@@ -1899,6 +1930,7 @@ class LLMAgentProcess(AgentProcess):
                 self._interrupt_requested_turn_id = None
                 self._interrupt_source_message_id = None
                 self._active_turn_queue = None
+                self._active_turn_queue_updated = None
                 self._active_turn_toolkit_client_options = {}
                 self._active_turn_tool_choice = None
                 remaining_queued_messages = self._drain_queued_turn_messages(
@@ -1952,6 +1984,7 @@ class LLMAgentProcess(AgentProcess):
         self._turn_id = None
         self._turn_task = None
         self._active_turn_queue = None
+        self._active_turn_queue_updated = None
 
         if not self._stop.is_set():
             self._schedule_next_turn()
@@ -2029,7 +2062,9 @@ class LLMAgentProcess(AgentProcess):
         )
         self._record_accepted_turns(queued_messages=[queued_message])
         active_turn_queue.put_nowait(queued_message)
-        await self._add_pending_status_messages(queued_messages=[queued_message])
+        active_turn_queue_updated = self._active_turn_queue_updated
+        if active_turn_queue_updated is not None:
+            active_turn_queue_updated.set()
         self.emit(
             sender=message.sender,
             payload=TurnSteerAccepted(
@@ -2039,6 +2074,7 @@ class LLMAgentProcess(AgentProcess):
                 source_message_id=turn.message_id,
             ),
         )
+        await self._add_pending_status_messages(queued_messages=[queued_message])
 
     async def on_turn_interrupt(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnInterrupt)
@@ -2075,6 +2111,7 @@ class LLMAgentProcess(AgentProcess):
                 await turn_task
 
         self._active_turn_queue = None
+        self._active_turn_queue_updated = None
         self._active_turn_sender = None
         self._turn_id = None
         self._interrupt_requested_turn_id = None
@@ -2129,6 +2166,7 @@ class LLMAgentProcess(AgentProcess):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._turn_task
         self._active_turn_queue = None
+        self._active_turn_queue_updated = None
         self._active_turn_sender = None
         self._interrupt_requested_turn_id = None
         self._interrupt_source_message_id = None
