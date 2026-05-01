@@ -1166,6 +1166,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             thread_adapter.write_text_message(
                 text=text,
                 participant=self.room.local_participant,
+                role="agent",
             )
 
     async def _greet(
@@ -1225,6 +1226,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     .isoformat()
                     .replace("+00:00", "Z"),
                     "author_name": self.room.local_participant.get_attribute("name"),
+                    "role": "agent",
                 },
             )
             message.append_child(tag_name="file", attributes={"path": path})

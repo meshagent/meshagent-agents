@@ -491,6 +491,7 @@ class ThreadAdapter(ABC):
                 .isoformat()
                 .replace("+00:00", "Z"),
                 "author_name": author_name,
+                "role": "agent",
             }
             if isinstance(turn_id, str) and turn_id.strip() != "":
                 message_attributes["turn_id"] = turn_id.strip()
@@ -499,8 +500,10 @@ class ThreadAdapter(ABC):
                 tag_name="message",
                 attributes=message_attributes,
             )
-        elif isinstance(turn_id, str) and turn_id.strip() != "":
-            message.set_attribute("turn_id", turn_id.strip())
+        else:
+            message.set_attribute("role", "agent")
+            if isinstance(turn_id, str) and turn_id.strip() != "":
+                message.set_attribute("turn_id", turn_id.strip())
 
         image = None
         for child in message.get_children():

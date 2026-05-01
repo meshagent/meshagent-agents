@@ -119,6 +119,12 @@ class _FakeThreadElement:
     def get_children_by_tag_name(self, tag_name: str) -> list["_FakeThreadElement"]:
         return [child for child in self._children if child.tag_name == tag_name]
 
+    def get_elements_by_tag_name(self, tag_name: str) -> list["_FakeThreadElement"]:
+        matches = [self] if self.tag_name == tag_name else []
+        for child in self._children:
+            matches.extend(child.get_elements_by_tag_name(tag_name))
+        return matches
+
     def append_child(
         self,
         *,
@@ -479,12 +485,14 @@ async def test_send_and_save_chat_uses_thread_adapter_write_text_message() -> No
             text: str,
             participant,
             attachments=None,
+            role=None,
         ) -> None:
             self.calls.append(
                 {
                     "text": text,
                     "participant": participant,
                     "attachments": attachments,
+                    "role": role,
                 }
             )
 
@@ -514,15 +522,46 @@ async def test_send_and_save_chat_uses_thread_adapter_write_text_message() -> No
             "text": "hello",
             "participant": room.local_participant,
             "attachments": None,
+            "role": "agent",
         }
     ]
 
-    async def get_thread_toolkits(
-        self, *, thread_context: ChatThreadContext, participant: Participant
-    ) -> list[Toolkit]:
-        del thread_context
-        del participant
-        return []
+
+@pytest.mark.asyncio
+async def test_thread_attach_file_tool_marks_message_as_agent() -> None:
+    bot = ChatBot(llm_adapter=_CaptureChatAdapter())
+    room = _FakeRoom()
+    bot._room = room
+
+    thread = _FakeThreadDocument()
+    messages = thread.root.append_child(tag_name="messages")
+    path = ".threads/assistant/main.thread"
+    bot._open_threads[path] = _FakeOpenThreadAdapter()
+    thread_context = ChatThreadContext(
+        session=AgentSessionContext(),
+        thread=thread,  # type: ignore[arg-type]
+        path=path,
+    )
+
+    toolkits = await bot.get_thread_toolkits(
+        thread_context=thread_context,
+        participant=Participant(id="caller-id", attributes={"name": "alice"}),
+    )
+    thread_tools = next(
+        toolkit for toolkit in toolkits if toolkit.name == "thread tools"
+    )
+    attach_file = thread_tools.get_tool("attach_file")
+
+    await attach_file.execute(  # type: ignore[union-attr]
+        context=ToolContext(caller=room.local_participant),
+        path="reports/output.pdf",
+    )
+
+    message = next(
+        child for child in messages.get_children() if child.tag_name == "message"
+    )
+    assert message.get_attribute("role") == "agent"
+    assert message.get_children()[0].get_attribute("path") == "reports/output.pdf"
 
 
 async def _new_thread_tool(bot: ChatBot):
@@ -1375,7 +1414,7 @@ def test_chat_error_message_uses_handshake_error_message() -> None:
     )
     assert (
         bot._chat_error_message(error=error)
-        == "Your account is out of credits. Add credits to continue."
+        == "Your account is out of credits. Add credits from the account dashboard or set up auto reload to continue."
     )
 
 

@@ -147,3 +147,88 @@ async def test_thread_adapter_stop_times_out_stalled_sync_close(monkeypatch) -> 
     ]
     assert room.sync.close_calls == ["/threads/test"]
     assert adapter.thread is None
+
+
+class _FakeElement:
+    def __init__(self, *, tag_name: str, attributes: Optional[dict] = None) -> None:
+        self.tag_name = tag_name
+        self._attributes = dict(attributes or {})
+        self._children: list["_FakeElement"] = []
+
+    def get_attribute(self, name: str):
+        return self._attributes.get(name)
+
+    def set_attribute(self, name: str, value) -> None:
+        self._attributes[name] = value
+
+    def get_children(self) -> list["_FakeElement"]:
+        return [*self._children]
+
+    def get_children_by_tag_name(self, tag_name: str) -> list["_FakeElement"]:
+        return [child for child in self._children if child.tag_name == tag_name]
+
+    def append_child(
+        self, *, tag_name: str, attributes: Optional[dict] = None
+    ) -> "_FakeElement":
+        child = _FakeElement(tag_name=tag_name, attributes=attributes)
+        self._children.append(child)
+        return child
+
+
+class _FakeThreadDocumentForWrite:
+    def __init__(self) -> None:
+        self.root = _FakeElement(tag_name="thread")
+        self.messages = self.root.append_child(tag_name="messages")
+
+
+class _FakeLocalParticipant:
+    def get_attribute(self, name: str):
+        if name == "name":
+            return "assistant"
+        return None
+
+
+class _FakeWriteRoom:
+    def __init__(self) -> None:
+        self.local_participant = _FakeLocalParticipant()
+
+
+def test_write_image_marks_created_message_as_agent() -> None:
+    room = _FakeWriteRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")  # type: ignore[arg-type]
+    thread = _FakeThreadDocumentForWrite()
+    adapter._thread = thread  # type: ignore[assignment]
+
+    message_id = adapter.write_image(
+        message_id="image-message",
+        image_id="image-row",
+        mime_type="image/png",
+    )
+
+    assert message_id == "image-message"
+    message = thread.messages.get_children()[0]
+    assert message.get_attribute("role") == "agent"
+
+
+def test_write_image_backfills_role_on_existing_message() -> None:
+    room = _FakeWriteRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")  # type: ignore[arg-type]
+    thread = _FakeThreadDocumentForWrite()
+    message = thread.messages.append_child(
+        tag_name="message",
+        attributes={
+            "id": "image-message",
+            "text": "",
+            "created_at": "2026-05-01T00:00:00Z",
+            "author_name": "assistant",
+        },
+    )
+    adapter._thread = thread  # type: ignore[assignment]
+
+    adapter.write_image(
+        message_id="image-message",
+        image_id="image-row",
+        mime_type="image/png",
+    )
+
+    assert message.get_attribute("role") == "agent"
