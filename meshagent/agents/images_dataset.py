@@ -37,7 +37,12 @@ class ImagesDataset:
         return pa.schema(
             [
                 pa.field("id", pa.string(), nullable=False),
-                pa.field("data", pa.binary(), nullable=False),
+                pa.field(
+                    "data",
+                    pa.binary(),
+                    nullable=False,
+                    metadata={"content-type": "image/*"},
+                ),
                 pa.field("mime_type", pa.string(), nullable=False),
                 pa.field("created_at", pa.timestamp("us", tz="UTC"), nullable=False),
                 pa.field("created_by", pa.string(), nullable=False),
@@ -135,7 +140,7 @@ class ImagesDataset:
             existing_schema = await self._room.datasets.inspect(table=self.TABLE_NAME)
             existing_names = set(existing_schema.names)
             missing_columns = {
-                field.name: field.type
+                field.name: field
                 for field in schema
                 if field.name not in existing_names
             }
