@@ -11,6 +11,7 @@ from meshagent.api import Participant, RoomException
 from meshagent.tools import Content, ToolContext, Toolkit
 
 from .agent import AgentSessionContext
+from .agent_event_reader import AgentEventReader, DefaultAgentEventReader
 from .messages import AgentMessage, ToolChoice
 
 TEvent = TypeVar("TEvent")
@@ -224,6 +225,13 @@ class LLMAdapter(Generic[TEvent]):
                 custom_event_callback(event)
 
         return publish
+
+    def make_agent_event_reader(
+        self,
+        *,
+        context: AgentSessionContext,
+    ) -> AgentEventReader:
+        return DefaultAgentEventReader(context=context)
 
     async def next(
         self,

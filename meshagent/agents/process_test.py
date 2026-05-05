@@ -258,8 +258,14 @@ class _LifecycleThreadStorage:
         del sender
         self.messages.append(message)
 
-    def restore_session_context(self, *, context: AgentSessionContext) -> None:
+    def restore_session_context(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter=None,
+    ) -> None:
         del context
+        del llm_adapter
 
     def make_toolkit(self) -> Toolkit:
         return Toolkit(name="thread-storage", tools=[])

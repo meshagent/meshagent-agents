@@ -5,7 +5,6 @@ import logging
 import os
 import shlex
 import tempfile
-import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -38,9 +37,9 @@ from meshagent.api.specs.service import (
 )
 from meshagent.agents.images_dataset import ImagesDataset
 from meshagent.agents.messages import (
-    AGENT_EVENT_THREAD_IMAGE,
+    AGENT_EVENT_THREAD_EVENT,
     AgentTextContent,
-    AgentThreadImage,
+    AgentThreadEvent,
 )
 from meshagent.tools import Toolkit
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
@@ -1818,6 +1817,7 @@ class MeshagentPackage(PythonPackage):
         from meshagent.openai.tools.responses_adapter import (
             ApplyPatchTool,
             ImageGenerationTool,
+            OpenAIResponsesAdapter,
             OpenAIResponsesMCPToolkit,
             ShellTool,
             WebSearchTool,
@@ -2074,18 +2074,20 @@ class MeshagentPackage(PythonPackage):
                                 width, height = computer_toolkit.computer.dimensions
 
                             thread_storage.push_message(
-                                message=AgentThreadImage(
-                                    type=AGENT_EVENT_THREAD_IMAGE,
+                                message=AgentThreadEvent(
+                                    type=AGENT_EVENT_THREAD_EVENT,
                                     thread_id=thread_id,
-                                    item_id=str(uuid.uuid4()),
-                                    image_id=saved_image.id,
-                                    mime_type=saved_image.mime_type,
-                                    created_at=saved_image.created_at,
-                                    created_by=saved_image.created_by,
-                                    width=width,
-                                    height=height,
-                                    status="completed",
-                                    status_detail="Screenshot saved",
+                                    event={
+                                        "type": "computer.screenshot",
+                                        "uri": f"dataset://{ImagesDataset.TABLE_NAME}?id={saved_image.id}",
+                                        "mime_type": saved_image.mime_type,
+                                        "created_at": saved_image.created_at,
+                                        "created_by": saved_image.created_by,
+                                        "width": width,
+                                        "height": height,
+                                        "status": "completed",
+                                        "status_detail": "Screenshot saved",
+                                    },
                                 )
                             )
 
@@ -2123,6 +2125,10 @@ class MeshagentPackage(PythonPackage):
                 token=token,
             ).create_factory()
         ) as room_client:
+            if self._image_gen_enabled and isinstance(
+                process_llm_adapter, OpenAIResponsesAdapter
+            ):
+                process_llm_adapter.set_images_dataset(ImagesDataset(room=room_client))
             channels: list[
                 ChatChannel | MailChannel | QueueChannel | ToolkitChannel
             ] = []

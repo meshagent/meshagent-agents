@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from meshagent.api import (
     Element,
@@ -40,6 +40,10 @@ from .messages import (
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentImageGenerationCompleted,
+    AgentImageGenerationFailed,
+    AgentImageGenerationPartial,
+    AgentImageGenerationStarted,
     AgentMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -56,7 +60,6 @@ from .messages import (
     AgentToolCallPending,
     AgentToolCallStarted,
     AgentThreadEvent,
-    AgentThreadImage,
     ThreadCleared,
     TurnEnded,
     TurnInterrupted,
@@ -92,6 +95,8 @@ _IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
 
 @dataclass(frozen=True, slots=True)
 class _ActiveToolCall:
+    namespace: str
+    call_id: str | None
     toolkit: str
     tool: str
     arguments: dict[str, Any] | None
@@ -310,6 +315,19 @@ def _parse_image_dimensions_from_size(value: Any) -> tuple[int | None, int | Non
         )
 
     return (None, None)
+
+
+def _image_id_from_dataset_uri(uri: str | None) -> str | None:
+    if not isinstance(uri, str) or uri.strip() == "":
+        return None
+    parsed = urlparse(uri.strip())
+    if parsed.scheme != "dataset":
+        return None
+    values = parse_qs(parsed.query).get("id")
+    if values is None or len(values) == 0:
+        return None
+    image_id = values[0].strip()
+    return image_id or None
 
 
 def _mime_type_from_output_format(output_format: Any) -> str:
@@ -619,7 +637,13 @@ class MeshDocumentThreadStorage(ThreadStorage):
             )
         return response
 
-    def restore_session_context(self, *, context: AgentSessionContext) -> None:
+    def restore_session_context(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter: object | None = None,
+    ) -> None:
+        del llm_adapter
         if self._thread is None:
             raise RoomException("thread was not opened")
 
@@ -735,18 +759,41 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 event=message.event,
             )
             return
-        elif isinstance(message, AgentThreadImage):
+        elif isinstance(message, AgentImageGenerationCompleted):
+            first_image = message.images[0] if len(message.images) > 0 else None
             self._upsert_thread_image(
-                message_id=message.item_id or message.message_id,
+                message_id=message.item_id,
                 turn_id=message.turn_id,
-                image_id=message.image_id,
-                mime_type=message.mime_type,
-                created_at=message.created_at,
-                created_by=message.created_by,
-                width=message.width,
-                height=message.height,
-                status=message.status,
-                status_detail=message.status_detail,
+                image_id=None
+                if first_image is None
+                else _image_id_from_dataset_uri(first_image.uri),
+                mime_type=None if first_image is None else first_image.mime_type,
+                created_at=None if first_image is None else first_image.created_at,
+                created_by=None if first_image is None else first_image.created_by,
+                width=None if first_image is None else first_image.width,
+                height=None if first_image is None else first_image.height,
+                status="completed",
+                status_detail=message.status_detail
+                or (None if first_image is None else first_image.status_detail),
+            )
+            return
+        elif isinstance(message, AgentImageGenerationFailed):
+            self._upsert_thread_image(
+                message_id=message.item_id,
+                turn_id=message.turn_id,
+                status="failed",
+                status_detail=message.status_detail
+                or (message.error.message if message.error is not None else None),
+            )
+            return
+        elif isinstance(
+            message, (AgentImageGenerationStarted, AgentImageGenerationPartial)
+        ):
+            self._upsert_thread_image(
+                message_id=message.item_id,
+                turn_id=message.turn_id,
+                status="in_progress",
+                status_detail=message.status_detail or "Generating image",
             )
             return
 
@@ -2372,6 +2419,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if isinstance(message, AgentToolCallPending):
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
+                namespace=message.namespace,
+                call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
@@ -2391,6 +2440,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if isinstance(message, AgentToolCallInProgress):
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
+                namespace=message.namespace,
+                call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
@@ -2410,6 +2461,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if isinstance(message, AgentToolCallStarted):
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
+                namespace=message.namespace,
+                call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
@@ -2431,6 +2484,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
             active_tool_call = self._active_tool_calls_by_item_id.get(message.item_id)
             if active_tool_call is None:
                 active_tool_call = _ActiveToolCall(
+                    namespace=message.namespace,
+                    call_id=message.call_id,
                     toolkit="tool",
                     tool="tool",
                     arguments=None,

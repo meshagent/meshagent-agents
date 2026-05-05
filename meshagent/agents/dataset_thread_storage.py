@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import json
 import logging
@@ -9,21 +8,35 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pyarrow as pa
 
 from meshagent.api import DatasetOptimizeConfig, Participant, RoomClient
-from meshagent.api.messaging import BinaryContent, TextContent
+from meshagent.api.messaging import TextContent
 from meshagent.tools import Toolkit, tool
 
 from .context import AgentSessionContext
-from .images_dataset import ImagesDataset
 from .messages import (
+    AGENT_EVENT_FILE_CONTENT_DELTA,
+    AGENT_EVENT_FILE_CONTENT_ENDED,
+    AGENT_EVENT_REASONING_CONTENT_DELTA,
+    AGENT_EVENT_REASONING_CONTENT_ENDED,
+    AGENT_EVENT_TEXT_CONTENT_DELTA,
+    AGENT_EVENT_TEXT_CONTENT_ENDED,
+    AGENT_EVENT_TOOL_CALL_ENDED,
+    AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+    AGENT_EVENT_TOOL_CALL_STARTED,
+    AgentContextCompacted,
     AgentFileContent,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentGeneratedImage,
+    AgentImageGenerationCompleted,
+    AgentImageGenerationFailed,
+    AgentImageGenerationPartial,
+    AgentImageGenerationStarted,
     AgentMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -33,7 +46,6 @@ from .messages import (
     AgentTextContentEnded,
     AgentTextContentStarted,
     AgentThreadEvent,
-    AgentThreadImage,
     AgentToolCallEnded,
     AgentToolCallInProgress,
     AgentToolCallLogDelta,
@@ -48,9 +60,13 @@ from .messages import (
     TurnSteer,
     TurnSteerAccepted,
     TurnSteerRejected,
+    parse_agent_message,
 )
 from .thread_adapter import default_format_message
 from .thread_storage import ThreadStorage
+
+if TYPE_CHECKING:
+    from .adapter import LLMAdapter
 
 logger = logging.getLogger("agent.dataset_thread_storage")
 
@@ -123,6 +139,19 @@ def _mime_type_from_output_format(output_format: Any) -> str:
     return f"image/{normalized}"
 
 
+def _image_generation_status(
+    *,
+    message: AgentMessage,
+) -> Literal["pending", "in_progress", "completed", "failed"]:
+    if isinstance(message, AgentImageGenerationCompleted):
+        return "completed"
+    if isinstance(message, AgentImageGenerationFailed):
+        return "failed"
+    if isinstance(message, AgentImageGenerationPartial):
+        return "in_progress"
+    return "pending"
+
+
 def _normalize_path_parts(*, path: str) -> list[str]:
     parts = [part for part in path.strip().split("/") if part != ""]
     if len(parts) == 0:
@@ -185,6 +214,8 @@ class _ActiveToolCall:
     turn_id: str
     item_id: str
     message_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     toolkit: str | None = None
     tool: str | None = None
     arguments: dict[str, Any] | None = None
@@ -221,7 +252,6 @@ class DatasetThreadStorage(ThreadStorage):
         self._pending_user_turns: dict[str, _QueuedThreadMessage] = {}
         self._active_content_by_item_id: dict[str, _ActiveContent] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
-        self._images_db = ImagesDataset(room=self._room)
 
     @property
     def path(self) -> str:
@@ -519,6 +549,8 @@ class DatasetThreadStorage(ThreadStorage):
                     turn_id=message.turn_id,
                     item_id=message.item_id,
                     message_id=message.message_id,
+                    namespace=message.namespace,
+                    call_id=message.call_id,
                     stage="in_progress",
                 )
                 self._active_tool_calls_by_item_id[message.item_id] = active
@@ -533,20 +565,44 @@ class DatasetThreadStorage(ThreadStorage):
             )
             return
 
-        if isinstance(message, AgentThreadImage):
+        if isinstance(message, AgentContextCompacted):
+            await self._append_row(
+                turn_id=None,
+                item_id=message.message_id,
+                data={
+                    "kind": "compaction",
+                    "status": "completed",
+                    "message": message.model_dump(mode="json"),
+                },
+            )
+            return
+
+        if isinstance(
+            message,
+            (
+                AgentImageGenerationStarted,
+                AgentImageGenerationPartial,
+                AgentImageGenerationCompleted,
+                AgentImageGenerationFailed,
+            ),
+        ):
+            if isinstance(
+                message,
+                (AgentImageGenerationStarted, AgentImageGenerationPartial),
+            ):
+                return
+            if isinstance(
+                message,
+                (AgentImageGenerationCompleted, AgentImageGenerationFailed),
+            ):
+                self._active_tool_calls_by_item_id.pop(message.item_id, None)
             await self._append_row(
                 turn_id=message.turn_id,
-                item_id=message.item_id or message.message_id,
+                item_id=message.item_id,
                 data={
-                    "kind": "image",
-                    "status": message.status or "completed",
-                    "image_id": message.image_id,
-                    "mime_type": message.mime_type,
-                    "created_at": message.created_at,
-                    "created_by": message.created_by,
-                    "width": message.width,
-                    "height": message.height,
-                    "status_detail": message.status_detail,
+                    "kind": "image_generation",
+                    "role": "assistant",
+                    "status": _image_generation_status(message=message),
                     "message": message.model_dump(mode="json"),
                 },
             )
@@ -609,9 +665,13 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 item_id=message.item_id,
                 message_id=message.message_id,
+                namespace=message.namespace,
+                call_id=message.call_id,
             )
             self._active_tool_calls_by_item_id[message.item_id] = active
 
+        active.namespace = message.namespace
+        active.call_id = message.call_id
         active.toolkit = message.toolkit
         active.tool = message.tool
         active.arguments = message.arguments
@@ -680,7 +740,7 @@ class DatasetThreadStorage(ThreadStorage):
         status = _TERMINAL_REASON_TO_STATUS[reason]
         if active.kind in {"text", "reasoning"}:
             text = "".join(active.parts)
-            if text == "":
+            if text.strip() == "":
                 return
             await self._append_row(
                 turn_id=active.turn_id,
@@ -730,6 +790,8 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=ended_message.turn_id,
                 item_id=ended_message.item_id,
                 message_id=ended_message.message_id,
+                namespace=ended_message.namespace,
+                call_id=ended_message.call_id,
             )
 
         should_persist = (
@@ -754,6 +816,8 @@ class DatasetThreadStorage(ThreadStorage):
                 "kind": "tool_call",
                 "role": "assistant",
                 "status": _TERMINAL_REASON_TO_STATUS[reason],
+                "namespace": active.namespace,
+                "call_id": active.call_id,
                 "toolkit": active.toolkit,
                 "tool": active.tool,
                 "arguments": active.arguments,
@@ -777,55 +841,43 @@ class DatasetThreadStorage(ThreadStorage):
         if active_tool_call.tool.strip().lower() != "image_generation":
             return False
         if message.error is not None:
-            return False
+            failed_message = AgentImageGenerationFailed(
+                type="meshagent.agent.image_generation.failed",
+                thread_id=message.thread_id,
+                message_id=message.message_id,
+                turn_id=active_tool_call.turn_id,
+                item_id=active_tool_call.item_id,
+                call_id=active_tool_call.call_id,
+                toolkit=active_tool_call.toolkit or "image_generation",
+                tool=active_tool_call.tool or "image_generation",
+                arguments=active_tool_call.arguments,
+                error=message.error,
+                status_detail=message.error.message,
+            )
+            await self._append_row(
+                turn_id=active_tool_call.turn_id,
+                item_id=active_tool_call.item_id,
+                data={
+                    "kind": "image_generation",
+                    "role": "assistant",
+                    "status": "failed",
+                    "status_detail": failed_message.status_detail,
+                    "message": failed_message.model_dump(mode="json"),
+                },
+            )
+            return True
 
-        image_bytes: bytes | None = None
+        image_uri: str | None = None
         mime_type: str | None = None
-        annotations: dict[str, str] = {}
 
-        if isinstance(message.result, BinaryContent):
-            image_bytes = message.result.get_data()
-            headers = message.result.headers
-            raw_mime_type = headers.get("mime_type")
-            if isinstance(raw_mime_type, str) and raw_mime_type.strip() != "":
-                mime_type = raw_mime_type.strip()
-            for key in ("background", "output_format", "quality", "size", "status"):
-                value = headers.get(key)
-                if isinstance(value, str) and value.strip() != "":
-                    annotations[key] = value.strip()
-        elif isinstance(message.result, TextContent):
+        if isinstance(message.result, TextContent):
             encoded_image = message.result.text.strip()
             if encoded_image != "":
-                try:
-                    image_bytes = base64.b64decode(encoded_image)
-                except Exception:
-                    logger.warning(
-                        "unable to decode image_generation tool result for %s",
-                        message.item_id,
-                    )
-                    return False
-
-        if image_bytes is None:
-            return False
+                image_uri = encoded_image
 
         arguments = active_tool_call.arguments or {}
         if mime_type is None:
             mime_type = _mime_type_from_output_format(arguments.get("output_format"))
-        for key in (
-            "background",
-            "model",
-            "moderation",
-            "output_format",
-            "quality",
-            "size",
-        ):
-            value = arguments.get(key)
-            if (
-                isinstance(value, str)
-                and value.strip() != ""
-                and key not in annotations
-            ):
-                annotations[key] = value.strip()
 
         width = _normalize_positive_dimension(arguments.get("width"))
         height = _normalize_positive_dimension(arguments.get("height"))
@@ -838,58 +890,38 @@ class DatasetThreadStorage(ThreadStorage):
             if height is None:
                 height = parsed_height
 
-        created_by = self._room.local_participant.get_attribute("name")
-        if not isinstance(created_by, str):
-            created_by = ""
-
-        try:
-            saved_image = await self._images_db.save(
-                data=image_bytes,
-                mime_type=mime_type,
-                created_by=created_by,
-                annotations=annotations,
-            )
-        except Exception as ex:
-            logger.error(
-                "failed to persist generated image for dataset thread %s",
-                message.item_id,
-                exc_info=ex,
-            )
-            await self._append_row(
-                turn_id=active_tool_call.turn_id,
-                item_id=active_tool_call.item_id,
-                data={
-                    "kind": "image",
-                    "role": "assistant",
-                    "status": "failed",
-                    "status_detail": f"Image save failed: {ex}",
-                    "error": str(ex),
-                    "message": message.model_dump(mode="json"),
-                },
-            )
-            return True
-
+        if image_uri is None:
+            return False
+        completed_message = AgentImageGenerationCompleted(
+            type="meshagent.agent.image_generation.completed",
+            thread_id=message.thread_id,
+            message_id=message.message_id,
+            turn_id=active_tool_call.turn_id,
+            item_id=active_tool_call.item_id,
+            call_id=active_tool_call.call_id,
+            toolkit=active_tool_call.toolkit or "image_generation",
+            tool=active_tool_call.tool or "image_generation",
+            arguments=active_tool_call.arguments,
+            images=[
+                AgentGeneratedImage(
+                    uri=image_uri,
+                    mime_type=mime_type,
+                    width=width,
+                    height=height,
+                    status="completed",
+                )
+            ],
+        )
         await self._append_row(
             turn_id=active_tool_call.turn_id,
             item_id=active_tool_call.item_id,
             data={
-                "kind": "image",
+                "kind": "image_generation",
                 "role": "assistant",
                 "status": "completed",
-                "image_id": saved_image.id,
-                "mime_type": saved_image.mime_type,
-                "created_at": saved_image.created_at,
-                "created_by": saved_image.created_by,
-                "width": width,
-                "height": height,
-                "status_detail": "Image saved",
-                "message": message.model_dump(mode="json"),
+                "status_detail": completed_message.status_detail,
+                "message": completed_message.model_dump(mode="json"),
             },
-        )
-        logger.info(
-            "saved dataset-thread image %s for tool call %s",
-            saved_image.id,
-            message.item_id,
         )
         return True
 
@@ -1020,7 +1052,20 @@ class DatasetThreadStorage(ThreadStorage):
         normalized = raw_name.strip()
         return normalized if normalized != "" else None
 
-    def restore_session_context(self, *, context: AgentSessionContext) -> None:
+    def restore_session_context(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter: "LLMAdapter[Any] | None" = None,
+    ) -> None:
+        if llm_adapter is not None:
+            reader = llm_adapter.make_agent_event_reader(context=context)
+            for row in self._rows:
+                for message in self._messages_from_row(row=row):
+                    reader.consume(message)
+            reader.finalize()
+            return
+
         rows = self._rows
         if len(rows) > self._max_append_message_count:
             first_message = len(rows) - self._max_append_message_count
@@ -1082,6 +1127,208 @@ class DatasetThreadStorage(ThreadStorage):
                 context.append_assistant_message(
                     f"assistant attached a file available at {url}"
                 )
+
+    def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentMessage]:
+        data = row.data
+        kind = data.get("kind")
+        message = self._stored_agent_message(value=data.get("message"))
+        if message is not None:
+            if kind == "compaction" and isinstance(message, AgentContextCompacted):
+                return [message]
+            if kind == "event" and isinstance(message, AgentThreadEvent):
+                return [message]
+            if kind == "image_generation" and isinstance(
+                message,
+                (
+                    AgentImageGenerationStarted,
+                    AgentImageGenerationPartial,
+                    AgentImageGenerationCompleted,
+                    AgentImageGenerationFailed,
+                ),
+            ):
+                return [message]
+
+        if kind == "message":
+            role = data.get("role")
+            if role == "user":
+                request = self._stored_agent_message(value=data.get("request"))
+                if isinstance(request, (TurnStart, TurnSteer)):
+                    return [request]
+                return []
+
+            text = data.get("text")
+            if not isinstance(text, str) or text == "":
+                return []
+            turn_id = row.turn_id or row.item_id
+            return [
+                AgentTextContentDelta(
+                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    thread_id=self.path,
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                    text=text,
+                ),
+                AgentTextContentEnded(
+                    type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+                    thread_id=self.path,
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                ),
+            ]
+
+        if kind == "reasoning":
+            text = data.get("text")
+            if not isinstance(text, str) or text == "":
+                return []
+            turn_id = row.turn_id or row.item_id
+            return [
+                AgentReasoningContentDelta(
+                    type=AGENT_EVENT_REASONING_CONTENT_DELTA,
+                    thread_id=self.path,
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                    text=text,
+                ),
+                AgentReasoningContentEnded(
+                    type=AGENT_EVENT_REASONING_CONTENT_ENDED,
+                    thread_id=self.path,
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                ),
+            ]
+
+        if kind == "file":
+            urls = data.get("urls")
+            if not isinstance(urls, list):
+                return []
+            turn_id = row.turn_id or row.item_id
+            messages: list[AgentMessage] = []
+            for url in urls:
+                if not isinstance(url, str) or url.strip() == "":
+                    continue
+                messages.append(
+                    AgentFileContentDelta(
+                        type=AGENT_EVENT_FILE_CONTENT_DELTA,
+                        thread_id=self.path,
+                        turn_id=turn_id,
+                        item_id=row.item_id,
+                        url=url,
+                    )
+                )
+            if len(messages) == 0:
+                return []
+            messages.append(
+                AgentFileContentEnded(
+                    type=AGENT_EVENT_FILE_CONTENT_ENDED,
+                    thread_id=self.path,
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                )
+            )
+            return messages
+
+        if kind == "tool_call":
+            turn_id = row.turn_id or row.item_id
+            namespace = data.get("namespace")
+            call_id = data.get("call_id")
+            toolkit = data.get("toolkit")
+            tool = data.get("tool")
+            arguments = data.get("arguments")
+            if not isinstance(namespace, str) or namespace.strip() == "":
+                namespace = "meshagent"
+            if not isinstance(call_id, str):
+                call_id = None
+            if not isinstance(toolkit, str) or toolkit.strip() == "":
+                toolkit = "tool"
+            if not isinstance(tool, str) or tool.strip() == "":
+                tool = "tool"
+            if not isinstance(arguments, dict):
+                arguments = None
+
+            messages = [
+                AgentToolCallStarted(
+                    type=AGENT_EVENT_TOOL_CALL_STARTED,
+                    thread_id=self.path,
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                    namespace=namespace,
+                    call_id=call_id,
+                    toolkit=toolkit,
+                    tool=tool,
+                    arguments=arguments,
+                )
+            ]
+            logs = data.get("logs")
+            if isinstance(logs, list):
+                log_message = self._tool_log_delta_from_stored_lines(
+                    turn_id=turn_id,
+                    item_id=row.item_id,
+                    namespace=namespace,
+                    call_id=call_id,
+                    logs=logs,
+                )
+                if log_message is not None:
+                    messages.append(log_message)
+
+            if isinstance(message, AgentToolCallEnded):
+                messages.append(message)
+            else:
+                messages.append(
+                    AgentToolCallEnded(
+                        type=AGENT_EVENT_TOOL_CALL_ENDED,
+                        thread_id=self.path,
+                        turn_id=turn_id,
+                        item_id=row.item_id,
+                        namespace=namespace,
+                        call_id=call_id,
+                        result=None,
+                        error=None,
+                    )
+                )
+            return messages
+
+        return []
+
+    @staticmethod
+    def _stored_agent_message(*, value: Any) -> AgentMessage | None:
+        if not isinstance(value, dict):
+            return None
+        try:
+            return parse_agent_message(value)
+        except Exception:
+            return None
+
+    def _tool_log_delta_from_stored_lines(
+        self,
+        *,
+        turn_id: str,
+        item_id: str,
+        namespace: str,
+        call_id: str | None,
+        logs: list[Any],
+    ) -> AgentToolCallLogDelta | None:
+        lines = []
+        for line in logs:
+            if not isinstance(line, dict):
+                continue
+            source = line.get("source")
+            text = line.get("text")
+            if source not in {"stdout", "stderr"} or not isinstance(text, str):
+                continue
+            lines.append({"source": source, "text": text})
+        if len(lines) == 0:
+            return None
+        return AgentToolCallLogDelta.model_validate(
+            {
+                "type": AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+                "thread_id": self.path,
+                "turn_id": turn_id,
+                "item_id": item_id,
+                "namespace": namespace,
+                "call_id": call_id,
+                "lines": lines,
+            }
+        )
 
     def make_toolkit(self) -> Toolkit:
         return Toolkit(

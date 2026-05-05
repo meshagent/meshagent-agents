@@ -10,6 +10,7 @@ from meshagent.api.agent_content import (
     AgentTextContent,
 )
 from meshagent.api.messaging import Content
+from meshagent.api.messaging import unpack_content_parts
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 __all__ = [
@@ -55,7 +56,11 @@ AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
     "meshagent.agent.tool_call.approval_requested"
 )
 AGENT_EVENT_THREAD_EVENT = "meshagent.agent.thread.event"
-AGENT_EVENT_THREAD_IMAGE = "meshagent.agent.thread.image"
+AGENT_EVENT_IMAGE_GENERATION_STARTED = "meshagent.agent.image_generation.started"
+AGENT_EVENT_IMAGE_GENERATION_PARTIAL = "meshagent.agent.image_generation.partial"
+AGENT_EVENT_IMAGE_GENERATION_COMPLETED = "meshagent.agent.image_generation.completed"
+AGENT_EVENT_IMAGE_GENERATION_FAILED = "meshagent.agent.image_generation.failed"
+AGENT_EVENT_CONTEXT_COMPACTED = "meshagent.agent.context.compacted"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
 AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
 
@@ -260,6 +265,8 @@ class AgentToolCallPending(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_PENDING]
     turn_id: str
     item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     toolkit: str
     tool: str
     arguments: Optional[dict] = None
@@ -269,6 +276,8 @@ class AgentToolCallInProgress(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_IN_PROGRESS]
     turn_id: str
     item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     toolkit: str
     tool: str
     arguments: Optional[dict] = None
@@ -278,6 +287,8 @@ class AgentToolCallStarted(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_STARTED]
     turn_id: str
     item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     toolkit: str
     tool: str
     arguments: Optional[dict] = None
@@ -292,6 +303,8 @@ class AgentToolCallLogDelta(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_LOG_DELTA]
     turn_id: str
     item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     lines: list[AgentToolCallLogLine]
 
 
@@ -301,6 +314,8 @@ class AgentToolCallEnded(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_ENDED]
     turn_id: str
     item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     result: Content | None = None
     error: AgentError | None = None
 
@@ -316,6 +331,8 @@ class AgentToolCallApprovalRequested(AgentMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED]
     turn_id: str
     item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
     toolkit: str
     tool: str
     arguments: Optional[dict[str, Any]] = None
@@ -326,11 +343,8 @@ class AgentThreadEvent(AgentMessage):
     event: dict[str, Any]
 
 
-class AgentThreadImage(AgentMessage):
-    type: Literal[AGENT_EVENT_THREAD_IMAGE]
-    item_id: str | None = None
-    turn_id: str | None = None
-    image_id: str | None = None
+class AgentGeneratedImage(BaseModel):
+    uri: str | None = None
     mime_type: str | None = None
     created_at: str | None = None
     created_by: str | None = None
@@ -338,6 +352,62 @@ class AgentThreadImage(AgentMessage):
     height: int | float | None = None
     status: str | None = None
     status_detail: str | None = None
+
+
+class AgentImageGenerationStarted(AgentMessage):
+    type: Literal[AGENT_EVENT_IMAGE_GENERATION_STARTED]
+    turn_id: str
+    item_id: str
+    call_id: str | None = None
+    toolkit: str = "image_generation"
+    tool: str = "image_generation"
+    arguments: Optional[dict[str, Any]] = None
+    status_detail: str | None = None
+
+
+class AgentImageGenerationPartial(AgentMessage):
+    type: Literal[AGENT_EVENT_IMAGE_GENERATION_PARTIAL]
+    turn_id: str
+    item_id: str
+    call_id: str | None = None
+    toolkit: str = "image_generation"
+    tool: str = "image_generation"
+    arguments: Optional[dict[str, Any]] = None
+    image: AgentGeneratedImage | None = None
+    partial_index: int | None = None
+    status_detail: str | None = None
+
+
+class AgentImageGenerationCompleted(AgentMessage):
+    type: Literal[AGENT_EVENT_IMAGE_GENERATION_COMPLETED]
+    turn_id: str
+    item_id: str
+    call_id: str | None = None
+    toolkit: str = "image_generation"
+    tool: str = "image_generation"
+    arguments: Optional[dict[str, Any]] = None
+    images: list[AgentGeneratedImage] = Field(default_factory=list)
+    status_detail: str | None = None
+
+
+class AgentImageGenerationFailed(AgentMessage):
+    type: Literal[AGENT_EVENT_IMAGE_GENERATION_FAILED]
+    turn_id: str
+    item_id: str
+    call_id: str | None = None
+    toolkit: str = "image_generation"
+    tool: str = "image_generation"
+    arguments: Optional[dict[str, Any]] = None
+    error: AgentError | None = None
+    status_detail: str | None = None
+
+
+class AgentContextCompacted(AgentMessage):
+    type: Literal[AGENT_EVENT_CONTEXT_COMPACTED]
+    checkpoint_id: str
+    path: str
+    through_sequence: int
+    created_at: str | None = None
 
 
 class ApproveAgentToolCall(AgentMessage):
@@ -350,3 +420,66 @@ class RejectAgentToolCall(AgentMessage):
     type: Literal[AGENT_MESSAGE_TOOL_CALL_REJECT]
     turn_id: str
     item_id: str
+
+
+_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
+    AGENT_MESSAGE_TURN_START: TurnStart,
+    AGENT_MESSAGE_TURN_STEER: TurnSteer,
+    AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
+    AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
+    AGENT_MESSAGE_THREAD_OPEN: OpenThread,
+    AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
+    AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
+    AGENT_MESSAGE_CAPABILITIES_RESPONSE: CapabilitiesResponse,
+    AGENT_EVENT_THREAD_CLEARED: ThreadCleared,
+    AGENT_EVENT_TURN_START_ACCEPTED: TurnStartAccepted,
+    AGENT_EVENT_TURN_START_REJECTED: TurnStartRejected,
+    AGENT_EVENT_TURN_INTERRUPT_ACCEPTED: TurnInterruptAccepted,
+    AGENT_EVENT_TURN_INTERRUPTED: TurnInterrupted,
+    AGENT_EVENT_TURN_STEER_ACCEPTED: TurnSteerAccepted,
+    AGENT_EVENT_TURN_STEERED: TurnSteered,
+    AGENT_EVENT_TURN_STEER_REJECTED: TurnSteerRejected,
+    AGENT_EVENT_TURN_STARTED: TurnStarted,
+    AGENT_EVENT_TURN_ENDED: TurnEnded,
+    AGENT_EVENT_REASONING_CONTENT_STARTED: AgentReasoningContentStarted,
+    AGENT_EVENT_REASONING_CONTENT_DELTA: AgentReasoningContentDelta,
+    AGENT_EVENT_REASONING_CONTENT_ENDED: AgentReasoningContentEnded,
+    AGENT_EVENT_TEXT_CONTENT_STARTED: AgentTextContentStarted,
+    AGENT_EVENT_TEXT_CONTENT_DELTA: AgentTextContentDelta,
+    AGENT_EVENT_TEXT_CONTENT_ENDED: AgentTextContentEnded,
+    AGENT_EVENT_FILE_CONTENT_STARTED: AgentFileContentStarted,
+    AGENT_EVENT_FILE_CONTENT_DELTA: AgentFileContentDelta,
+    AGENT_EVENT_FILE_CONTENT_ENDED: AgentFileContentEnded,
+    AGENT_EVENT_TOOL_CALL_PENDING: AgentToolCallPending,
+    AGENT_EVENT_TOOL_CALL_IN_PROGRESS: AgentToolCallInProgress,
+    AGENT_EVENT_TOOL_CALL_STARTED: AgentToolCallStarted,
+    AGENT_EVENT_TOOL_CALL_LOG_DELTA: AgentToolCallLogDelta,
+    AGENT_EVENT_TOOL_CALL_ENDED: AgentToolCallEnded,
+    AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED: AgentToolCallApprovalRequested,
+    AGENT_EVENT_THREAD_EVENT: AgentThreadEvent,
+    AGENT_EVENT_IMAGE_GENERATION_STARTED: AgentImageGenerationStarted,
+    AGENT_EVENT_IMAGE_GENERATION_PARTIAL: AgentImageGenerationPartial,
+    AGENT_EVENT_IMAGE_GENERATION_COMPLETED: AgentImageGenerationCompleted,
+    AGENT_EVENT_IMAGE_GENERATION_FAILED: AgentImageGenerationFailed,
+    AGENT_EVENT_CONTEXT_COMPACTED: AgentContextCompacted,
+    AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,
+    AGENT_MESSAGE_TOOL_CALL_REJECT: RejectAgentToolCall,
+}
+
+
+def parse_agent_message(data: dict[str, Any]) -> AgentMessage:
+    message_type = data.get("type")
+    if not isinstance(message_type, str):
+        raise ValueError("agent message is missing required string field 'type'")
+
+    model = _AGENT_MESSAGE_MODELS.get(message_type)
+    if model is None:
+        raise ValueError(f"unsupported agent message type: {message_type}")
+
+    payload = dict(data)
+    if model is AgentToolCallEnded:
+        result = payload.get("result")
+        if isinstance(result, dict):
+            payload["result"] = unpack_content_parts(header=result, payload=b"")
+
+    return model.model_validate(payload)

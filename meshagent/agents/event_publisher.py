@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
@@ -22,10 +23,19 @@ from .messages import (
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_STARTED,
+    AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+    AGENT_EVENT_IMAGE_GENERATION_FAILED,
+    AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
+    AGENT_EVENT_IMAGE_GENERATION_STARTED,
     AgentError,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentGeneratedImage,
+    AgentImageGenerationCompleted,
+    AgentImageGenerationFailed,
+    AgentImageGenerationPartial,
+    AgentImageGenerationStarted,
     AgentMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -44,6 +54,9 @@ from .messages import (
 AgentEventCallback = Callable[[AgentMessage], None]
 FunctionToolNameResolver = Callable[[str], tuple[str, str] | None]
 _ContentKind = Literal["file", "reasoning", "text"]
+_MESHAGENT_TOOL_NAMESPACE = "meshagent"
+_OPENAI_RESPONSES_TOOL_NAMESPACE = "openai.responses"
+_ANTHROPIC_MESSAGES_TOOL_NAMESPACE = "anthropic.messages"
 _DEFERRED_HANDLER_RESULT_TOOL_TYPES = {
     "apply_patch_call",
     "computer_call",
@@ -303,9 +316,102 @@ def _content_from_handler_result(value: Any):
     return None
 
 
+def _generated_image_from_value(value: Any) -> AgentGeneratedImage | None:
+    if not isinstance(value, dict):
+        return None
+    uri = _as_str(value.get("uri"))
+    if uri is None:
+        return None
+    return AgentGeneratedImage(
+        uri=uri,
+        mime_type=_as_str(value.get("mime_type")),
+        created_at=_as_str(value.get("created_at")),
+        created_by=_as_str(value.get("created_by")),
+        width=value.get("width")
+        if isinstance(value.get("width"), (int, float))
+        else None,
+        height=value.get("height")
+        if isinstance(value.get("height"), (int, float))
+        else None,
+        status=_as_str(value.get("status")),
+        status_detail=_as_str(value.get("status_detail")),
+    )
+
+
+def _mime_type_from_image_generation_item(item: dict[str, Any]) -> str:
+    output_format = _as_str(item.get("output_format"))
+    if output_format is None:
+        return "image/png"
+    normalized = output_format.strip().lower()
+    if normalized == "":
+        return "image/png"
+    if normalized == "jpg":
+        normalized = "jpeg"
+    return f"image/{normalized}"
+
+
+def _image_generation_dimensions(item: dict[str, Any]) -> tuple[int | None, int | None]:
+    size = _as_str(item.get("size"))
+    if size is None:
+        return None, None
+    match = re.fullmatch(r"\s*(\d+)\s*x\s*(\d+)\s*", size)
+    if match is None:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _image_generation_arguments(item: dict[str, Any]) -> dict[str, Any] | None:
+    arguments = _filtered_tool_arguments(
+        item=item,
+        excluded_keys={
+            "id",
+            "images",
+            "partial_image_b64",
+            "partial_image_index",
+            "result",
+            "type",
+        },
+    )
+    return arguments if arguments is not None and len(arguments) > 0 else None
+
+
+def _generated_image_from_result_item(
+    item: dict[str, Any],
+) -> AgentGeneratedImage | None:
+    result = _as_str(item.get("result"))
+    if result is None or result.strip() == "":
+        return None
+    mime_type = _mime_type_from_image_generation_item(item)
+    width, height = _image_generation_dimensions(item)
+    uri = result.strip()
+    if re.match(r"^[a-z][a-z0-9+.-]*:", uri) is None:
+        uri = f"data:{mime_type};base64,{uri}"
+    return AgentGeneratedImage(
+        uri=uri,
+        mime_type=mime_type,
+        width=width,
+        height=height,
+        status=_as_str(item.get("status")) or "completed",
+    )
+
+
+def _generated_images_from_item(item: dict[str, Any]) -> list[AgentGeneratedImage]:
+    images = item.get("images")
+    if not isinstance(images, list):
+        generated_image = _generated_image_from_result_item(item)
+        return [generated_image] if generated_image is not None else []
+    generated: list[AgentGeneratedImage] = []
+    for image in images:
+        generated_image = _generated_image_from_value(image)
+        if generated_image is not None:
+            generated.append(generated_image)
+    return generated
+
+
 @dataclass(frozen=True, slots=True)
 class _ToolCallInfo:
     item_id: str
+    namespace: str
     toolkit: str
     tool: str
     item_type: str | None = None
@@ -331,6 +437,7 @@ def _filtered_tool_arguments(
 def _openai_tool_call_info(
     item: dict[str, Any],
     *,
+    provider_tool_namespace: str = _OPENAI_RESPONSES_TOOL_NAMESPACE,
     function_tool_name_resolver: FunctionToolNameResolver | None = None,
 ) -> _ToolCallInfo | None:
     item_type = _as_str(item.get("type"))
@@ -354,6 +461,7 @@ def _openai_tool_call_info(
                 toolkit_name, tool_name = resolved
         return _ToolCallInfo(
             item_id=item_id,
+            namespace=_MESHAGENT_TOOL_NAMESPACE,
             toolkit=toolkit_name,
             tool=tool_name,
             item_type=item_type,
@@ -366,6 +474,7 @@ def _openai_tool_call_info(
     if item_type == "mcp_call":
         return _ToolCallInfo(
             item_id=item_id,
+            namespace=provider_tool_namespace,
             toolkit=_as_str(item.get("server_label")) or "mcp",
             tool=_as_str(item.get("name")) or "call",
             item_type=item_type,
@@ -378,6 +487,7 @@ def _openai_tool_call_info(
     if item_type == "mcp_list_tools":
         return _ToolCallInfo(
             item_id=item_id,
+            namespace=provider_tool_namespace,
             toolkit=_as_str(item.get("server_label")) or "mcp",
             tool="list_tools",
             item_type=item_type,
@@ -395,6 +505,7 @@ def _openai_tool_call_info(
 
     return _ToolCallInfo(
         item_id=item_id,
+        namespace=provider_tool_namespace,
         toolkit="openai",
         tool=item_type.removesuffix("_call"),
         item_type=item_type,
@@ -437,20 +548,26 @@ def _anthropic_tool_call_info(
                 toolkit_name, tool_name = resolved
         return _ToolCallInfo(
             item_id=item_id,
+            namespace=_MESHAGENT_TOOL_NAMESPACE,
             toolkit=toolkit_name,
             tool=tool_name,
+            item_type=block_type,
+            call_id=_as_str(block.get("id")),
             arguments=_parse_tool_arguments(block.get("input")),
         )
 
     if block_type == "mcp_tool_use":
         return _ToolCallInfo(
             item_id=item_id,
+            namespace=_ANTHROPIC_MESSAGES_TOOL_NAMESPACE,
             toolkit=(
                 _as_str(block.get("server_name"))
                 or _as_str(block.get("server_label"))
                 or "mcp"
             ),
             tool=_as_str(block.get("name")) or "tool",
+            item_type=block_type,
+            call_id=_as_str(block.get("id")),
             arguments=_parse_tool_arguments(
                 block.get("input")
                 if block.get("input") is not None
@@ -461,8 +578,11 @@ def _anthropic_tool_call_info(
     if block_type.endswith("_tool_use"):
         return _ToolCallInfo(
             item_id=item_id,
+            namespace=_ANTHROPIC_MESSAGES_TOOL_NAMESPACE,
             toolkit="anthropic",
             tool=block_type.removesuffix("_tool_use"),
+            item_type=block_type,
+            call_id=_as_str(block.get("id")),
             arguments=_filtered_tool_arguments(
                 item=block,
                 excluded_keys={"id", "name", "type"},
@@ -636,6 +756,8 @@ class _AgentMessageEmitter:
         existing = self._pending_tool_calls.get(info.item_id)
         if (
             existing is not None
+            and existing.namespace == info.namespace
+            and existing.call_id == info.call_id
             and existing.toolkit == info.toolkit
             and existing.tool == info.tool
             and existing.arguments == info.arguments
@@ -648,6 +770,8 @@ class _AgentMessageEmitter:
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=info.item_id,
+                namespace=info.namespace,
+                call_id=info.call_id,
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments,
@@ -658,6 +782,8 @@ class _AgentMessageEmitter:
         existing = self._in_progress_tool_calls.get(info.item_id)
         if (
             existing is not None
+            and existing.namespace == info.namespace
+            and existing.call_id == info.call_id
             and existing.toolkit == info.toolkit
             and existing.tool == info.tool
             and existing.arguments == info.arguments
@@ -671,6 +797,8 @@ class _AgentMessageEmitter:
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=info.item_id,
+                namespace=info.namespace,
+                call_id=info.call_id,
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments,
@@ -681,6 +809,8 @@ class _AgentMessageEmitter:
         existing = self._started_tool_calls.get(info.item_id)
         if (
             existing is not None
+            and existing.namespace == info.namespace
+            and existing.call_id == info.call_id
             and existing.toolkit == info.toolkit
             and existing.tool == info.tool
             and existing.arguments == info.arguments
@@ -695,6 +825,8 @@ class _AgentMessageEmitter:
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=info.item_id,
+                namespace=info.namespace,
+                call_id=info.call_id,
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments,
@@ -702,16 +834,28 @@ class _AgentMessageEmitter:
         )
 
     def emit_tool_log_delta(
-        self, *, item_id: str, lines: list[AgentToolCallLogLine]
+        self,
+        *,
+        item_id: str,
+        lines: list[AgentToolCallLogLine],
     ) -> None:
         if len(lines) == 0:
             return
+        info = (
+            self._started_tool_calls.get(item_id)
+            or self._in_progress_tool_calls.get(item_id)
+            or self._pending_tool_calls.get(item_id)
+        )
         self.callback(
             AgentToolCallLogDelta(
                 type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=item_id,
+                namespace=(
+                    info.namespace if info is not None else _MESHAGENT_TOOL_NAMESPACE
+                ),
+                call_id=info.call_id if info is not None else None,
                 lines=lines,
             )
         )
@@ -735,6 +879,8 @@ class _AgentMessageEmitter:
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=info.item_id,
+                namespace=info.namespace,
+                call_id=info.call_id,
                 result=info.result,
                 error=info.error,
             )
@@ -744,12 +890,14 @@ class _AgentMessageEmitter:
 @dataclass(slots=True)
 class _OpenAIAgentEventPublisher:
     emitter: _AgentMessageEmitter
+    provider_tool_namespace: str = _OPENAI_RESPONSES_TOOL_NAMESPACE
     function_tool_name_resolver: FunctionToolNameResolver | None = None
     custom_event_callback: Callable[[dict[str, Any]], None] | None = None
     _active_response_id: str | None = None
     _output_item_ids: dict[int, str] = field(default_factory=dict)
     _pending_handler_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _finished_handler_tool_call_ids: set[str] = field(default_factory=set)
+    _started_image_generation_ids: set[str] = field(default_factory=set)
 
     def set_function_tool_name_resolver(
         self,
@@ -854,10 +1002,18 @@ class _OpenAIAgentEventPublisher:
 
         tool_info = _openai_tool_call_info(
             item,
+            provider_tool_namespace=self.provider_tool_namespace,
             function_tool_name_resolver=self.function_tool_name_resolver,
         )
         if tool_info is not None:
             if tool_info.item_id in self._finished_handler_tool_call_ids:
+                return
+
+            if tool_info.item_type == "image_generation_call":
+                if completed:
+                    self._emit_image_generation_completed(info=tool_info, item=item)
+                else:
+                    self._emit_image_generation_started(info=tool_info, item=item)
                 return
 
             if tool_info.item_type in _HANDLER_RESULT_TOOL_TYPES:
@@ -900,6 +1056,121 @@ class _OpenAIAgentEventPublisher:
                 for part in content:
                     if isinstance(part, dict):
                         self._finish_part_from_snapshot(item_id=item_id, part=part)
+
+    def _image_generation_info_from_event(
+        self,
+        *,
+        event: dict[str, Any],
+    ) -> _ToolCallInfo | None:
+        item_id = self._item_id_from_event(event=event)
+        if item_id is None:
+            return None
+        item = dict(event)
+        item["type"] = "image_generation_call"
+        item["id"] = item_id
+        return _openai_tool_call_info(
+            item,
+            provider_tool_namespace=self.provider_tool_namespace,
+            function_tool_name_resolver=self.function_tool_name_resolver,
+        )
+
+    def _emit_image_generation_started(
+        self,
+        *,
+        info: _ToolCallInfo,
+        item: dict[str, Any],
+    ) -> None:
+        if info.item_id in self._started_image_generation_ids:
+            return
+        self._started_image_generation_ids.add(info.item_id)
+        self.emitter.callback(
+            AgentImageGenerationStarted(
+                type=AGENT_EVENT_IMAGE_GENERATION_STARTED,
+                thread_id=self.emitter.thread_id,
+                turn_id=self.emitter.turn_id,
+                item_id=info.item_id,
+                call_id=info.call_id,
+                toolkit=info.toolkit,
+                tool=info.tool,
+                arguments=info.arguments or _image_generation_arguments(item),
+                status_detail="Generating image",
+            )
+        )
+
+    def _emit_image_generation_partial(
+        self,
+        *,
+        info: _ToolCallInfo,
+        event: dict[str, Any],
+    ) -> None:
+        self._started_image_generation_ids.add(info.item_id)
+        partial_image = _as_str(event.get("partial_image_b64"))
+        mime_type = _mime_type_from_image_generation_item(event)
+        width, height = _image_generation_dimensions(event)
+        image = None
+        if partial_image is not None and partial_image.strip() != "":
+            image = AgentGeneratedImage(
+                uri=f"data:{mime_type};base64,{partial_image.strip()}",
+                mime_type=mime_type,
+                width=width,
+                height=height,
+                status="in_progress",
+            )
+        self.emitter.callback(
+            AgentImageGenerationPartial(
+                type=AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
+                thread_id=self.emitter.thread_id,
+                turn_id=self.emitter.turn_id,
+                item_id=info.item_id,
+                call_id=info.call_id,
+                toolkit=info.toolkit,
+                tool=info.tool,
+                arguments=info.arguments or _image_generation_arguments(event),
+                image=image,
+                partial_index=_as_int(event.get("partial_image_index")),
+                status_detail="Generating image",
+            )
+        )
+
+    def _emit_image_generation_completed(
+        self,
+        *,
+        info: _ToolCallInfo,
+        item: dict[str, Any],
+    ) -> None:
+        self._started_image_generation_ids.discard(info.item_id)
+        if info.error is not None:
+            self.emitter.callback(
+                AgentImageGenerationFailed(
+                    type=AGENT_EVENT_IMAGE_GENERATION_FAILED,
+                    thread_id=self.emitter.thread_id,
+                    turn_id=self.emitter.turn_id,
+                    item_id=info.item_id,
+                    call_id=info.call_id,
+                    toolkit=info.toolkit,
+                    tool=info.tool,
+                    arguments=info.arguments or _image_generation_arguments(item),
+                    error=info.error,
+                    status_detail=info.error.message,
+                )
+            )
+            return
+
+        images = _generated_images_from_item(item)
+        self.emitter.callback(
+            AgentImageGenerationCompleted(
+                type=AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+                thread_id=self.emitter.thread_id,
+                turn_id=self.emitter.turn_id,
+                item_id=info.item_id,
+                call_id=info.call_id,
+                toolkit=info.toolkit,
+                tool=info.tool,
+                arguments=info.arguments or _image_generation_arguments(item),
+                images=images,
+                status_detail="Image saved" if len(images) > 0 else None,
+            )
+        )
 
     def _on_content_part_added(self, *, event: dict[str, Any]) -> None:
         part = _as_dict(event.get("part"))
@@ -998,6 +1269,23 @@ class _OpenAIAgentEventPublisher:
             self._on_output_item(event=event, completed=True)
             return
 
+        if event_type in {
+            "response.image_generation_call.in_progress",
+            "response.image_generation_call.generating",
+        }:
+            info = self._image_generation_info_from_event(event=event)
+            if info is None:
+                return
+            self._emit_image_generation_started(info=info, item=event)
+            return
+
+        if event_type == "response.image_generation_call.partial_image":
+            info = self._image_generation_info_from_event(event=event)
+            if info is None:
+                return
+            self._emit_image_generation_partial(info=info, event=event)
+            return
+
         if event_type == "response.content_part.added":
             self._on_content_part_added(event=event)
             return
@@ -1052,6 +1340,7 @@ class _OpenAIAgentEventPublisher:
                 return
             tool_info = _openai_tool_call_info(
                 item,
+                provider_tool_namespace=self.provider_tool_namespace,
                 function_tool_name_resolver=self.function_tool_name_resolver,
             )
             if tool_info is None:
@@ -1102,6 +1391,7 @@ class _OpenAIAgentEventPublisher:
             if pending_tool_call is None and result_item is not None:
                 pending_tool_call = _openai_tool_call_info(
                     result_item,
+                    provider_tool_namespace=self.provider_tool_namespace,
                     function_tool_name_resolver=self.function_tool_name_resolver,
                 )
             if pending_tool_call is None:
@@ -1158,6 +1448,7 @@ class _AnthropicAgentEventPublisher:
     def __post_init__(self) -> None:
         self._openai_publisher = _OpenAIAgentEventPublisher(
             emitter=self.emitter,
+            provider_tool_namespace=_ANTHROPIC_MESSAGES_TOOL_NAMESPACE,
             function_tool_name_resolver=self.function_tool_name_resolver,
             custom_event_callback=self.custom_event_callback,
         )
@@ -1365,6 +1656,7 @@ def make_openai_agent_event_publisher(
     callback: AgentEventCallback,
     function_tool_name_resolver: FunctionToolNameResolver | None = None,
     custom_event_callback: Callable[[dict[str, Any]], None] | None = None,
+    provider_tool_namespace: str = _OPENAI_RESPONSES_TOOL_NAMESPACE,
 ) -> Callable[[dict[str, Any]], None]:
     emitter = _AgentMessageEmitter(
         turn_id=turn_id,
@@ -1373,6 +1665,7 @@ def make_openai_agent_event_publisher(
     )
     publisher = _OpenAIAgentEventPublisher(
         emitter=emitter,
+        provider_tool_namespace=provider_tool_namespace,
         function_tool_name_resolver=function_tool_name_resolver,
         custom_event_callback=custom_event_callback,
     )

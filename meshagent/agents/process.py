@@ -60,6 +60,10 @@ from .messages import (
     AgentToolCallInProgress,
     AgentToolCallPending,
     AgentToolCallStarted,
+    AgentImageGenerationCompleted,
+    AgentImageGenerationFailed,
+    AgentImageGenerationPartial,
+    AgentImageGenerationStarted,
     AgentThreadEvent,
     ApproveAgentToolCall,
     CapabilitiesRequest,
@@ -1275,7 +1279,8 @@ class LLMAgentProcess(AgentProcess):
                 thread_storage = self.thread_storage
                 if thread_storage is not None:
                     thread_storage.restore_session_context(
-                        context=self._session_context
+                        context=self._session_context,
+                        llm_adapter=self.llm_adapter,
                     )
 
                 with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
@@ -2058,6 +2063,18 @@ class LLMAgentProcess(AgentProcess):
                 if state == "completed":
                     return "Thinking", None
                 return status, message.item_id
+
+            if isinstance(
+                message,
+                (AgentImageGenerationStarted, AgentImageGenerationPartial),
+            ):
+                return "Generating image", message.item_id
+
+            if isinstance(message, AgentImageGenerationCompleted):
+                return "Thinking", None
+
+            if isinstance(message, AgentImageGenerationFailed):
+                return "Attempted to generate image", message.item_id
 
             if isinstance(message, TurnInterrupted):
                 return "Turn interrupted", None
