@@ -882,6 +882,16 @@ class ResponsesThreadAdapter(ThreadAdapter):
     async def handle_custom_event(
         self,
         *,
+        event: dict,
+    ) -> None:
+        await self._handle_custom_event_for_messages(
+            messages=self._messages_element(),
+            event=event,
+        )
+
+    async def _handle_custom_event_for_messages(
+        self,
+        *,
         messages: Element,
         event: dict,
     ) -> None:
@@ -1123,7 +1133,10 @@ class ResponsesThreadAdapter(ThreadAdapter):
 
                 event_type = evt.get("type")
                 if not isinstance(event_type, str):
-                    await self.handle_custom_event(messages=doc_messages, event=evt)
+                    await self._handle_custom_event_for_messages(
+                        messages=doc_messages,
+                        event=evt,
+                    )
                     continue
 
                 if event_type == "response.content_part.added":
@@ -1258,7 +1271,10 @@ class ResponsesThreadAdapter(ThreadAdapter):
                     item = evt.get("item")
                     item_id = _item_id_for_message_event(event=evt)
                     if not isinstance(item, dict):
-                        await self.handle_custom_event(messages=doc_messages, event=evt)
+                        await self._handle_custom_event_for_messages(
+                            messages=doc_messages,
+                            event=evt,
+                        )
                         continue
 
                     item_type = item.get("type")
@@ -1277,7 +1293,10 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         continue
 
                     if item_type != "message":
-                        await self.handle_custom_event(messages=doc_messages, event=evt)
+                        await self._handle_custom_event_for_messages(
+                            messages=doc_messages,
+                            event=evt,
+                        )
                         continue
 
                     if item_id is None:
@@ -1318,7 +1337,10 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         )
 
                 else:
-                    await self.handle_custom_event(messages=doc_messages, event=evt)
+                    await self._handle_custom_event_for_messages(
+                        messages=doc_messages,
+                        event=evt,
+                    )
 
         except asyncio.QueueShutDown:
             pass
@@ -1388,7 +1410,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
         height: Optional[int] = None,
     ) -> None:
         normalized_details = [line for line in (details or []) if isinstance(line, str)]
-        await self.handle_custom_event(
+        await self._handle_custom_event_for_messages(
             messages=messages,
             event={
                 "type": "agent.event",

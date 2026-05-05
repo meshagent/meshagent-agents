@@ -4,10 +4,21 @@ import asyncio
 import contextlib
 import logging
 import mimetypes
+import re
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Literal, Optional, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Literal,
+    Optional,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 from urllib.parse import urlparse
 
 from meshagent.api import Participant
@@ -16,18 +27,20 @@ from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.tools import ToolContext, Toolkit
 from opentelemetry import trace
-from .process_thread_adapter import AgentProcessThreadAdapter
-from .thread_adapter import ThreadAdapter, default_format_message
+from .thread_adapter import default_format_message
+from .thread_storage import ThreadStorage
+from .thread_status_publisher import ThreadStatusPublisher
 from .version import __version__ as agents_version
 from .messages import (
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_CAPABILITIES_RESPONSE,
-    AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
+    AGENT_EVENT_TURN_START_REJECTED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
@@ -43,6 +56,11 @@ from .messages import (
     AgentMessage,
     AgentTextContent,
     AgentToolCallApprovalRequested,
+    AgentToolCallEnded,
+    AgentToolCallInProgress,
+    AgentToolCallPending,
+    AgentToolCallStarted,
+    AgentThreadEvent,
     ApproveAgentToolCall,
     CapabilitiesRequest,
     CapabilitiesResponse,
@@ -50,13 +68,13 @@ from .messages import (
     RejectAgentToolCall,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
-    ThreadCleared,
     ToolChoice,
     TurnEnded,
     TurnInterrupt,
     TurnInterrupted,
     TurnInterruptAccepted,
     TurnStartAccepted,
+    TurnStartRejected,
     TurnStart,
     TurnSteerAccepted,
     TurnSteered,
@@ -64,6 +82,7 @@ from .messages import (
     TurnSteerRejected,
     TurnStarted,
 )
+from .shell_semantics import analyze_shell_command
 
 logger = logging.getLogger("agent-process")
 tracer = trace.get_tracer("meshagent.agents")
@@ -99,6 +118,13 @@ TurnToolkitsBuilder = Callable[
 ContentDownload = Callable[[str], Awaitable[FileContent]]
 
 
+@runtime_checkable
+class ThreadStorageLifecycle(Protocol):
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ContentScheme:
     prefix: str
@@ -107,6 +133,289 @@ class ContentScheme:
     def __post_init__(self) -> None:
         if self.prefix == "":
             raise ValueError("content scheme prefix cannot be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class _StatusToolCall:
+    toolkit: str
+    tool: str
+    arguments: dict[str, Any] | None
+
+
+_APPLY_PATCH_PATH_RES = (
+    re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (?P<path>.+)$", re.MULTILINE),
+    re.compile(r"^(?:\+\+\+ b/|--- a/)(?P<path>.+)$", re.MULTILINE),
+)
+
+
+def _humanize_tool_name(name: str) -> str:
+    normalized = name.strip().replace("_", " ").replace("-", " ")
+    if normalized == "":
+        return ""
+    return " ".join(part.capitalize() for part in normalized.split())
+
+
+def _command_text(*, value: Any, multiline: bool = False) -> str:
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, list):
+        string_items = [item.strip() for item in value if isinstance(item, str)]
+        string_items = [item for item in string_items if item != ""]
+        if len(string_items) == len(value) and len(string_items) > 0:
+            if multiline:
+                return "\n".join(string_items)
+            with contextlib.suppress(ValueError, TypeError):
+                return shlex.join(string_items)
+            return " ".join(string_items)
+
+        parts = [_command_text(value=item, multiline=multiline) for item in value]
+        parts = [part for part in parts if part != ""]
+        if len(parts) == 0:
+            return ""
+        return "\n".join(parts) if multiline else " ".join(parts)
+
+    if isinstance(value, dict):
+        for key in ("command", "commands", "cmd", "code", "text", "value"):
+            if key not in value:
+                continue
+            text = _command_text(
+                value=value[key],
+                multiline=multiline or key == "commands",
+            )
+            if text != "":
+                return text
+        nested = value.get("content")
+        if nested is not None:
+            return _command_text(value=nested, multiline=multiline)
+
+    return ""
+
+
+def _first_nested_text(*, value: Any, keys: tuple[str, ...]) -> str:
+    key_set = {key.lower() for key in keys}
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key.lower() not in key_set:
+                continue
+            text = _command_text(value=nested, multiline=key.endswith("s"))
+            if text != "":
+                return text
+
+        for nested in value.values():
+            text = _first_nested_text(value=nested, keys=keys)
+            if text != "":
+                return text
+
+    if isinstance(value, list):
+        for nested in value:
+            text = _first_nested_text(value=nested, keys=keys)
+            if text != "":
+                return text
+
+    return ""
+
+
+def _extract_tool_command(*, tool: str, arguments: dict[str, Any] | None) -> str:
+    if arguments is None:
+        return ""
+
+    action = arguments.get("action")
+    if isinstance(action, dict):
+        for key in ("commands", "command", "cmd"):
+            if key not in action:
+                continue
+            text = _command_text(value=action[key], multiline=key == "commands")
+            if text != "":
+                return text
+
+    for key in ("commands", "command", "cmd"):
+        if key not in arguments:
+            continue
+        text = _command_text(value=arguments[key], multiline=key == "commands")
+        if text != "":
+            return text
+
+    if tool == "code_interpreter":
+        text = _command_text(value=arguments.get("code"))
+        if text != "":
+            return text
+
+    return _first_nested_text(
+        value=arguments,
+        keys=("command", "commands", "cmd", "shell_command", "raw_command"),
+    )
+
+
+def _extract_web_query(*, arguments: dict[str, Any] | None) -> str:
+    if arguments is None:
+        return ""
+
+    queries = arguments.get("queries")
+    if isinstance(queries, list):
+        values = [item.strip() for item in queries if isinstance(item, str)]
+        values = [item for item in values if item != ""]
+        if len(values) == 1:
+            return values[0]
+        if len(values) > 1:
+            return ", ".join(values)
+
+    return _first_nested_text(value=arguments, keys=("query", "queries", "q"))
+
+
+def _extract_apply_patch_text(*, arguments: dict[str, Any] | None) -> str:
+    if arguments is None:
+        return ""
+    return _first_nested_text(value=arguments, keys=("patch", "input", "diff"))
+
+
+def _apply_patch_path(*, patch: str) -> str:
+    for pattern in _APPLY_PATCH_PATH_RES:
+        match = pattern.search(patch)
+        if match is None:
+            continue
+        path = match.group("path").strip()
+        if path != "":
+            return path
+    return ""
+
+
+def _storage_status_text(
+    *,
+    state: str,
+    toolkit: str,
+    tool: str,
+    arguments: dict[str, Any] | None,
+) -> str | None:
+    if arguments is None or toolkit.strip().lower() != "storage":
+        return None
+
+    normalized_tool = tool.strip().lower()
+    if normalized_tool == "grep_file":
+        path = arguments.get("path")
+        if not isinstance(path, str) or path.strip() == "":
+            return None
+        normalized_path = path.strip()
+        if state == "pending":
+            return f"Preparing to search {normalized_path}"
+        if state in _THREAD_STATUS_ACTIVE_STATES:
+            return f"Searching {normalized_path}"
+        if state == "failed":
+            return f"Attempted to search file {normalized_path}"
+        if state == "cancelled":
+            return f"Cancelled searching file {normalized_path}"
+        return f"Searched {normalized_path}"
+
+    if normalized_tool not in {"read_file", "write_file"}:
+        return None
+
+    path = arguments.get("path")
+    if not isinstance(path, str) or path.strip() == "":
+        return None
+    normalized_path = path.strip()
+    operation = "read" if normalized_tool == "read_file" else "write"
+    present = "Reading" if operation == "read" else "Writing"
+    past = "Read" if operation == "read" else "Wrote"
+
+    if state == "pending":
+        return f"Preparing to {operation} {normalized_path}"
+    if state in _THREAD_STATUS_ACTIVE_STATES:
+        return f"{present} {normalized_path}"
+    if state == "failed":
+        return f"Attempted to {operation} file {normalized_path}"
+    if state == "cancelled":
+        return f"Cancelled {operation}ing file {normalized_path}"
+    return f"{past} {normalized_path}"
+
+
+def _tool_status_text(
+    *,
+    state: str,
+    toolkit: str,
+    tool: str,
+    arguments: dict[str, Any] | None,
+) -> str:
+    storage_text = _storage_status_text(
+        state=state,
+        toolkit=toolkit,
+        tool=tool,
+        arguments=arguments,
+    )
+    if storage_text is not None:
+        return storage_text
+
+    normalized_tool = tool.strip().lower()
+    if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
+        command = _extract_tool_command(tool=normalized_tool, arguments=arguments)
+        return (
+            analyze_shell_command(command=command)
+            .display.phase_for_state(state=state)
+            .headline
+        )
+
+    if normalized_tool == "web_search":
+        query = _extract_web_query(arguments=arguments)
+        if state == "pending":
+            return "Preparing web search"
+        if state in _THREAD_STATUS_ACTIVE_STATES:
+            return "Searching the web"
+        if state == "failed":
+            return "Attempted to search the web"
+        if state == "cancelled":
+            return "Web Search Cancelled"
+        if query != "":
+            return f"Searched for {query}"
+        return "Searched the web"
+
+    if normalized_tool == "apply_patch":
+        patch = _extract_apply_patch_text(arguments=arguments)
+        path = _apply_patch_path(patch=patch)
+        if path != "":
+            if state == "pending":
+                return f"Preparing to edit {path}"
+            if state == "failed":
+                return f"Attempted to patch {path}"
+            if state == "cancelled":
+                return f"Patch Cancelled: {path}"
+            if state in _THREAD_STATUS_ACTIVE_STATES:
+                return f"Editing {path}"
+            return f"Edited {path}"
+        if state == "pending":
+            return "Preparing Patch"
+        if state == "failed":
+            return "Attempted to patch"
+        if state == "cancelled":
+            return "Patch Cancelled"
+        if state in _THREAD_STATUS_ACTIVE_STATES:
+            return "Applying Patch"
+        return "Applied Patch"
+
+    if normalized_tool == "image_generation":
+        if state == "pending":
+            return "Preparing image generation"
+        if state in _THREAD_STATUS_ACTIVE_STATES:
+            return "Generating image"
+        if state == "failed":
+            return "Attempted to generate image"
+        if state == "cancelled":
+            return "Image Generation Cancelled"
+        return "Generated image"
+
+    humanized = _humanize_tool_name(tool)
+    if state == "pending":
+        return f"Preparing {humanized}" if humanized != "" else "Preparing tool call"
+    if state in _THREAD_STATUS_ACTIVE_STATES:
+        return f"Calling {humanized}" if humanized != "" else "Calling tool"
+    if state == "failed":
+        return (
+            f"Attempted to call {humanized}"
+            if humanized != ""
+            else "Attempted to call tool"
+        )
+    if state == "cancelled":
+        return f"{humanized} Cancelled" if humanized != "" else "Tool call cancelled"
+    return f"Called {humanized}" if humanized != "" else "Called tool"
 
 
 @dataclass(slots=True)
@@ -252,6 +561,7 @@ class AgentSupervisor:
         self._run_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[Message] = asyncio.Queue()
         self._lifecycle_lock = asyncio.Lock()
+        self._route_lock = asyncio.Lock()
 
     @property
     def state(self) -> SupervisorState:
@@ -295,6 +605,18 @@ class AgentSupervisor:
 
     async def on_stop(self) -> None:
         return None
+
+    async def route(self, message: Message) -> None:
+        if self._stop.is_set() or self._state == "stopping":
+            logger.debug("dropping supervisor message during shutdown")
+            return
+
+        if self._state != "started":
+            self.send(message)
+            return
+
+        async with self._route_lock:
+            await self._route(message)
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -399,6 +721,65 @@ class AgentSupervisor:
 
         return started_processes
 
+    def _thread_process_creation_rejection(self, *, error: Exception) -> AgentError:
+        return AgentError(
+            message=str(error) or error.__class__.__name__,
+            code="thread_process_creation_failed",
+        )
+
+    def _create_thread_process_for_route(
+        self, *, thread_id: str
+    ) -> tuple[AgentProcess | None, AgentError | None]:
+        try:
+            process = self.create_thread_process(thread_id)
+        except Exception as exc:
+            logger.exception(
+                "failed to create process for thread %s; dropping message",
+                thread_id,
+            )
+            return None, self._thread_process_creation_rejection(error=exc)
+        self.add_process(process)
+        return process, None
+
+    def _emit_turn_start_rejected(
+        self,
+        *,
+        turn_start: TurnStart,
+        sender: Participant | None,
+        error: AgentError,
+    ) -> None:
+        self._send_to_channels(
+            Message(
+                data=TurnStartRejected(
+                    type=AGENT_EVENT_TURN_START_REJECTED,
+                    thread_id=turn_start.thread_id,
+                    source_message_id=turn_start.message_id,
+                    error=error,
+                ),
+                sender=sender,
+            )
+        )
+
+    def _emit_turn_steer_rejected(
+        self,
+        *,
+        turn_steer: TurnSteer,
+        sender: Participant | None,
+        error: AgentError,
+    ) -> None:
+        self._send_to_channels(
+            Message(
+                data=TurnSteerRejected(
+                    type=AGENT_EVENT_TURN_STEER_REJECTED,
+                    thread_id=turn_steer.thread_id,
+                    turn_id=turn_steer.turn_id,
+                    source_message_id=turn_steer.message_id,
+                    error=error,
+                ),
+                sender=sender,
+            )
+        )
+
     async def _route(self, message: Message) -> None:
         routed_message = message
         target_processes: list[AgentProcess] | None = None
@@ -407,8 +788,17 @@ class AgentSupervisor:
             turn_start = _coerce_message_data(message.data, TurnStart)
             process = self._process_for_thread(thread_id=turn_start.thread_id)
             if process is None:
-                process = self.create_thread_process(turn_start.thread_id)
-                self.add_process(process)
+                process, rejection = self._create_thread_process_for_route(
+                    thread_id=turn_start.thread_id
+                )
+                if process is None:
+                    if rejection is not None:
+                        self._emit_turn_start_rejected(
+                            turn_start=turn_start,
+                            sender=message.sender,
+                            error=rejection,
+                        )
+                    return
 
             routed_message = self._copy_message(
                 message,
@@ -420,8 +810,17 @@ class AgentSupervisor:
             turn_steer = _coerce_message_data(message.data, TurnSteer)
             process = self._process_for_thread(thread_id=turn_steer.thread_id)
             if process is None:
-                process = self.create_thread_process(turn_steer.thread_id)
-                self.add_process(process)
+                process, rejection = self._create_thread_process_for_route(
+                    thread_id=turn_steer.thread_id
+                )
+                if process is None:
+                    if rejection is not None:
+                        self._emit_turn_steer_rejected(
+                            turn_steer=turn_steer,
+                            sender=message.sender,
+                            error=rejection,
+                        )
+                    return
             routed_message = self._copy_message(
                 message,
                 data=turn_steer,
@@ -468,8 +867,11 @@ class AgentSupervisor:
             clear_thread = _coerce_message_data(message.data, ClearThread)
             process = self._process_for_thread(thread_id=clear_thread.thread_id)
             if process is None:
-                process = self.create_thread_process(clear_thread.thread_id)
-                self.add_process(process)
+                process, _ = self._create_thread_process_for_route(
+                    thread_id=clear_thread.thread_id
+                )
+                if process is None:
+                    return
 
             routed_message = self._copy_message(
                 message,
@@ -539,7 +941,8 @@ class AgentSupervisor:
 
                 with contextlib.suppress(asyncio.QueueShutDown):
                     message = await self._queue.get()
-                    await self._route(message)
+                    async with self._route_lock:
+                        await self._route(message)
         finally:
             await self._stop_children()
 
@@ -553,18 +956,22 @@ class AgentProcess:
         supervisor: AgentSupervisor | None = None,
         *,
         thread_id: str | None = None,
-        thread_adapter: ThreadAdapter | None = None,
+        thread_storage: ThreadStorage | None = None,
+        thread_adapter: ThreadStorage | None = None,
     ) -> None:
         del supervisor
-        if thread_adapter is not None:
+        if thread_storage is None:
+            thread_storage = thread_adapter
+        elif thread_adapter is not None:
+            raise ValueError("thread_storage and thread_adapter cannot both be set")
+
+        if thread_storage is not None:
             if thread_id is None:
-                thread_id = thread_adapter.path
-            elif thread_adapter.path != thread_id:
-                raise ValueError("thread_adapter path must match thread_id")
+                thread_id = thread_storage.path
 
         self._supervisor: AgentSupervisor | None = None
         self._thread_id = thread_id
-        self._thread_adapter = thread_adapter
+        self._thread_storage = thread_storage
         self._state: ProcessState = "stopped"
         self._run_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -580,10 +987,10 @@ class AgentProcess:
             logger.debug("dropping process message during shutdown")
             return
 
-        if self._should_mirror_to_thread_adapter(message=message):
-            thread_adapter = self._thread_adapter
-            if thread_adapter is not None:
-                thread_adapter.push_message(
+        if self._should_mirror_to_thread_storage(message=message):
+            thread_storage = self._thread_storage
+            if thread_storage is not None:
+                thread_storage.push_message(
                     message=message.data,
                     sender=message.sender,
                 )
@@ -597,9 +1004,9 @@ class AgentProcess:
     def handles(self, message: Message) -> bool:
         return False
 
-    def _should_mirror_to_thread_adapter(self, *, message: Message) -> bool:
-        thread_adapter = self._thread_adapter
-        if thread_adapter is None:
+    def _should_mirror_to_thread_storage(self, *, message: Message) -> bool:
+        thread_storage = self._thread_storage
+        if thread_storage is None:
             return False
 
         thread_id = self._thread_id
@@ -628,8 +1035,12 @@ class AgentProcess:
         return self._thread_id
 
     @property
-    def thread_adapter(self) -> ThreadAdapter | None:
-        return self._thread_adapter
+    def thread_storage(self) -> ThreadStorage | None:
+        return self._thread_storage
+
+    @property
+    def thread_adapter(self) -> ThreadStorage | None:
+        return self._thread_storage
 
     @property
     def turn_id(self) -> str | None:
@@ -661,16 +1072,18 @@ class AgentProcess:
 
             try:
                 self._supervisor = supervisor
-                if self._thread_adapter is not None:
-                    await self._thread_adapter.start()
+                thread_storage = self._thread_storage
+                if isinstance(thread_storage, ThreadStorageLifecycle):
+                    await thread_storage.start()
                 await self.on_start()
                 self._run_task = asyncio.create_task(self.run())
                 self._state = "started"
             except Exception:
                 self._state = "failed"
-                if self._thread_adapter is not None:
+                thread_storage = self._thread_storage
+                if isinstance(thread_storage, ThreadStorageLifecycle):
                     with contextlib.suppress(Exception):
-                        await self._thread_adapter.stop()
+                        await thread_storage.stop()
                 self._supervisor = None
                 self._run_task = None
                 raise
@@ -698,8 +1111,9 @@ class AgentProcess:
                 if self._run_task is not None:
                     await self._run_task
                 await self.on_stop()
-                if self._thread_adapter is not None:
-                    await self._thread_adapter.stop()
+                thread_storage = self._thread_storage
+                if isinstance(thread_storage, ThreadStorageLifecycle):
+                    await thread_storage.stop()
             except Exception:
                 logger.exception("agent process failed during stop")
                 self._state = "failed"
@@ -734,24 +1148,28 @@ class LLMAgentProcess(AgentProcess):
         participant: Participant,
         llm_adapter: LLMAdapter,
         toolkits: Optional[list[Toolkit]] = None,
-        thread_adapter: AgentProcessThreadAdapter | None = None,
+        thread_storage: ThreadStorage | None = None,
+        thread_adapter: ThreadStorage | None = None,
+        thread_status_publisher: ThreadStatusPublisher | None = None,
+        format_message: Callable[..., str] | None = None,
         session_initializer: SessionInitializer | None = None,
         turn_instructions_provider: TurnInstructionsProvider | None = None,
         turn_toolkits_builder: TurnToolkitsBuilder | None = None,
     ) -> None:
-        if thread_adapter is not None and not isinstance(
-            thread_adapter, AgentProcessThreadAdapter
-        ):
-            raise TypeError("thread_adapter must be an AgentProcessThreadAdapter")
+        if thread_storage is None:
+            thread_storage = thread_adapter
+        elif thread_adapter is not None:
+            raise ValueError("thread_storage and thread_adapter cannot both be set")
 
-        super().__init__(thread_id=thread_id, thread_adapter=thread_adapter)
+        super().__init__(thread_id=thread_id, thread_storage=thread_storage)
+        self._thread_status_publisher = thread_status_publisher
+        self._format_message = format_message or default_format_message
         self.llm_adapter = llm_adapter
         self._turn_id: str | None = None
         self._handlers: dict[str, Callable[[Message], Awaitable[None]]] = {
             AGENT_MESSAGE_TURN_START: self.on_turn_start,
             AGENT_MESSAGE_TURN_STEER: self.on_turn_steer,
             AGENT_MESSAGE_TURN_INTERRUPT: self.on_turn_interrupt,
-            AGENT_MESSAGE_THREAD_CLEAR: self.on_clear_thread,
             AGENT_MESSAGE_CAPABILITIES_REQUEST: self.on_capabilities_request,
             AGENT_MESSAGE_TOOL_CALL_APPROVE: self.on_tool_call_approve,
             AGENT_MESSAGE_TOOL_CALL_REJECT: self.on_tool_call_reject,
@@ -773,6 +1191,7 @@ class LLMAgentProcess(AgentProcess):
         self._interrupt_source_message_id: str | None = None
         self._active_turn_toolkit_client_options: dict[str, dict[str, Any]] = {}
         self._active_turn_tool_choice: ToolChoice | None = None
+        self._status_tool_calls_by_item_id: dict[str, _StatusToolCall] = {}
         self._session_initializer = session_initializer
         self._turn_instructions_provider = turn_instructions_provider
         self._turn_toolkits_builder = turn_toolkits_builder
@@ -789,27 +1208,24 @@ class LLMAgentProcess(AgentProcess):
         return self._session_context
 
     @property
-    def thread_adapter(self) -> AgentProcessThreadAdapter | None:
-        adapter = super().thread_adapter
-        if adapter is None:
-            return None
-
-        if not isinstance(adapter, AgentProcessThreadAdapter):
-            raise TypeError("thread_adapter must be an AgentProcessThreadAdapter")
-
-        return adapter
+    def thread_storage(self) -> ThreadStorage | None:
+        return super().thread_storage
 
     @property
     def toolkits(self) -> list[Toolkit]:
         return self._toolkits
 
+    @property
+    def thread_status_publisher(self) -> ThreadStatusPublisher | None:
+        return self._thread_status_publisher
+
     def register_content_scheme(self, scheme: ContentScheme) -> None:
         self._content_schemes.append(scheme)
 
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
-        thread_adapter = self.thread_adapter
-        if thread_adapter is not None:
-            thread_adapter.push_message(message=payload, sender=sender)
+        thread_storage = self.thread_storage
+        if thread_storage is not None:
+            thread_storage.push_message(message=payload, sender=sender)
 
         super().emit(sender=sender, payload=payload)
 
@@ -856,9 +1272,9 @@ class LLMAgentProcess(AgentProcess):
                 with tracer.start_as_current_span("agent.turn.context.initialize"):
                     await self.on_session_context_created()
 
-                thread_adapter = self.thread_adapter
-                if thread_adapter is not None:
-                    thread_adapter.restore_session_context(
+                thread_storage = self.thread_storage
+                if thread_storage is not None:
+                    thread_storage.restore_session_context(
                         context=self._session_context
                     )
 
@@ -877,12 +1293,12 @@ class LLMAgentProcess(AgentProcess):
         *,
         queued_messages: list[_QueuedTurnMessage],
     ) -> None:
-        thread_adapter = self.thread_adapter
-        if thread_adapter is None:
+        thread_storage = self.thread_storage
+        if thread_storage is None:
             return
 
         for queued_message in queued_messages:
-            thread_adapter.push_message(
+            thread_storage.push_message(
                 message=queued_message.request,
                 sender=queued_message.sender,
             )
@@ -913,15 +1329,7 @@ class LLMAgentProcess(AgentProcess):
             return message
 
         iso_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        thread_adapter = self.thread_adapter
-        if thread_adapter is not None:
-            return thread_adapter.format_message(
-                user_name=sender_name,
-                message=message,
-                iso_timestamp=iso_timestamp,
-            )
-
-        return default_format_message(
+        return self._format_message(
             user_name=sender_name,
             message=message,
             iso_timestamp=iso_timestamp,
@@ -956,11 +1364,11 @@ class LLMAgentProcess(AgentProcess):
         }
 
     async def _sync_pending_status_messages(self) -> None:
-        thread_adapter = self.thread_adapter
-        if thread_adapter is None:
+        thread_status_publisher = self.thread_status_publisher
+        if thread_status_publisher is None:
             return
 
-        await thread_adapter.set_pending_messages(
+        await thread_status_publisher.set_pending_messages(
             pending_messages=[
                 self._pending_status_message_payload(queued_message=queued_message)
                 for queued_message in self._pending_status_messages
@@ -1561,46 +1969,138 @@ class LLMAgentProcess(AgentProcess):
         if turn_id is None or thread_id is None:
             raise RuntimeError("turn publisher requested without an active turn")
 
+        def thread_status_from_agent_message(
+            message: AgentMessage,
+        ) -> tuple[str, str | None] | None:
+            if isinstance(message, AgentThreadEvent):
+                event = message.event
+                event_type = event.get("type")
+                if event_type not in ("agent.event", "codex.event"):
+                    return None
+                raw_state = event.get("state")
+                if not isinstance(raw_state, str):
+                    return None
+                state = raw_state.strip().lower()
+                if state not in (
+                    _THREAD_STATUS_ACTIVE_STATES | _THREAD_STATUS_TERMINAL_STATES
+                ):
+                    return None
+
+                headline = event.get("headline")
+                summary = event.get("summary")
+                details = event.get("details")
+                status_text = None
+                if event.get("name") == "computer.startup" and isinstance(
+                    details, list
+                ):
+                    detail_texts = [
+                        item.strip() for item in details if isinstance(item, str)
+                    ]
+                    detail_texts = [item for item in detail_texts if item != ""]
+                    if len(detail_texts) > 0:
+                        status_text = detail_texts[0]
+                if status_text is None:
+                    if isinstance(headline, str) and headline.strip() != "":
+                        status_text = headline.strip()
+                    elif isinstance(summary, str) and summary.strip() != "":
+                        status_text = summary.strip()
+                if state in _THREAD_STATUS_TERMINAL_STATES:
+                    return "Thinking", None
+                if status_text is None:
+                    return None
+                item_id = event.get("item_id")
+                return status_text, item_id if isinstance(item_id, str) else None
+
+            if isinstance(
+                message,
+                (AgentToolCallPending, AgentToolCallInProgress, AgentToolCallStarted),
+            ):
+                state = (
+                    "pending"
+                    if isinstance(message, AgentToolCallPending)
+                    else "in_progress"
+                )
+                self._status_tool_calls_by_item_id[message.item_id] = _StatusToolCall(
+                    toolkit=message.toolkit,
+                    tool=message.tool,
+                    arguments=message.arguments,
+                )
+                return (
+                    _tool_status_text(
+                        state=state,
+                        toolkit=message.toolkit,
+                        tool=message.tool,
+                        arguments=message.arguments,
+                    ),
+                    message.item_id,
+                )
+
+            if isinstance(message, AgentToolCallApprovalRequested):
+                return "Waiting for approval", message.item_id
+
+            if isinstance(message, AgentToolCallEnded):
+                tool_call = self._status_tool_calls_by_item_id.get(message.item_id)
+                if tool_call is None:
+                    return "Thinking", None
+                state = (
+                    "completed"
+                    if message.error is None
+                    else (message.error.code or "failed").strip().lower()
+                )
+                if state not in _THREAD_STATUS_TERMINAL_STATES:
+                    state = "failed"
+                status = _tool_status_text(
+                    state=state,
+                    toolkit=tool_call.toolkit,
+                    tool=tool_call.tool,
+                    arguments=tool_call.arguments,
+                )
+                if state == "completed":
+                    return "Thinking", None
+                return status, message.item_id
+
+            if isinstance(message, TurnInterrupted):
+                return "Turn interrupted", None
+
+            return None
+
         def publish_event(message: AgentMessage) -> None:
             if self._interrupt_requested_turn_id == turn_id:
                 return
+            publish_agent_message_status(message)
             self.emit(sender=sender, payload=message)
 
-        thread_adapter = self.thread_adapter
+        thread_status_publisher = self.thread_status_publisher
+
+        def publish_agent_message_status(message: AgentMessage) -> None:
+            if thread_status_publisher is None:
+                return
+
+            status = thread_status_from_agent_message(message)
+            if status is None:
+                return
+            status_text, pending_item_id = status
+            asyncio.create_task(
+                thread_status_publisher.set_thread_status(
+                    status=status_text,
+                    pending_item_id=pending_item_id,
+                )
+            )
 
         def publish_custom_event(event: dict[str, Any]) -> None:
             if self._interrupt_requested_turn_id == turn_id:
-                return
-            if thread_adapter is None:
                 return
 
             event_type = event.get("type")
             if event_type not in ("agent.event", "codex.event"):
                 return
-
-            raw_state = event.get("state")
-            if not isinstance(raw_state, str):
-                return
-            state = raw_state.strip().lower()
-
-            headline = event.get("headline")
-            summary = event.get("summary")
-            status_text = None
-            if isinstance(headline, str) and headline.strip() != "":
-                status_text = headline.strip()
-            elif isinstance(summary, str) and summary.strip() != "":
-                status_text = summary.strip()
-
-            if state in _THREAD_STATUS_ACTIVE_STATES:
-                if status_text is None:
-                    return
-                asyncio.create_task(
-                    thread_adapter.set_thread_status(status=status_text)
+            publish_event(
+                AgentThreadEvent(
+                    type=AGENT_EVENT_THREAD_EVENT,
+                    thread_id=thread_id,
+                    event=event,
                 )
-                return
-
-            if state in _THREAD_STATUS_TERMINAL_STATES:
-                asyncio.create_task(thread_adapter.set_thread_status(status="Thinking"))
+            )
 
         handle_event = self.llm_adapter.make_agent_event_publisher(
             turn_id=turn_id,
@@ -1760,6 +2260,11 @@ class LLMAgentProcess(AgentProcess):
             turn_span_context.__exit__(type(exc), exc, exc.__traceback__)
             raise
         self._turn_id = turn_id
+        self._status_tool_calls_by_item_id.clear()
+        thread_status_publisher = self.thread_status_publisher
+        if thread_status_publisher is not None:
+            await thread_status_publisher.set_thread_turn_id(turn_id=turn_id)
+            await thread_status_publisher.set_thread_status(status="Thinking")
         self._interrupt_requested_turn_id = None
         self._interrupt_source_message_id = None
         active_turn_queue: asyncio.Queue[_QueuedTurnMessage] = asyncio.Queue()
@@ -1933,6 +2438,7 @@ class LLMAgentProcess(AgentProcess):
                 self._active_turn_queue_updated = None
                 self._active_turn_toolkit_client_options = {}
                 self._active_turn_tool_choice = None
+                self._status_tool_calls_by_item_id.clear()
                 remaining_queued_messages = self._drain_queued_turn_messages(
                     active_turn_queue=active_turn_queue,
                 )
@@ -1956,6 +2462,10 @@ class LLMAgentProcess(AgentProcess):
                         error=error,
                     ),
                 )
+                thread_status_publisher = self.thread_status_publisher
+                if thread_status_publisher is not None:
+                    await thread_status_publisher.set_thread_turn_id(turn_id=None)
+                    await thread_status_publisher.clear_thread_status()
             finally:
                 turn_span.set_attribute("error", error is not None)
                 if error is not None:
@@ -2096,47 +2606,6 @@ class LLMAgentProcess(AgentProcess):
         if active_next_task is not None:
             active_next_task.cancel()
 
-    async def on_clear_thread(self, message: Message) -> None:
-        clear_thread = _coerce_message_data(message.data, ClearThread)
-        if self.thread_id != clear_thread.thread_id:
-            return
-
-        turn_task = self._turn_task
-        if turn_task is not None:
-            active_next_task = self._active_next_task
-            if active_next_task is not None:
-                active_next_task.cancel()
-            turn_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await turn_task
-
-        self._active_turn_queue = None
-        self._active_turn_queue_updated = None
-        self._active_turn_sender = None
-        self._turn_id = None
-        self._interrupt_requested_turn_id = None
-        self._interrupt_source_message_id = None
-        self._drain_pending_turns()
-        self._cancel_pending_tool_call_approvals()
-        await self._clear_pending_status_messages()
-
-        if self._session_context is not None:
-            await self._session_context.close()
-            self._session_context = None
-
-        thread_adapter = self.thread_adapter
-        if thread_adapter is not None:
-            await thread_adapter.clear_thread()
-
-        self.emit(
-            sender=message.sender,
-            payload=ThreadCleared(
-                type=AGENT_EVENT_THREAD_CLEARED,
-                thread_id=clear_thread.thread_id,
-                source_message_id=clear_thread.message_id,
-            ),
-        )
-
     async def on_tool_call_approve(self, message: Message) -> None:
         approval = _coerce_message_data(message.data, ApproveAgentToolCall)
         if self._turn_id != approval.turn_id:
@@ -2172,6 +2641,10 @@ class LLMAgentProcess(AgentProcess):
         self._interrupt_source_message_id = None
         self._cancel_pending_tool_call_approvals()
         await self._clear_pending_status_messages()
+        thread_status_publisher = self.thread_status_publisher
+        if thread_status_publisher is not None:
+            await thread_status_publisher.set_thread_turn_id(turn_id=None)
+            await thread_status_publisher.clear_thread_status()
 
         if self._session_context is not None:
             await self._session_context.close()

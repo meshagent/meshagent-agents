@@ -5,8 +5,7 @@ from unittest import mock
 import pytest
 
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.chat_channel import ChatChannel as AgentChatChannel
-from meshagent.agents.legacy_chat_channel import LegacyChatChannel as ChatChannel
+from meshagent.agents.chat_channel import ChatChannel
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -16,11 +15,13 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
-    AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
+    AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_CLEAR,
+    AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TURN_INTERRUPT,
     AGENT_MESSAGE_TURN_START,
@@ -33,13 +34,13 @@ from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
-    AgentToolCallApprovalRequested,
     ApproveAgentToolCall,
     CapabilitiesRequest,
     ClearThread,
     ThreadCleared,
     TurnEnded,
     TurnInterrupt,
+    TurnSteered,
     TurnStart,
     TurnStarted,
     TurnSteer,
@@ -261,6 +262,13 @@ def _assert_uuid_thread_path(*, path: str, prefix: str) -> None:
     assert str(parsed) == basename
 
 
+def _assert_uuid_thread_table_url(*, path: str, prefix: str) -> None:
+    assert path.startswith(prefix)
+    basename = path[len(prefix) :]
+    parsed = uuid.UUID(basename)
+    assert str(parsed) == basename
+
+
 @pytest.mark.asyncio
 async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_start() -> (
     None
@@ -274,6 +282,7 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
     )
     channel = ChatChannel(
         room=room,
+        threading_mode="default-new",
         thread_dir="/threads/chat",
     )
     supervisor = _RecordingSupervisor()
@@ -308,7 +317,9 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
 
         assert isinstance(result, JsonContent)
         result_path = result.json["path"]
-        assert result.json == {"path": result_path}
+        result_message_id = result.json["message_id"]
+        assert isinstance(result_message_id, str)
+        assert result_message_id != ""
         assert isinstance(result_path, str)
         _assert_uuid_thread_path(path=result_path, prefix="/threads/chat/")
 
@@ -318,6 +329,7 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         assert sent.source is channel
         turn = sent.data
         assert isinstance(turn, TurnStart)
+        assert turn.message_id == result_message_id
         assert turn.type == AGENT_MESSAGE_TURN_START
         assert turn.thread_id == result_path
         assert turn.content == [
@@ -350,6 +362,157 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
 
 
 @pytest.mark.asyncio
+async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    storage = _FakeStorage()
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+        storage=storage,
+    )
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/agents/dataset/threads",
+        thread_url_scheme="dataset",
+        thread_path_extension="",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        new_thread_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "new_thread"
+        )
+        result = await new_thread_tool.execute(
+            context=ToolContext(caller=caller),
+            message={"text": "hello"},
+        )
+
+        assert isinstance(result, JsonContent)
+        result_path = result.json["path"]
+        assert isinstance(result_path, str)
+        result_message_id = result.json["message_id"]
+        assert isinstance(result_message_id, str)
+        assert result_message_id != ""
+        assert len(supervisor.sent) == 1
+        assert supervisor.sent[0].data.message_id == result_message_id
+        _assert_uuid_thread_table_url(
+            path=result_path,
+            prefix="dataset://agents/dataset/threads/",
+        )
+        assert "dataset:///" not in result_path
+        assert all(not path.startswith("dataset://") for path in storage.exists_calls)
+        assert storage.exists_calls[0].startswith("/agents/dataset/threads/")
+
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
+        entries = sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("path") == result_path
+        assert (
+            room.local_participant.get_attribute("meshagent.chatbot.thread-dir")
+            == "dataset://agents/dataset/threads"
+        )
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_dataset_non_threading_publishes_thread_path() -> None:
+    sync = _FakeSync()
+    room = _FakeRoom(
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = ChatChannel(
+        room=room,
+        threading_mode=None,
+        thread_dir="/agents/dataset/threads",
+        thread_url_scheme="dataset",
+        thread_path_extension="",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        assert (
+            room.local_participant.get_attribute("meshagent.chatbot.thread-path")
+            == "dataset://agents/dataset/threads/main"
+        )
+        assert (
+            room.local_participant.get_attribute("meshagent.chatbot.thread-dir") is None
+        )
+        assert (
+            room.local_participant.get_attribute("meshagent.chatbot.thread-list")
+            is None
+        )
+        assert sync.open_calls == []
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    storage = _FakeStorage()
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+        storage=storage,
+    )
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/agents/tmp/threads",
+        thread_url_scheme="tmp",
+        thread_path_extension="",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        new_thread_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "new_thread"
+        )
+        result = await new_thread_tool.execute(
+            context=ToolContext(caller=caller),
+            message={"text": "hello"},
+        )
+
+        assert isinstance(result, JsonContent)
+        result_path = result.json["path"]
+        assert isinstance(result_path, str)
+        _assert_uuid_thread_table_url(
+            path=result_path,
+            prefix="tmp://agents/tmp/threads/",
+        )
+        assert "tmp:///" not in result_path
+        assert all(not path.startswith("tmp://") for path in storage.exists_calls)
+        assert storage.exists_calls[0].startswith("/agents/tmp/threads/")
+
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
+        entries = sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("path") == result_path
+        assert (
+            room.local_participant.get_attribute("meshagent.chatbot.thread-dir")
+            == "tmp://agents/tmp/threads"
+        )
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_for_llm_naming() -> (
     None
 ):
@@ -363,6 +526,7 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
     )
     channel = ChatChannel(
         room=room,
+        threading_mode="default-new",
         thread_dir="/threads/chat",
         llm_adapter=adapter,
     )
@@ -387,7 +551,8 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
         )
 
         assert isinstance(result, JsonContent)
-        assert result.json == {"path": result.json["path"]}
+        assert isinstance(result.json["path"], str)
+        assert isinstance(result.json["message_id"], str)
         await channel._wait_for_thread_list_background_tasks()
         assert adapter.prompts == [
             "Message:\nPlan the release work\n\nAttachments:\n- release-plan.md\n- screenshot.png"
@@ -413,6 +578,7 @@ async def test_chat_channel_new_thread_rejects_empty_message_without_attachments
     )
     channel = ChatChannel(
         room=room,
+        threading_mode="default-new",
         thread_dir="/threads/chat",
     )
     supervisor = _RecordingSupervisor()
@@ -577,7 +743,7 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_enables_messaging_and_translates_chat_messages() -> None:
+async def test_chat_channel_ignores_legacy_chat_messages() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller])
     channel = ChatChannel(room=room)
@@ -593,46 +759,6 @@ async def test_chat_channel_enables_messaging_and_translates_chat_messages() -> 
                 type="chat",
                 message={
                     "path": "/threads/test.thread",
-                    "text": "hello",
-                    "attachments": [{"path": "docs/report.pdf"}],
-                    "model": "gpt-5",
-                },
-            )
-        )
-
-        assert len(supervisor.sent) == 1
-        sent = supervisor.sent[0]
-        assert sent.sender is caller
-        assert sent.source is channel
-
-        turn = sent.data
-        assert isinstance(turn, TurnStart)
-        assert turn.type == AGENT_MESSAGE_TURN_START
-        assert turn.thread_id == "/threads/test.thread"
-        assert turn.model == "gpt-5"
-        assert turn.content == [
-            AgentTextContent(type="text", text="hello"),
-            AgentFileContent(type="file", url="room:///docs/report.pdf"),
-        ]
-    finally:
-        await channel.stop(supervisor)
-
-
-@pytest.mark.asyncio
-async def test_chat_channel_preserves_existing_attachment_urls() -> None:
-    caller = _FakeParticipant(name="caller", participant_id="caller-id")
-    room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
-    supervisor = _RecordingSupervisor()
-
-    await channel.start(supervisor)
-    try:
-        room.messaging.emit_message(
-            RoomMessage(
-                from_participant_id=caller.id,
-                type="chat",
-                message={
-                    "path": "/threads/test.thread",
                     "attachments": [
                         {"path": "room://docs/report.pdf"},
                         {"path": "https://example.com/image.png"},
@@ -641,13 +767,7 @@ async def test_chat_channel_preserves_existing_attachment_urls() -> None:
             )
         )
 
-        assert len(supervisor.sent) == 1
-        turn = supervisor.sent[0].data
-        assert isinstance(turn, TurnStart)
-        assert turn.content == [
-            AgentFileContent(type="file", url="room://docs/report.pdf"),
-            AgentFileContent(type="file", url="https://example.com/image.png"),
-        ]
+        assert supervisor.sent == []
     finally:
         await channel.stop(supervisor)
 
@@ -658,7 +778,7 @@ async def test_agent_chat_channel_translates_capabilities_request_agent_message(
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = AgentChatChannel(room=room)
+    channel = ChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -711,7 +831,7 @@ async def test_agent_chat_channel_does_not_bump_thread_index_on_capabilities_req
         messaging_enabled=True,
         sync=sync,
     )
-    channel = AgentChatChannel(
+    channel = ChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -757,7 +877,7 @@ async def test_agent_chat_channel_bumps_thread_index_on_turn_start() -> None:
         messaging_enabled=True,
         sync=sync,
     )
-    channel = AgentChatChannel(
+    channel = ChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -787,7 +907,7 @@ async def test_agent_chat_channel_bumps_thread_index_on_turn_start() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_tracks_turn_state_for_steer_cancel_and_approval() -> None:
+async def test_chat_channel_translates_agent_steer_cancel_and_approval() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
     channel = ChatChannel(room=room)
@@ -807,14 +927,20 @@ async def test_chat_channel_tracks_turn_state_for_steer_cancel_and_approval() ->
                 )
             )
         )
+        assert channel._active_turn_ids_by_thread == {"/threads/test.thread": "turn-1"}
 
         room.messaging.emit_message(
             RoomMessage(
                 from_participant_id=caller.id,
-                type="steer",
+                type="agent-message",
                 message={
-                    "path": "/threads/test.thread",
-                    "text": "keep going",
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_STEER,
+                        "thread_id": "/threads/test.thread",
+                        "turn_id": "turn-1",
+                        "message_id": "steer-1",
+                        "content": [{"type": "text", "text": "keep going"}],
+                    }
                 },
             )
         )
@@ -828,27 +954,18 @@ async def test_chat_channel_tracks_turn_state_for_steer_cancel_and_approval() ->
             AgentTextContent(type="text", text="keep going")
         ]
 
-        await channel.on_message(
-            Message(
-                data=AgentToolCallApprovalRequested(
-                    type=AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
-                    thread_id="/threads/test.thread",
-                    turn_id="turn-1",
-                    item_id="approval-1",
-                    toolkit="filesystem",
-                    tool="delete",
-                    arguments={"path": "/tmp/file"},
-                )
-            )
-        )
-
         room.messaging.emit_message(
             RoomMessage(
                 from_participant_id=caller.id,
-                type="approved",
+                type="agent-message",
                 message={
-                    "path": "/threads/test.thread",
-                    "approval_id": "approval-1",
+                    "payload": {
+                        "type": AGENT_MESSAGE_TOOL_CALL_APPROVE,
+                        "thread_id": "/threads/test.thread",
+                        "turn_id": "turn-1",
+                        "item_id": "approval-1",
+                        "message_id": "approve-1",
+                    }
                 },
             )
         )
@@ -863,8 +980,15 @@ async def test_chat_channel_tracks_turn_state_for_steer_cancel_and_approval() ->
         room.messaging.emit_message(
             RoomMessage(
                 from_participant_id=caller.id,
-                type="cancel",
-                message={"path": "/threads/test.thread"},
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_INTERRUPT,
+                        "thread_id": "/threads/test.thread",
+                        "turn_id": "turn-1",
+                        "message_id": "interrupt-1",
+                    }
+                },
             )
         )
 
@@ -885,24 +1009,14 @@ async def test_chat_channel_tracks_turn_state_for_steer_cancel_and_approval() ->
             )
         )
 
-        room.messaging.emit_message(
-            RoomMessage(
-                from_participant_id=caller.id,
-                type="steer",
-                message={
-                    "path": "/threads/test.thread",
-                    "text": "one more thing",
-                },
-            )
-        )
-
         assert len(supervisor.sent) == 3
+        assert channel._active_turn_ids_by_thread == {}
     finally:
         await channel.stop(supervisor)
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_sends_completed_text_to_open_participants() -> None:
+async def test_chat_channel_sends_agent_text_events_to_open_participants() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
     channel = ChatChannel(room=room)
@@ -952,16 +1066,19 @@ async def test_chat_channel_sends_completed_text_to_open_participants() -> None:
             )
         )
 
-        assert room.messaging.sent_messages == [
-            {
-                "to": caller,
-                "type": "chat",
-                "message": {
-                    "path": "/threads/test.thread",
-                    "text": "hello",
-                },
-            }
+        assert [sent["type"] for sent in room.messaging.sent_messages] == [
+            "agent-message",
+            "agent-message",
+            "agent-message",
         ]
+        assert [
+            sent["message"]["payload"]["type"] for sent in room.messaging.sent_messages
+        ] == [
+            AGENT_EVENT_TEXT_CONTENT_STARTED,
+            AGENT_EVENT_TEXT_CONTENT_DELTA,
+            AGENT_EVENT_TEXT_CONTENT_ENDED,
+        ]
+        assert room.messaging.sent_messages[1]["message"]["payload"]["text"] == "hello"
 
         room.messaging.remove_participant(caller.id)
 
@@ -997,14 +1114,292 @@ async def test_chat_channel_sends_completed_text_to_open_participants() -> None:
             )
         )
 
-        assert len(room.messaging.sent_messages) == 1
+        assert len(room.messaging.sent_messages) == 3
         assert channel._open_participant_ids_by_thread == {}
     finally:
         await channel.stop(supervisor)
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_sends_completed_file_to_open_participants() -> None:
+async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubscribes() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        await channel.on_message(
+            Message(
+                data=AgentTextContentDelta(
+                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="assistant-1",
+                    text="hello",
+                )
+            )
+        )
+        assert room.messaging.sent_messages == []
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        assert room.messaging.sent_messages[0]["message"]["payload"]["type"] == (
+            AGENT_EVENT_TEXT_CONTENT_DELTA
+        )
+        assert room.messaging.sent_messages[0]["message"]["payload"]["text"] == "hello"
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_CLOSE,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        await channel.on_message(
+            Message(
+                data=AgentTextContentEnded(
+                    type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="assistant-1",
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=TurnEnded(
+                    type=AGENT_EVENT_TURN_ENDED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    error=None,
+                )
+            )
+        )
+        assert len(room.messaging.sent_messages) == 1
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+        assert len(room.messaging.sent_messages) == 1
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_CLOSE,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        await channel.on_message(
+            Message(
+                data=AgentTextContentDelta(
+                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-2",
+                    item_id="assistant-2",
+                    text="ignored",
+                )
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        assert channel._open_participant_ids_by_thread == {}
+        assert supervisor.sent == []
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_participants() -> (
+    None
+):
+    sender = _FakeParticipant(name="sender", participant_id="sender-id")
+    viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
+    late_viewer = _FakeParticipant(name="late", participant_id="late-id")
+    room = _FakeRoom(participants=[sender, viewer, late_viewer], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=sender.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_START,
+                        "thread_id": "/threads/test.thread",
+                        "message_id": "user-message-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, TurnStart)
+        assert room.messaging.sent_messages == []
+
+        await channel.on_message(
+            Message(
+                data=TurnStarted(
+                    type=AGENT_EVENT_TURN_STARTED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    source_message_id="user-message-1",
+                )
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        sent_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert sent_payload["type"] == AGENT_EVENT_TURN_STARTED
+        assert sent_payload["source_message_id"] == "user-message-1"
+        assert sent_payload["content"] == [{"type": "text", "text": "hello"}]
+        assert sent_payload["sender_name"] == "sender"
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=late_viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 2
+        replayed_payload = room.messaging.sent_messages[1]["message"]["payload"]
+        assert room.messaging.sent_messages[1]["to"] == late_viewer
+        assert replayed_payload["type"] == AGENT_EVENT_TURN_STARTED
+        assert replayed_payload["source_message_id"] == "user-message-1"
+        assert replayed_payload["content"] == [{"type": "text", "text": "hello"}]
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_participants() -> (
+    None
+):
+    sender = _FakeParticipant(name="sender", participant_id="sender-id")
+    viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
+    room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=sender.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_STEER,
+                        "thread_id": "/threads/test.thread",
+                        "turn_id": "turn-1",
+                        "message_id": "user-message-2",
+                        "content": [{"type": "text", "text": "wait"}],
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, TurnSteer)
+        assert room.messaging.sent_messages == []
+
+        await channel.on_message(
+            Message(
+                data=TurnSteered(
+                    type=AGENT_EVENT_TURN_STEERED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    source_message_id="user-message-2",
+                )
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        sent_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert sent_payload["type"] == AGENT_EVENT_TURN_STEERED
+        assert sent_payload["source_message_id"] == "user-message-2"
+        assert sent_payload["content"] == [{"type": "text", "text": "wait"}]
+        assert sent_payload["sender_name"] == "sender"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_sends_agent_file_events_to_open_participants() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
     channel = ChatChannel(room=room)
@@ -1052,22 +1447,28 @@ async def test_chat_channel_sends_completed_file_to_open_participants() -> None:
             )
         )
 
-        assert room.messaging.sent_messages == [
-            {
-                "to": caller,
-                "type": "chat",
-                "message": {
-                    "path": "/threads/test.thread",
-                    "attachments": [{"path": "room:///docs/report.pdf"}],
-                },
-            }
+        assert [sent["type"] for sent in room.messaging.sent_messages] == [
+            "agent-message",
+            "agent-message",
+            "agent-message",
         ]
+        assert [
+            sent["message"]["payload"]["type"] for sent in room.messaging.sent_messages
+        ] == [
+            AGENT_EVENT_FILE_CONTENT_STARTED,
+            AGENT_EVENT_FILE_CONTENT_DELTA,
+            AGENT_EVENT_FILE_CONTENT_ENDED,
+        ]
+        assert (
+            room.messaging.sent_messages[1]["message"]["payload"]["url"]
+            == "room:///docs/report.pdf"
+        )
     finally:
         await channel.stop(supervisor)
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_translates_clear_messages() -> None:
+async def test_chat_channel_translates_agent_clear_messages() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
     channel = ChatChannel(room=room)
@@ -1078,8 +1479,14 @@ async def test_chat_channel_translates_clear_messages() -> None:
         room.messaging.emit_message(
             RoomMessage(
                 from_participant_id=caller.id,
-                type="clear",
-                message={"path": "/threads/test.thread"},
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_CLEAR,
+                        "thread_id": "/threads/test.thread",
+                        "message_id": "clear-1",
+                    }
+                },
             )
         )
 
@@ -1121,19 +1528,6 @@ async def test_chat_channel_notifies_open_participants_when_thread_is_cleared() 
         )
         await channel.on_message(
             Message(
-                data=AgentToolCallApprovalRequested(
-                    type=AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
-                    thread_id="/threads/test.thread",
-                    turn_id="turn-1",
-                    item_id="approval-1",
-                    toolkit="filesystem",
-                    tool="delete",
-                    arguments={"path": "/tmp/file"},
-                )
-            )
-        )
-        await channel.on_message(
-            Message(
                 data=AgentTextContentStarted(
                     type=AGENT_EVENT_TEXT_CONTENT_STARTED,
                     thread_id="/threads/test.thread",
@@ -1153,6 +1547,7 @@ async def test_chat_channel_notifies_open_participants_when_thread_is_cleared() 
                 )
             )
         )
+        room.messaging.sent_messages.clear()
 
         await channel.on_message(
             Message(
@@ -1167,15 +1562,20 @@ async def test_chat_channel_notifies_open_participants_when_thread_is_cleared() 
         assert room.messaging.sent_messages == [
             {
                 "to": caller,
-                "type": "cleared",
+                "type": "agent-message",
                 "message": {
-                    "path": "/threads/test.thread",
+                    "payload": {
+                        "type": AGENT_EVENT_THREAD_CLEARED,
+                        "thread_id": "/threads/test.thread",
+                        "message_id": room.messaging.sent_messages[0]["message"][
+                            "payload"
+                        ]["message_id"],
+                        "source_message_id": "clear-source-1",
+                    }
                 },
             }
         ]
         assert channel._active_turn_ids_by_thread == {}
-        assert channel._pending_approval_turn_ids_by_thread == {}
-        assert channel._active_text_by_thread == {}
         assert channel._open_participant_ids_by_thread == {
             "/threads/test.thread": {caller.id}
         }
@@ -1206,6 +1606,7 @@ async def test_chat_channel_sets_threading_attributes_and_tracks_thread_list() -
             ("meshagent.chatbot.thread-dir", "/threads/chat"),
             ("meshagent.chatbot.thread-list", "/threads/chat/index.threadl"),
             ("empty_state_title", "How can I help you?"),
+            ("supports_agent_messages", True),
         ]
         assert sync.open_calls == [
             {

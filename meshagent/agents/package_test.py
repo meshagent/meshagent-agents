@@ -794,7 +794,7 @@ async def test_meshagent_package_serve_adds_image_generation_toolkit(
 
     monkeypatch.setenv("MESHAGENT_TOKEN", "test-token")
     monkeypatch.setattr(package_module, "LLMAgentProcess", _FakeProcess)
-    monkeypatch.setattr(package_module, "AgentProcessThreadAdapter", _FakeThreadAdapter)
+    monkeypatch.setattr(package_module, "MeshDocumentThreadStorage", _FakeThreadAdapter)
     monkeypatch.setattr(package_module, "RoomClient", _FakeRoomClient)
     monkeypatch.setattr(
         package_module.MeshagentPackage,
@@ -901,7 +901,7 @@ async def test_meshagent_package_serve_adds_other_requested_toolkits(
 
     monkeypatch.setenv("MESHAGENT_TOKEN", "test-token")
     monkeypatch.setattr(package_module, "LLMAgentProcess", _FakeProcess)
-    monkeypatch.setattr(package_module, "AgentProcessThreadAdapter", _FakeThreadAdapter)
+    monkeypatch.setattr(package_module, "MeshDocumentThreadStorage", _FakeThreadAdapter)
     monkeypatch.setattr(package_module, "RoomClient", _FakeRoomClient)
     monkeypatch.setattr(
         package_module.MeshagentPackage,
@@ -1057,7 +1057,7 @@ async def test_meshagent_package_serve_resolves_instructions_from_root_path(
 
     monkeypatch.setenv("MESHAGENT_TOKEN", "test-token")
     monkeypatch.setattr(package_module, "LLMAgentProcess", _FakeProcess)
-    monkeypatch.setattr(package_module, "AgentProcessThreadAdapter", _FakeThreadAdapter)
+    monkeypatch.setattr(package_module, "MeshDocumentThreadStorage", _FakeThreadAdapter)
     monkeypatch.setattr(package_module, "RoomClient", _FakeRoomClient)
     monkeypatch.setattr(package_module.AgentSupervisor, "start", _fake_start)
     monkeypatch.setattr(package_module.AgentSupervisor, "stop", _fake_stop)

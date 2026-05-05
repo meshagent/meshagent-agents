@@ -23,10 +23,13 @@ AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
 AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
+AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
+AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
 AGENT_MESSAGE_CAPABILITIES_REQUEST = "meshagent.agent.capabilities_request"
 AGENT_MESSAGE_CAPABILITIES_RESPONSE = "meshagent.agent.capabilities_response"
 AGENT_EVENT_THREAD_CLEARED = "meshagent.agent.thread.cleared"
 AGENT_EVENT_TURN_START_ACCEPTED = "meshagent.agent.turn.start.accepted"
+AGENT_EVENT_TURN_START_REJECTED = "meshagent.agent.turn.start.rejected"
 AGENT_EVENT_TURN_INTERRUPT_ACCEPTED = "meshagent.agent.turn.interrupt.accepted"
 AGENT_EVENT_TURN_INTERRUPTED = "meshagent.agent.turn.interrupted"
 AGENT_EVENT_TURN_STEER_ACCEPTED = "meshagent.agent.turn.steer.accepted"
@@ -51,6 +54,8 @@ AGENT_EVENT_TOOL_CALL_ENDED = "meshagent.agent.tool_call.ended"
 AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
     "meshagent.agent.tool_call.approval_requested"
 )
+AGENT_EVENT_THREAD_EVENT = "meshagent.agent.thread.event"
+AGENT_EVENT_THREAD_IMAGE = "meshagent.agent.thread.image"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
 AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
 
@@ -94,6 +99,14 @@ class ClearThread(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLEAR]
 
 
+class OpenThread(AgentMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_OPEN]
+
+
+class CloseThread(AgentMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_CLOSE]
+
+
 class CapabilitiesRequest(AgentMessage):
     type: Literal[AGENT_MESSAGE_CAPABILITIES_REQUEST]
 
@@ -135,6 +148,12 @@ class ThreadCleared(AgentMessage):
 class TurnStartAccepted(AgentMessage):
     type: Literal[AGENT_EVENT_TURN_START_ACCEPTED]
     source_message_id: str
+
+
+class TurnStartRejected(AgentMessage):
+    type: Literal[AGENT_EVENT_TURN_START_REJECTED]
+    source_message_id: str
+    error: AgentError
 
 
 class TurnInterruptAccepted(AgentMessage):
@@ -300,6 +319,25 @@ class AgentToolCallApprovalRequested(AgentMessage):
     toolkit: str
     tool: str
     arguments: Optional[dict[str, Any]] = None
+
+
+class AgentThreadEvent(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_EVENT]
+    event: dict[str, Any]
+
+
+class AgentThreadImage(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_IMAGE]
+    item_id: str | None = None
+    turn_id: str | None = None
+    image_id: str | None = None
+    mime_type: str | None = None
+    created_at: str | None = None
+    created_by: str | None = None
+    width: int | float | None = None
+    height: int | float | None = None
+    status: str | None = None
+    status_detail: str | None = None
 
 
 class ApproveAgentToolCall(AgentMessage):

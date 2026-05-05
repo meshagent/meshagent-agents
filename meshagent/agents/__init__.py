@@ -15,10 +15,14 @@ from .development import connect_development_agent
 from .listener import Listener, ListenerContext
 from .adapter import ToolResponseAdapter, LLMAdapter
 from .image_captioner import ImageCaptioner, LLMImageCaptioner
-from .process_thread_adapter import AgentProcessThreadAdapter
+from .dataset_thread_storage import DatasetThreadStorage
+from .process_thread_adapter import MeshDocumentThreadStorage
 from .threaded_channel import ThreadedChannel
+from .thread_status_publisher import (
+    ParticipantAttributeThreadStatusPublisher,
+    ThreadStatusPublisher,
+)
 from .chat_channel import ChatChannel
-from .legacy_chat_channel import LegacyChatChannel
 from .mail_channel import MailChannel
 from .queue_channel import QueueChannel
 from .toolkit_channel import ToolkitChannel
@@ -49,10 +53,12 @@ __all__ = [
     LLMAdapter,
     ImageCaptioner,
     LLMImageCaptioner,
-    AgentProcessThreadAdapter,
+    DatasetThreadStorage,
+    MeshDocumentThreadStorage,
+    ParticipantAttributeThreadStatusPublisher,
+    ThreadStatusPublisher,
     ThreadedChannel,
     ChatChannel,
-    LegacyChatChannel,
     MailChannel,
     QueueChannel,
     ToolkitChannel,

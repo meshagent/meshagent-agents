@@ -131,13 +131,28 @@ class ImagesDataset:
                 return
 
             schema = self._schema()
-            await self._room.datasets.create_table_with_schema(
-                name=self.TABLE_NAME,
-                schema=schema,
-                mode="create_if_not_exists",
-            )
+            try:
+                existing_schema = await self._room.datasets.inspect(
+                    table=self.TABLE_NAME
+                )
+            except Exception:
+                try:
+                    await self._room.datasets.create_table_with_schema(
+                        name=self.TABLE_NAME,
+                        schema=schema,
+                        mode="create_if_not_exists",
+                    )
+                except Exception:
+                    # Another writer may have created the shared images table
+                    # while this client was starting up.
+                    logger.debug(
+                        "unable to create images table; inspecting existing table",
+                        exc_info=True,
+                    )
+                existing_schema = await self._room.datasets.inspect(
+                    table=self.TABLE_NAME
+                )
 
-            existing_schema = await self._room.datasets.inspect(table=self.TABLE_NAME)
             existing_names = set(existing_schema.names)
             missing_columns = {
                 field.name: field

@@ -5,6 +5,7 @@ import logging
 import os
 import shlex
 import tempfile
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,7 +36,12 @@ from meshagent.api.specs.service import (
     ServiceSpec,
     TokenValue,
 )
-from meshagent.agents.messages import AgentTextContent
+from meshagent.agents.images_dataset import ImagesDataset
+from meshagent.agents.messages import (
+    AGENT_EVENT_THREAD_IMAGE,
+    AgentTextContent,
+    AgentThreadImage,
+)
 from meshagent.tools import Toolkit
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from meshagent.tools.storage import (
@@ -48,8 +54,9 @@ from .chat_channel import ChatChannel
 from .config import RulesConfig
 from .mail_channel import MailChannel
 from .process import AgentSupervisor, ContentScheme, LLMAgentProcess
-from .process_thread_adapter import AgentProcessThreadAdapter
+from .process_thread_adapter import MeshDocumentThreadStorage
 from .queue_channel import QueueChannel
+from .thread_status_publisher import ParticipantAttributeThreadStatusPublisher
 from .toolkit_channel import ToolkitChannel
 from .skills import to_prompt
 from .version import __version__
@@ -1857,7 +1864,7 @@ class MeshagentPackage(PythonPackage):
                 self._room = room
 
             def create_thread_process(self, thread_id: str) -> LLMAgentProcess:
-                thread_adapter = AgentProcessThreadAdapter(
+                thread_storage = MeshDocumentThreadStorage(
                     room=self._room,
                     path=thread_id,
                 )
@@ -2034,26 +2041,76 @@ class MeshagentPackage(PythonPackage):
                     if self_package._discovery_enabled:
                         toolkits.append(DiscoveryToolkit(room=self._room))
                     if self_package._computer_use_config is not None:
-                        toolkits.append(
-                            ComputerToolkit(
-                                room=self._room,
-                                thread_path=thread_id,
-                                thread_adapter=thread_adapter,
-                                starting_url=self_package._computer_use_config.starting_url,
-                                include_goto_tool=self_package._computer_use_config.allow_goto_url,
+                        images_dataset = ImagesDataset(room=self._room)
+                        computer_toolkit: ComputerToolkit | None = None
+
+                        async def render_screen(image_bytes: bytes) -> None:
+                            created_by = self._room.local_participant.get_attribute(
+                                "name"
                             )
+                            if not isinstance(created_by, str):
+                                created_by = ""
+
+                            try:
+                                saved_image = await images_dataset.save(
+                                    data=image_bytes,
+                                    mime_type="image/png",
+                                    created_by=created_by,
+                                    annotations={
+                                        "source": "computer_toolkit",
+                                        "thread_path": thread_id,
+                                    },
+                                )
+                            except Exception as ex:
+                                logger.error(
+                                    "failed to persist computer screenshot",
+                                    exc_info=ex,
+                                )
+                                return
+
+                            width: int | float | None = None
+                            height: int | float | None = None
+                            if computer_toolkit is not None:
+                                width, height = computer_toolkit.computer.dimensions
+
+                            thread_storage.push_message(
+                                message=AgentThreadImage(
+                                    type=AGENT_EVENT_THREAD_IMAGE,
+                                    thread_id=thread_id,
+                                    item_id=str(uuid.uuid4()),
+                                    image_id=saved_image.id,
+                                    mime_type=saved_image.mime_type,
+                                    created_at=saved_image.created_at,
+                                    created_by=saved_image.created_by,
+                                    width=width,
+                                    height=height,
+                                    status="completed",
+                                    status_detail="Screenshot saved",
+                                )
+                            )
+
+                        computer_toolkit = ComputerToolkit(
+                            room=self._room,
+                            render_screen=render_screen,
+                            starting_url=self_package._computer_use_config.starting_url,
+                            include_goto_tool=self_package._computer_use_config.allow_goto_url,
                         )
+                        toolkits.append(computer_toolkit)
                     for channel in self.channels:
                         if channel.state == "started":
                             toolkits.extend(channel.get_agent_toolkits())
-                    toolkits.append(thread_adapter.make_toolkit())
+                    toolkits.append(thread_storage.make_toolkit())
                     return toolkits
 
                 process = LLMAgentProcess(
                     thread_id=thread_id,
                     participant=self._room.local_participant,
                     llm_adapter=process_llm_adapter,
-                    thread_adapter=thread_adapter,
+                    thread_storage=thread_storage,
+                    thread_status_publisher=ParticipantAttributeThreadStatusPublisher(
+                        participant=self._room.local_participant,
+                        path=thread_id,
+                    ),
                     turn_instructions_provider=_turn_instructions_provider,
                     turn_toolkits_builder=_turn_toolkits_builder,
                 )

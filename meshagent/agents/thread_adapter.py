@@ -175,7 +175,6 @@ class ThreadAdapter(ABC):
     async def handle_custom_event(
         self,
         *,
-        messages: Element,
         event: dict,
     ) -> None: ...
 
@@ -549,28 +548,6 @@ class ThreadAdapter(ABC):
             image.set_attribute(key, value)
 
         return resolved_message_id
-
-    def set_message_turn_id(
-        self,
-        *,
-        message_id: str,
-        turn_id: str,
-    ) -> bool:
-        normalized_message_id = message_id.strip()
-        normalized_turn_id = turn_id.strip()
-        if normalized_message_id == "" or normalized_turn_id == "":
-            return False
-
-        messages = self._ensure_messages_element()
-        for child in messages.get_children():
-            if child.tag_name != "message":
-                continue
-            if child.get_attribute("id") != normalized_message_id:
-                continue
-            child.set_attribute("turn_id", normalized_turn_id)
-            return True
-
-        return False
 
 
 # Backwards-compatible import path for existing callers.

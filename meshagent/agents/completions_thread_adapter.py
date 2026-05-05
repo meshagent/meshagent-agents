@@ -158,6 +158,16 @@ class CompletionsThreadAdapter(ThreadAdapter):
     async def handle_custom_event(
         self,
         *,
+        event: dict,
+    ) -> None:
+        await self._handle_custom_event_for_messages(
+            messages=self._messages_element(),
+            event=event,
+        )
+
+    async def _handle_custom_event_for_messages(
+        self,
+        *,
         messages: Element,
         event: dict,
     ) -> None:
@@ -428,7 +438,10 @@ class CompletionsThreadAdapter(ThreadAdapter):
                         partial_text_by_choice.pop(choice_index, None)
                     continue
 
-                await self.handle_custom_event(messages=doc_messages, event=evt)
+                await self._handle_custom_event_for_messages(
+                    messages=doc_messages,
+                    event=evt,
+                )
         except asyncio.QueueShutDown:
             pass
         finally:

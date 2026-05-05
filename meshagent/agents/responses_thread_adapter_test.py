@@ -47,7 +47,7 @@ async def test_emit_image_status_event_updates_image_element_state():
     events: list[dict] = []
     writes: list[dict] = []
 
-    async def _fake_handle_custom_event(*, messages, event):
+    async def _fake_handle_custom_event_for_messages(*, messages, event):
         del messages
         events.append(event)
 
@@ -55,7 +55,9 @@ async def test_emit_image_status_event_updates_image_element_state():
         writes.append(kwargs)
         return kwargs.get("message_id", "")
 
-    adapter.handle_custom_event = _fake_handle_custom_event  # type: ignore[assignment]
+    adapter._handle_custom_event_for_messages = (  # type: ignore[method-assign]
+        _fake_handle_custom_event_for_messages
+    )
     adapter.write_image = _fake_write_image  # type: ignore[assignment]
 
     await adapter._emit_image_status_event(

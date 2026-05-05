@@ -13,7 +13,6 @@ from meshagent.tools import (
     Toolkit,
 )
 
-from .legacy_chat_channel import LegacyChatChannel
 from .messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
@@ -34,6 +33,7 @@ from .messages import (
     TurnStarted,
 )
 from .process import Channel, Message
+from .threaded_channel import ThreadedChannel
 
 
 @dataclass(slots=True)
@@ -71,9 +71,7 @@ class ToolkitChannel(Channel):
         self._room = room
         self._toolkit_name = normalized_toolkit_name
         self._tool_name = normalized_tool_name
-        self._thread_dir = LegacyChatChannel._normalize_thread_dir(
-            thread_dir=thread_dir
-        )
+        self._thread_dir = ThreadedChannel._normalize_thread_dir(thread_dir=thread_dir)
         self._public = public
         self._pending_by_source_message_id: dict[str, _PendingToolkitTurn] = {}
         self._pending_by_turn_id: dict[str, _PendingToolkitTurn] = {}
@@ -227,7 +225,7 @@ class ToolkitChannel(Channel):
             if isinstance(local_name_value, str) and local_name_value.strip() != ""
             else self._toolkit_name
         )
-        return LegacyChatChannel._normalize_thread_dir(
+        return ThreadedChannel._normalize_thread_dir(
             thread_dir=posixpath.join(".threads", local_name)
         )
 
@@ -235,7 +233,7 @@ class ToolkitChannel(Channel):
         normalized_prompt = prompt.strip()
         if normalized_prompt == "":
             return "Task"
-        return LegacyChatChannel._sanitize_thread_name(value=normalized_prompt)
+        return ThreadedChannel._sanitize_thread_name(value=normalized_prompt)
 
     async def _next_available_thread_path(self, *, base_path: str) -> str:
         try:
@@ -282,7 +280,7 @@ class ToolkitChannel(Channel):
         if normalized_thread_id != "":
             return normalized_thread_id
 
-        base_path = LegacyChatChannel._thread_path_for_name(
+        base_path = ThreadedChannel._thread_path_for_name(
             thread_name=self._fallback_thread_name(prompt=prompt),
             thread_dir=self._get_thread_dir(),
         )

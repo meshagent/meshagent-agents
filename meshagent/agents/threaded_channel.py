@@ -33,6 +33,8 @@ class ThreadedChannel(Channel):
         room: RoomClient,
         threading_mode: str | None = None,
         thread_dir: str | None = None,
+        thread_url_scheme: str | None = None,
+        thread_path_extension: str = ".thread",
         llm_adapter: LLMAdapter | None = None,
         thread_name_rules: Sequence[str] | None = None,
     ) -> None:
@@ -42,6 +44,10 @@ class ThreadedChannel(Channel):
             threading_mode=threading_mode
         )
         self._thread_dir = self._normalize_thread_dir(thread_dir=thread_dir)
+        self._thread_url_scheme = self._normalize_thread_url_scheme(
+            thread_url_scheme=thread_url_scheme
+        )
+        self._thread_path_extension = thread_path_extension
         self._llm_adapter = llm_adapter
         if thread_name_rules is not None and len(thread_name_rules) > 0:
             self._thread_name_rules = [*thread_name_rules]
@@ -79,6 +85,18 @@ class ThreadedChannel(Channel):
             raise ValueError("thread_dir must not be empty")
         return normalized
 
+    @staticmethod
+    def _normalize_thread_url_scheme(*, thread_url_scheme: str | None) -> str | None:
+        if thread_url_scheme is None:
+            return None
+
+        normalized = thread_url_scheme.strip()
+        if normalized == "":
+            return None
+        if not normalized.endswith("://"):
+            normalized = f"{normalized}://"
+        return normalized
+
     def _default_thread_dir_fallback_name(self) -> str:
         return "chat"
 
@@ -99,6 +117,8 @@ class ThreadedChannel(Channel):
         )
 
     def _thread_list_dir(self) -> str | None:
+        if self._threading_mode is None:
+            return None
         if (
             self._thread_dir is not None
             and self._uses_explicit_thread_dir_for_thread_list()
@@ -133,8 +153,37 @@ class ThreadedChannel(Channel):
         return normalized[:64].strip() or "New Chat"
 
     @staticmethod
-    def _thread_path_for_name(*, thread_name: str, thread_dir: str) -> str:
-        return posixpath.join(thread_dir, f"{thread_name}.thread")
+    def _thread_path_for_name(
+        *,
+        thread_name: str,
+        thread_dir: str,
+        extension: str = ".thread",
+    ) -> str:
+        return posixpath.join(thread_dir, f"{thread_name}{extension}")
+
+    def _thread_url_for_path(self, *, path: str) -> str:
+        if self._thread_url_scheme is None:
+            return path
+        return f"{self._thread_url_scheme}{path.strip().lstrip('/')}"
+
+    def _thread_path_from_url(self, *, path: str) -> str:
+        if self._thread_url_scheme is None or not path.startswith(
+            self._thread_url_scheme
+        ):
+            return path
+        return path[len(self._thread_url_scheme) :].lstrip("/")
+
+    def _thread_dir_url(self, *, thread_dir: str) -> str:
+        return self._thread_url_for_path(path=thread_dir)
+
+    def _single_thread_path(self) -> str:
+        return self._thread_url_for_path(
+            path=self._thread_path_for_name(
+                thread_name="main",
+                thread_dir=self._get_thread_dir(),
+                extension=self._thread_path_extension,
+            )
+        )
 
     async def _publish_thread_attributes(self) -> None:
         if self._threading_mode is not None:
@@ -142,11 +191,16 @@ class ThreadedChannel(Channel):
                 "meshagent.chatbot.threading",
                 self._threading_mode,
             )
+        else:
+            await self._room.local_participant.set_attribute(
+                "meshagent.chatbot.thread-path",
+                self._single_thread_path(),
+            )
         thread_dir = self._thread_list_dir()
         if thread_dir is not None:
             await self._room.local_participant.set_attribute(
                 "meshagent.chatbot.thread-dir",
-                thread_dir,
+                self._thread_dir_url(thread_dir=thread_dir),
             )
         thread_list_path = self._thread_list_index_path()
         if thread_list_path is not None:
@@ -168,7 +222,7 @@ class ThreadedChannel(Channel):
         return posixpath.join(thread_dir, "index.threadl")
 
     def _thread_list_entry_name_for_path(self, *, path: str) -> str:
-        filename = posixpath.basename(path.strip())
+        filename = posixpath.basename(self._thread_path_from_url(path=path.strip()))
         if filename.endswith(".thread"):
             filename = filename[: -len(".thread")]
         raw_name = filename.strip()
@@ -202,7 +256,7 @@ class ThreadedChannel(Channel):
         if thread_dir is None:
             return False
 
-        normalized_path = path.strip().strip("/")
+        normalized_path = self._thread_path_from_url(path=path).strip().strip("/")
         normalized_dir = thread_dir.strip().strip("/")
         if normalized_path == "" or normalized_dir == "":
             return False
@@ -450,20 +504,23 @@ class ThreadedChannel(Channel):
             return base_path
 
         thread_dir, filename = posixpath.split(base_path)
-        if filename.endswith(".thread"):
-            base_name = filename[: -len(".thread")]
+        extension = self._thread_path_extension
+        if extension != "" and filename.endswith(extension):
+            base_name = filename[: -len(extension)]
         else:
             base_name = filename
 
         for index in range(2, 1000):
-            candidate = posixpath.join(thread_dir, f"{base_name} {index}.thread")
+            candidate = posixpath.join(thread_dir, f"{base_name} {index}{extension}")
             try:
                 if not await self._room.storage.exists(path=candidate):
                     return candidate
             except Exception:
                 return candidate
 
-        return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}.thread")
+        return posixpath.join(
+            thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}{extension}"
+        )
 
     @staticmethod
     def _attachment_name_for_thread_title(*, attachment: str) -> str:
@@ -689,8 +746,12 @@ class ThreadedChannel(Channel):
         base_path = self._thread_path_for_name(
             thread_name=str(uuid.uuid4()),
             thread_dir=self._get_thread_dir(),
+            extension=self._thread_path_extension,
         )
-        return await self._next_available_thread_path(base_path=base_path)
+        storage_path = await self._next_available_thread_path(base_path=base_path)
+        if self._thread_url_scheme is not None:
+            return self._thread_url_for_path(path=storage_path)
+        return storage_path
 
     async def new_thread(
         self,

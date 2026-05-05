@@ -13,14 +13,16 @@ from pydantic import ValidationError
 import meshagent.agents.process as process_module
 import meshagent.agents.process_thread_adapter as process_thread_adapter_module
 import meshagent.agents.thread_adapter as thread_adapter_module
-from meshagent.agents import AgentProcessThreadAdapter
+from meshagent.agents import MeshDocumentThreadStorage
+from meshagent.agents.thread_status_publisher import (
+    ParticipantAttributeThreadStatusPublisher,
+)
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
-    AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
@@ -37,6 +39,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_EVENT_TURN_START_REJECTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STEER_REJECTED,
@@ -66,6 +69,7 @@ from meshagent.agents.messages import (
     ClearThread,
     RejectAgentToolCall,
     TurnStart,
+    TurnStartRejected,
     TurnEnded,
     TurnInterrupted,
     TurnInterrupt,
@@ -73,6 +77,7 @@ from meshagent.agents.messages import (
     ToolChoice,
     TurnSteerAccepted,
     TurnSteer,
+    TurnSteerRejected,
 )
 from meshagent.agents.process import (
     AgentProcess,
@@ -227,6 +232,59 @@ class _ThreadRecordingProcess(AgentProcess):
         self.received.append(message)
 
 
+class _LifecycleThreadStorage:
+    def __init__(self, *, path: str) -> None:
+        self._path = path
+        self.started = 0
+        self.stopped = 0
+        self.messages: list[AgentMessage] = []
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+    def push_message(
+        self,
+        *,
+        message: AgentMessage,
+        sender: Participant | None = None,
+    ) -> None:
+        del sender
+        self.messages.append(message)
+
+    def restore_session_context(self, *, context: AgentSessionContext) -> None:
+        del context
+
+    def make_toolkit(self) -> Toolkit:
+        return Toolkit(name="thread-storage", tools=[])
+
+
+class _StorageThreadRecordingProcess(AgentProcess):
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        thread_storage: _LifecycleThreadStorage,
+    ) -> None:
+        super().__init__(thread_id=thread_id, thread_storage=thread_storage)
+        self.received: list[Message] = []
+
+    def handles(self, message: Message) -> bool:
+        return (
+            message.data.type == AGENT_MESSAGE_TURN_START
+            and message.data.thread_id == self.thread_id
+        )
+
+    async def on_message(self, message: Message) -> None:
+        self.received.append(message)
+
+
 class _RecordingSupervisor(AgentSupervisor):
     def __init__(self) -> None:
         super().__init__()
@@ -288,18 +346,73 @@ class _ThreadCreatingSupervisor(AgentSupervisor):
         return process
 
 
+class _FailingThreadCreatingSupervisor(AgentSupervisor):
+    def create_thread_process(self, thread_id: str) -> AgentProcess:
+        del thread_id
+        raise ValueError("invalid thread id")
+
+
+class _StorageThreadCreatingSupervisor(AgentSupervisor):
+    def __init__(self, *, thread_storage: _LifecycleThreadStorage) -> None:
+        super().__init__()
+        self.thread_storage = thread_storage
+        self.created_processes: list[_StorageThreadRecordingProcess] = []
+
+    def create_thread_process(self, thread_id: str) -> AgentProcess:
+        process = _StorageThreadRecordingProcess(
+            thread_id=thread_id,
+            thread_storage=self.thread_storage,
+        )
+        self.created_processes.append(process)
+        return process
+
+
 class _GenericThreadAdapter(ThreadAdapter):
     async def handle_custom_event(
         self,
         *,
-        messages,
         event: dict,
     ) -> None:
-        del messages
         del event
 
     async def _process_llm_events(self) -> None:
         return None
+
+
+class _RecordingThreadStatusPublisher:
+    def __init__(self) -> None:
+        self.turn_ids: list[str | None] = []
+        self.pending_messages: list[list[dict[str, Any]]] = []
+        self.statuses: list[dict[str, Any]] = []
+        self.clear_count = 0
+
+    async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
+        self.turn_ids.append(turn_id)
+
+    async def set_pending_messages(
+        self,
+        *,
+        pending_messages: list[dict[str, Any]],
+    ) -> None:
+        self.pending_messages.append(pending_messages)
+
+    async def set_thread_status(
+        self,
+        *,
+        status: str | None,
+        mode=None,
+        pending_item_id: str | None = None,
+    ) -> None:
+        self.statuses.append(
+            {
+                "status": status,
+                "mode": mode,
+                "pending_item_id": pending_item_id,
+            }
+        )
+
+    async def clear_thread_status(self) -> None:
+        self.clear_count += 1
 
 
 class _LifecycleSession(AgentSessionContext):
@@ -511,6 +624,151 @@ class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
                 }
             )
         self.call_event.set()
+        return {"ok": True}
+
+
+class _ImageGenerationStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            if event["type"] == "image_started":
+                callback(
+                    AgentToolCallStarted(
+                        type=AGENT_EVENT_TOOL_CALL_STARTED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="image-tool",
+                        toolkit="openai",
+                        tool="image_generation",
+                    )
+                )
+                return
+
+            callback(
+                AgentToolCallEnded(
+                    type=AGENT_EVENT_TOOL_CALL_ENDED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="image-tool",
+                )
+            )
+
+        return publish
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del caller
+        del toolkits
+        del output_schema
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
+        if event_handler is not None:
+            event_handler({"type": "image_started"})
+        self.started.set()
+        await self.release.wait()
+        if event_handler is not None:
+            event_handler({"type": "image_ended"})
+        return {"ok": True}
+
+
+class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            del event
+            callback(
+                AgentToolCallStarted(
+                    type=AGENT_EVENT_TOOL_CALL_STARTED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="shell-tool",
+                    toolkit="openai",
+                    tool="shell",
+                    arguments={"action": {"command": "sed -n '1,20p' src/app.py"}},
+                )
+            )
+
+        return publish
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del caller
+        del toolkits
+        del output_schema
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
+        if event_handler is not None:
+            event_handler({"type": "shell_started"})
+        self.started.set()
+        await self.release.wait()
         return {"ok": True}
 
 
@@ -887,9 +1145,12 @@ class _RecordingDatasets:
     ) -> None:
         schema = self.schemas.setdefault(table, pa.schema([]))
         existing_names = set(schema.names)
-        for field_name, field_type in new_columns.items():
+        for field_name, field_value in new_columns.items():
             if field_name not in existing_names:
-                schema = schema.append(pa.field(field_name, field_type))
+                if isinstance(field_value, pa.Field):
+                    schema = schema.append(field_value)
+                else:
+                    schema = schema.append(pa.field(field_name, field_value))
         self.schemas[table] = schema
         for row in self.rows.setdefault(table, []):
             for key in new_columns:
@@ -1294,100 +1555,6 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
         return {"ok": True}
 
 
-class _ClearableLLMAdapter(LLMAdapter[dict[str, Any]]):
-    def __init__(self) -> None:
-        self.sessions: list[_LifecycleSession] = []
-        self.calls: list[dict[str, Any]] = []
-        self.first_call_started = asyncio.Event()
-        self.first_call_cancelled = asyncio.Event()
-
-    def default_model(self) -> str:
-        return "default-model"
-
-    def create_session(self) -> AgentSessionContext:
-        session = _LifecycleSession()
-        self.sessions.append(session)
-        return session
-
-    def make_agent_event_publisher(
-        self,
-        turn_id: str,
-        thread_id: str,
-        callback,
-        custom_event_callback=None,
-    ):
-        def publish(event: dict[str, Any]) -> None:
-            callback(
-                AgentTextContentStarted(
-                    type=AGENT_EVENT_TEXT_CONTENT_STARTED,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    item_id=event["item_id"],
-                )
-            )
-            callback(
-                AgentTextContentDelta(
-                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    item_id=event["item_id"],
-                    text=event["text"],
-                )
-            )
-            callback(
-                AgentTextContentEnded(
-                    type=AGENT_EVENT_TEXT_CONTENT_ENDED,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    item_id=event["item_id"],
-                )
-            )
-
-        return publish
-
-    async def next(
-        self,
-        *,
-        context: AgentSessionContext,
-        caller,
-        toolkits: list[Toolkit],
-        output_schema: dict | None = None,
-        event_handler=None,
-        steering_callback=None,
-        model: str | None = None,
-        on_behalf_of=None,
-        options: dict | None = None,
-        tool_choice: ToolChoice | None = None,
-    ) -> Any:
-        del caller
-        del toolkits
-        del output_schema
-        del model
-        del steering_callback
-        del on_behalf_of
-        del options
-
-        call_index = len(self.calls)
-        self.calls.append({"messages": [*context.messages], "context": context})
-        if event_handler is not None:
-            event_handler(
-                {
-                    "item_id": f"assistant-{call_index + 1}",
-                    "text": f"reply-{call_index + 1}",
-                }
-            )
-
-        if call_index == 0:
-            self.first_call_started.set()
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                self.first_call_cancelled.set()
-                raise
-
-        return {"ok": True}
-
-
 class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(self) -> None:
         self.session = _LifecycleSession()
@@ -1537,6 +1704,128 @@ async def test_agent_supervisor_starts_children_routes_messages_and_stops_them()
     assert process.state == "stopped"
     assert channel.stopped == 1
     assert process.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_route_initializes_thread_storage_before_returning() -> (
+    None
+):
+    thread_storage = _LifecycleThreadStorage(path="/threads/created")
+    supervisor = _StorageThreadCreatingSupervisor(thread_storage=thread_storage)
+
+    await supervisor.start()
+
+    try:
+        turn_start = TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="/threads/created",
+            content=[],
+        )
+
+        await supervisor.route(Message(data=turn_start))
+
+        assert thread_storage.started == 1
+        assert len(supervisor.created_processes) == 1
+        assert supervisor.created_processes[0].state == "started"
+    finally:
+        await supervisor.stop()
+
+    assert thread_storage.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_drops_message_when_thread_process_creation_fails() -> (
+    None
+):
+    supervisor = _FailingThreadCreatingSupervisor()
+    channel = _RecordingChannel(handled_type=AGENT_EVENT_TURN_START_REJECTED)
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+    try:
+        await asyncio.wait_for(channel.start_event.wait(), timeout=1)
+        turn_start = TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="/threads/not-dataset",
+            content=[],
+        )
+
+        await supervisor.route(Message(data=turn_start, source=channel))
+        await asyncio.wait_for(channel.message_event.wait(), timeout=1)
+
+        assert supervisor.state == "started"
+        assert supervisor.processes == []
+        assert len(channel.received) == 1
+        rejection = channel.received[0].data
+        assert isinstance(rejection, TurnStartRejected)
+        assert rejection.thread_id == turn_start.thread_id
+        assert rejection.source_message_id == turn_start.message_id
+        assert rejection.error.code == "thread_process_creation_failed"
+    finally:
+        await supervisor.stop()
+
+    assert supervisor.state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_rejects_steer_when_thread_process_creation_fails() -> (
+    None
+):
+    supervisor = _FailingThreadCreatingSupervisor()
+    channel = _RecordingChannel(handled_type=AGENT_EVENT_TURN_STEER_REJECTED)
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+    try:
+        await asyncio.wait_for(channel.start_event.wait(), timeout=1)
+        turn_steer = TurnSteer(
+            type=AGENT_MESSAGE_TURN_STEER,
+            thread_id="/threads/not-dataset",
+            turn_id="turn-1",
+            content=[],
+        )
+
+        await supervisor.route(Message(data=turn_steer, source=channel))
+        await asyncio.wait_for(channel.message_event.wait(), timeout=1)
+
+        assert supervisor.state == "started"
+        assert supervisor.processes == []
+        assert len(channel.received) == 1
+        rejection = channel.received[0].data
+        assert isinstance(rejection, TurnSteerRejected)
+        assert rejection.thread_id == turn_steer.thread_id
+        assert rejection.turn_id == turn_steer.turn_id
+        assert rejection.source_message_id == turn_steer.message_id
+        assert rejection.error.code == "thread_process_creation_failed"
+    finally:
+        await supervisor.stop()
+
+    assert supervisor.state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_stop_ignores_queued_message_with_thread_process_creation_failure() -> (
+    None
+):
+    supervisor = _FailingThreadCreatingSupervisor()
+    channel = _RecordingChannel(handled_type=AGENT_EVENT_TURN_START_REJECTED)
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+    await asyncio.wait_for(channel.start_event.wait(), timeout=1)
+    turn_start = TurnStart(
+        type=AGENT_MESSAGE_TURN_START,
+        thread_id="/threads/not-dataset",
+        content=[],
+    )
+    supervisor.send(Message(data=turn_start, source=channel))
+    await asyncio.sleep(0)
+    await asyncio.wait_for(channel.message_event.wait(), timeout=1)
+
+    await supervisor.stop()
+
+    assert supervisor.state == "stopped"
+    assert len(channel.received) == 1
 
 
 @pytest.mark.asyncio
@@ -2121,7 +2410,7 @@ async def test_llm_agent_process_uses_builder_returned_room_bound_toolkits() -> 
 
 
 @pytest.mark.asyncio
-async def test_llm_agent_process_forwards_custom_retry_events_to_thread_adapter(
+async def test_llm_agent_process_publishes_custom_retry_status_events(
     monkeypatch,
 ) -> None:
     async def _fast_sleep(delay: float) -> None:
@@ -2130,7 +2419,7 @@ async def test_llm_agent_process_forwards_custom_retry_events_to_thread_adapter(
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    thread_adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    thread_adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _CustomEventLLMAdapter()
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -2138,6 +2427,10 @@ async def test_llm_agent_process_forwards_custom_retry_events_to_thread_adapter(
         thread_id="/threads/test.thread",
         llm_adapter=llm_adapter,
         thread_adapter=thread_adapter,
+        thread_status_publisher=ParticipantAttributeThreadStatusPublisher(
+            participant=room.local_participant,
+            path="/threads/test.thread",
+        ),
     )
 
     await process.start(supervisor)
@@ -2162,9 +2455,13 @@ async def test_llm_agent_process_forwards_custom_retry_events_to_thread_adapter(
                 in room.local_participant.set_attribute_calls
             )
         )
-        assert all(
-            event.get_attribute("name") != "openai.retry"
-            for event in room.sync.document.event_elements
+        await _wait_for(
+            lambda: any(
+                event.get_attribute("name") == "openai.retry"
+                and event.get_attribute("headline")
+                == "Reconnecting to the LLM (retry 1/10)"
+                for event in room.sync.document.event_elements
+            )
         )
 
         llm_adapter.release_completion.set()
@@ -2735,6 +3032,9 @@ async def test_llm_agent_process_stops_after_interrupt_even_if_adapter_swallows_
         {"role": "user", "content": "tell a story"},
         {"role": "user", "content": "change direction"},
     ]
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
     ended_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]
     assert ended_payload["turn_id"] == turn_id
     assert ended_payload["error"] is None
@@ -3015,19 +3315,183 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
     await process.stop(supervisor)
 
 
-def test_llm_agent_process_requires_agent_process_thread_adapter() -> None:
+def test_llm_agent_process_accepts_generic_thread_adapter() -> None:
     room = _ThreadRoom(document=_ThreadDocument())
 
-    with pytest.raises(TypeError, match="AgentProcessThreadAdapter"):
-        LLMAgentProcess(
-            thread_id="/threads/test.thread",
-            participant=room.local_participant,
-            llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
-            thread_adapter=_GenericThreadAdapter(
-                room=room,
-                path="/threads/test.thread",
-            ),
+    process = LLMAgentProcess(
+        thread_id="/threads/test.thread",
+        participant=room.local_participant,
+        llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
+        thread_adapter=_GenericThreadAdapter(
+            room=room,
+            path="/threads/test.thread",
+        ),
+    )
+
+    assert process.thread_adapter is not None
+
+
+def test_llm_agent_process_allows_storage_path_to_differ_from_thread_id() -> None:
+    room = _ThreadRoom(document=_ThreadDocument())
+
+    process = LLMAgentProcess(
+        thread_id="/threads/test.thread",
+        participant=room.local_participant,
+        llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
+        thread_storage=_GenericThreadAdapter(
+            room=room,
+            path="/threads/test",
+        ),
+    )
+
+    assert process.thread_id == "/threads/test.thread"
+    assert process.thread_storage is not None
+    assert process.thread_storage.path == "/threads/test"
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_uses_optional_thread_status_publisher() -> None:
+    adapter = _QueuedSteerLLMAdapter()
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "first"}],
+                )
+            )
         )
+        await asyncio.wait_for(adapter.started_events[0].wait(), timeout=1)
+        await _wait_for(
+            lambda: any(status["status"] == "Thinking" for status in publisher.statuses)
+        )
+
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "second"}],
+                )
+            )
+        )
+
+        await _wait_for(lambda: len(publisher.pending_messages) > 0)
+        assert publisher.turn_ids[0] is not None
+        assert publisher.pending_messages[-1][0]["content"] == [
+            {"type": "text", "text": "second"}
+        ]
+
+        adapter.release_events[0].set()
+        adapter.release_events[1].set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+        assert publisher.clear_count >= 1
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_image_generation_status() -> None:
+    adapter = _ImageGenerationStatusLLMAdapter()
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "make an image"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Generating image"
+                and status["pending_item_id"] == "image-tool"
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.statuses[-1]["status"] == "Thinking")
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_tool_status_from_agent_messages() -> None:
+    adapter = _ShellStatusLLMAdapter()
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "read the file"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Reading src/app.py"
+                and status["pending_item_id"] == "shell-tool"
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+def test_llm_agent_process_does_not_handle_clear_thread() -> None:
+    room = _DownloadRecordingRoom()
+    llm_adapter = _RecordingLLMAdapter()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="/threads/test.thread",
+        llm_adapter=llm_adapter,
+    )
+
+    assert not process.handles(
+        Message(
+            data=ClearThread(
+                type=AGENT_MESSAGE_THREAD_CLEAR,
+                thread_id="/threads/test.thread",
+            )
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -3046,7 +3510,7 @@ async def test_agent_process_thread_adapter_persists_channel_emitted_file_events
     channel = _LifecycleChannel()
     process = AgentProcess(
         thread_id="/threads/test.thread",
-        thread_adapter=AgentProcessThreadAdapter(
+        thread_adapter=MeshDocumentThreadStorage(
             room=room,
             path="/threads/test.thread",
         ),
@@ -3115,7 +3579,7 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _ThreadPublishingLLMAdapter()
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -3210,7 +3674,7 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         turn_id = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0][
             "turn_id"
         ]
-        assert user_message.get_attribute("turn_id") == turn_id
+        assert user_message.get_attribute("turn_id") is None
         assert assistant_message.get_attribute("turn_id") == turn_id
         assert tool_event.get_attribute("turn_id") == turn_id
         assert turn_event.get_attribute("turn_id") == turn_id
@@ -3257,7 +3721,7 @@ async def test_llm_agent_process_thread_adapter_inserts_accepted_turn_before_ses
         },
     )
     room = _ThreadRoom(document=document)
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -3285,12 +3749,11 @@ async def test_llm_agent_process_thread_adapter_inserts_accepted_turn_before_ses
         await asyncio.wait_for(initializer_started.wait(), timeout=1)
         await _wait_for(lambda: len(room.sync.document.message_elements) == 2)
 
-        started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
         user_message = room.sync.document.message_elements[1]
         assert user_message.get_attribute("id") == (
             "00000000-0000-0000-0000-000000000101"
         )
-        assert user_message.get_attribute("turn_id") == started_payload["turn_id"]
+        assert user_message.get_attribute("turn_id") is None
         assert user_message.get_attribute("author_name") == "caller"
         assert user_message.get_attribute("role") == "user"
         assert user_message.get_attribute("text") == "hello from caller"
@@ -3338,7 +3801,7 @@ async def test_llm_agent_process_accepts_turn_before_resolving_turn_instructions
         return "custom instructions"
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -3388,7 +3851,7 @@ async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messag
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -3499,7 +3962,7 @@ async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messag
             if event.get_attribute("item_id") == "turn-1"
         )
 
-        assert user_message.get_attribute("turn_id") == "turn-1"
+        assert user_message.get_attribute("turn_id") is None
         assert assistant_message.get_attribute("turn_id") == "turn-1"
         assert reasoning.get_attribute("turn_id") == "turn-1"
         assert tool_event.get_attribute("turn_id") == "turn-1"
@@ -3521,7 +3984,7 @@ async def test_agent_process_thread_adapter_surfaces_failed_turns_in_feed(
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -3581,7 +4044,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -3766,7 +4229,7 @@ async def test_agent_process_thread_adapter_coalesces_repeated_web_searches_and_
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     first_query = (
         "auto research agent implementation python planning report generation "
         "official docs examples"
@@ -3889,7 +4352,7 @@ async def test_agent_process_thread_adapter_writes_preview_for_pending_and_start
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -3979,7 +4442,7 @@ async def test_agent_process_thread_adapter_appends_and_prunes_event_logs(
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4113,7 +4576,7 @@ async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_explorat
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4229,7 +4692,7 @@ async def test_agent_process_thread_adapter_refines_shell_event_by_item_id_witho
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4337,7 +4800,7 @@ async def test_agent_process_thread_adapter_renders_cd_prefixed_shell_heredoc_wr
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4418,7 +4881,7 @@ async def test_agent_process_thread_adapter_renders_if_guarded_shell_heredoc_wri
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4495,7 +4958,7 @@ async def test_agent_process_thread_adapter_groups_multi_file_shell_heredoc_writ
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4573,7 +5036,7 @@ async def test_agent_process_thread_adapter_renders_storage_read_write_and_grep_
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4762,7 +5225,7 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4887,7 +5350,7 @@ async def test_agent_process_thread_adapter_restores_thinking_status_on_turn_int
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -4970,12 +5433,11 @@ async def test_agent_process_thread_adapter_uses_computer_startup_details_for_st
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
         await adapter.handle_custom_event(
-            messages=room.sync.document.root.messages,
             event={
                 "type": "agent.event",
                 "source": "computer",
@@ -5027,7 +5489,7 @@ async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5088,7 +5550,7 @@ async def test_agent_process_thread_adapter_resets_started_at_when_status_change
     )
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5131,7 +5593,7 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5350,7 +5812,7 @@ async def test_agent_process_thread_adapter_omits_generic_tool_arguments_and_err
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5427,7 +5889,7 @@ async def test_agent_process_thread_adapter_omits_inline_computer_result_payload
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5510,7 +5972,7 @@ async def test_agent_process_thread_adapter_persists_generated_images(
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5636,7 +6098,7 @@ async def test_agent_process_thread_adapter_renders_new_thread_tool_as_thread_re
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5700,7 +6162,7 @@ async def test_llm_agent_process_thread_adapter_inserts_applied_steer_before_pos
     None
 ):
     room = _ThreadRoom(document=_ThreadDocument())
-    thread_adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    thread_adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _ToolBoundaryThreadOrderingLLMAdapter()
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -5792,7 +6254,7 @@ async def test_agent_process_thread_adapter_strips_room_scheme_from_turn_attachm
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5814,6 +6276,7 @@ async def test_agent_process_thread_adapter_strips_room_scheme_from_turn_attachm
 
         user_message = room.sync.document.message_elements[0]
         assert user_message.get_attribute("author_name") == "caller"
+        assert user_message.get_attribute("turn_id") is None
         assert user_message.get_attribute("text") == "hello"
         assert [
             child.get_attribute("path")
@@ -5840,7 +6303,7 @@ async def test_agent_process_thread_adapter_renders_failed_apply_patch_as_attemp
     monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
 
     room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
 
     await adapter.start()
     try:
@@ -5941,7 +6404,7 @@ async def test_llm_agent_process_thread_adapter_restores_thread_state(
     )
 
     room = _ThreadRoom(document=document)
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -6014,7 +6477,7 @@ async def test_llm_agent_process_thread_adapter_restore_prefers_message_role(
     )
 
     room = _ThreadRoom(document=document)
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
     llm_adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
     process = _make_llm_agent_process(
@@ -6051,111 +6514,5 @@ async def test_llm_agent_process_thread_adapter_restore_prefers_message_role(
                 "content": "current",
             },
         ]
-    finally:
-        await process.stop(supervisor)
-
-
-@pytest.mark.asyncio
-async def test_llm_agent_process_clear_thread_resets_thread_and_session_context(
-    monkeypatch,
-) -> None:
-    real_sleep = asyncio.sleep
-
-    async def _fast_sleep(delay: float) -> None:
-        del delay
-
-    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
-
-    async def _wait_for_real_sleep(
-        predicate,
-        *,
-        timeout: float = 1,
-    ) -> None:
-        deadline = asyncio.get_running_loop().time() + timeout
-        while not predicate():
-            if asyncio.get_running_loop().time() >= deadline:
-                raise asyncio.TimeoutError()
-            await real_sleep(0.01)
-
-    room = _ThreadRoom(document=_ThreadDocument())
-    adapter = AgentProcessThreadAdapter(room=room, path="/threads/test.thread")
-    llm_adapter = _ClearableLLMAdapter()
-    supervisor = _RecordingSupervisor()
-    process = _make_llm_agent_process(
-        room=room,
-        thread_id="/threads/test.thread",
-        llm_adapter=llm_adapter,
-        thread_adapter=adapter,
-    )
-
-    await process.start(supervisor)
-    try:
-        process.send(
-            Message(
-                data=TurnStart(
-                    type=AGENT_MESSAGE_TURN_START,
-                    thread_id="/threads/test.thread",
-                    content=[{"type": "text", "text": "first"}],
-                )
-            )
-        )
-
-        await asyncio.wait_for(llm_adapter.first_call_started.wait(), timeout=1)
-        await _wait_for_real_sleep(
-            lambda: len(room.sync.document.message_elements) == 2
-        )
-        await _wait_for_real_sleep(lambda: len(room.sync.document.event_elements) >= 1)
-
-        clear_thread = ClearThread(
-            type=AGENT_MESSAGE_THREAD_CLEAR,
-            thread_id="/threads/test.thread",
-        )
-        process.send(
-            Message(
-                data=clear_thread,
-            )
-        )
-
-        await asyncio.wait_for(llm_adapter.first_call_cancelled.wait(), timeout=1)
-        await _wait_for_real_sleep(
-            lambda: len(room.sync.document.message_elements) == 0
-        )
-        await _wait_for_real_sleep(lambda: len(room.sync.document.event_elements) == 0)
-        await _wait_for_real_sleep(lambda: process.session_context is None)
-
-        assert len(llm_adapter.sessions) == 1
-        assert llm_adapter.sessions[0].closed == 1
-        thread_cleared_events = supervisor.payloads(
-            message_type=AGENT_EVENT_THREAD_CLEARED
-        )
-        assert len(thread_cleared_events) == 1
-        assert thread_cleared_events[0]["thread_id"] == "/threads/test.thread"
-        assert thread_cleared_events[0]["source_message_id"] == clear_thread.message_id
-
-        process.send(
-            Message(
-                data=TurnStart(
-                    type=AGENT_MESSAGE_TURN_START,
-                    thread_id="/threads/test.thread",
-                    content=[{"type": "text", "text": "second"}],
-                )
-            )
-        )
-
-        await _wait_for_real_sleep(lambda: len(llm_adapter.calls) == 2)
-        await _wait_for_real_sleep(
-            lambda: len(room.sync.document.message_elements) == 2
-        )
-
-        assert len(llm_adapter.sessions) == 2
-        assert llm_adapter.calls[1]["messages"] == [
-            {
-                "role": "user",
-                "content": "second",
-            }
-        ]
-
-        assistant_message = room.sync.document.message_elements[1]
-        assert assistant_message.get_attribute("text") == "reply-2"
     finally:
         await process.stop(supervisor)

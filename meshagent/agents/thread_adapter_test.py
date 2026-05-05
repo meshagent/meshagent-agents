@@ -19,8 +19,7 @@ class _FakeThreadAdapter(ThreadAdapter):
     async def stop(self) -> None:
         self.stopped += 1
 
-    async def handle_custom_event(self, *, messages, event) -> None:
-        del messages
+    async def handle_custom_event(self, *, event) -> None:
         del event
 
     async def _process_llm_events(self) -> None:
@@ -67,8 +66,7 @@ class _FakeMeshDocument:
 
 
 class _BaseStopThreadAdapter(ThreadAdapter):
-    async def handle_custom_event(self, *, messages, event) -> None:
-        del messages
+    async def handle_custom_event(self, *, event) -> None:
         del event
 
     async def _process_llm_events(self) -> None:

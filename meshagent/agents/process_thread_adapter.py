@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from meshagent.api import Element, Participant, RemoteParticipant, RoomException
+from meshagent.api import (
+    Element,
+    MeshDocument,
+    Participant,
+    RemoteParticipant,
+    RoomClient,
+    RoomException,
+)
 from meshagent.api.chan import ChanClosed
 from meshagent.api.messaging import (
     BinaryContent,
@@ -22,6 +29,7 @@ from meshagent.api.messaging import (
     JsonContent,
     TextContent,
 )
+from meshagent.tools import Toolkit, tool
 
 from .context import AgentSessionContext
 from .images_dataset import ImagesDataset
@@ -47,6 +55,8 @@ from .messages import (
     AgentToolCallLogLine,
     AgentToolCallPending,
     AgentToolCallStarted,
+    AgentThreadEvent,
+    AgentThreadImage,
     ThreadCleared,
     TurnEnded,
     TurnInterrupted,
@@ -58,7 +68,12 @@ from .messages import (
     TurnSteerRejected,
 )
 from .shell_semantics import analyze_shell_command
-from .thread_adapter import ThreadAdapter
+from .thread_adapter import (
+    _THREAD_SYNC_CLOSE_TIMEOUT_SEC,
+    default_format_message,
+)
+from .thread_schema import thread_schema
+from .thread_storage import ThreadStorage
 
 logger = logging.getLogger("agent.process_thread_adapter")
 
@@ -80,11 +95,6 @@ class _ActiveToolCall:
     toolkit: str
     tool: str
     arguments: dict[str, Any] | None
-
-
-@dataclass(frozen=True, slots=True)
-class _ClearThreadRequest:
-    future: asyncio.Future[None]
 
 
 @dataclass(slots=True)
@@ -362,16 +372,27 @@ def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(combined)
 
 
-class AgentProcessThreadAdapter(ThreadAdapter):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+class MeshDocumentThreadStorage(ThreadStorage):
+    def __init__(
+        self,
+        *,
+        room: RoomClient,
+        path: str,
+        max_append_message_count: int = 25,
+    ) -> None:
+        self._room = room
+        self._thread_path = path
+        self._processor_task: asyncio.Task[None] | None = None
+        self._llm_messages: asyncio.Queue[Any] = asyncio.Queue()
+        self._thread: MeshDocument | None = None
+        self._format_message = default_format_message
+        self._max_append_message_count = max_append_message_count
         self._images_db = ImagesDataset(room=self._room)
         self._active_message_elements_by_key: dict[str, Element] = {}
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}
         self._active_event_elements_by_item_id: dict[str, Element] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
-        self._pending_turn_ids_by_message_id: dict[str, str] = {}
         self._saved_image_ids_by_item_id: dict[str, str] = {}
         self._thread_status_lock = asyncio.Lock()
         self._thread_status_generation = 0
@@ -385,38 +406,107 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._restore_message_count: int | None = None
 
     async def start(self) -> None:
-        await super().start()
+        self._thread = await self._room.sync.open(
+            path=self._thread_path,
+            schema=thread_schema,
+        )
+        self._ensure_members_element()
+        self._ensure_messages_element()
+        self._processor_task = asyncio.create_task(self._process_llm_events())
         self._restore_message_count = len(self._message_elements())
         self._ensure_local_member_on_thread()
+
+    async def __aenter__(self) -> "MeshDocumentThreadStorage":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type
+        del exc
+        del tb
+        await self.stop()
+
+    @property
+    def thread(self) -> MeshDocument | None:
+        return self._thread
+
+    @property
+    def path(self) -> str:
+        return self._thread_path
 
     async def stop(self) -> None:
         await self.set_thread_turn_id(turn_id=None)
         await self.set_pending_messages(pending_messages=[])
         await self.clear_thread_status()
-        await super().stop()
+        if self._processor_task is not None and not self._processor_task.done():
+            drain_deadline = asyncio.get_running_loop().time() + 2.0
+            while not self._llm_messages.empty():
+                if self._processor_task.done():
+                    break
+                if asyncio.get_running_loop().time() >= drain_deadline:
+                    break
+                await asyncio.sleep(0.01)
+
+        self._llm_messages.shutdown()
+        if self._processor_task is not None:
+            await self._processor_task
+            self._processor_task = None
+
+        if self._thread is not None:
+            final_state: bytes | None = None
+            try:
+                state = self._thread.get_state()
+                if isinstance(state, bytes) and len(state) > 0:
+                    final_state = state
+            except Exception as ex:
+                logger.warning(
+                    "unable to collect final thread state for %s",
+                    self._thread_path,
+                    exc_info=ex,
+                )
+
+            if final_state is not None and not self._room.is_closed:
+                try:
+                    encoded_state = base64.standard_b64encode(final_state)
+                    await self._room.sync.sync(
+                        path=self._thread_path,
+                        data=encoded_state,
+                    )
+                except Exception as ex:
+                    if self._room.is_closed:
+                        logger.debug(
+                            "skipping final thread state flush for closed room %s",
+                            self._thread_path,
+                            exc_info=ex,
+                        )
+                    else:
+                        logger.warning(
+                            "unable to flush final thread state for %s",
+                            self._thread_path,
+                            exc_info=ex,
+                        )
+
+            if not self._room.is_closed:
+                await asyncio.sleep(3)
+            try:
+                await asyncio.wait_for(
+                    self._room.sync.close(path=self._thread_path),
+                    timeout=_THREAD_SYNC_CLOSE_TIMEOUT_SEC,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "timed out closing thread sync stream for %s after %.1fs",
+                    self._thread_path,
+                    _THREAD_SYNC_CLOSE_TIMEOUT_SEC,
+                )
+            self._thread = None
         self._active_message_elements_by_key.clear()
         self._active_reasoning_elements_by_item_id.clear()
         self._active_event_elements_by_key.clear()
         self._active_event_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
-        self._pending_turn_ids_by_message_id.clear()
         self._saved_image_ids_by_item_id.clear()
         self._restore_message_count = None
-
-    async def clear_thread(self) -> None:
-        if self._processor_task is None or self._processor_task.done():
-            await self._clear_thread_contents(messages=self._messages_element())
-            return
-
-        clear_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        try:
-            self._llm_messages.put_nowait(_ClearThreadRequest(future=clear_future))
-        except asyncio.QueueShutDown:
-            logger.debug("clearing thread directly after queue shutdown")
-            await self._clear_thread_contents(messages=self._messages_element())
-            return
-
-        await clear_future
 
     def push_message(
         self,
@@ -430,6 +520,104 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             )
         except asyncio.QueueShutDown:
             logger.debug("dropping thread adapter message after queue shutdown")
+
+    def make_toolkit(self) -> Toolkit:
+        return Toolkit(
+            name="search",
+            description="tools for searching conversation history",
+            tools=[
+                self.grep_tool,
+                self.get_message_range,
+                self.count_tool,
+            ],
+        )
+
+    @tool(
+        name="get_message_range",
+        description="gets a range of messages, index 0 is the first message in the conversation",
+    )
+    def get_message_range(self, *, start: int, end: int) -> str:
+        all_items = self._messages_element().get_children()
+        messages = [
+            item
+            for item in all_items
+            if isinstance(item, Element) and item.tag_name == "message"
+        ]
+
+        elements = messages[start:end]
+
+        if len(elements) == 0:
+            return "no messages were found within the specified range"
+
+        response = "matching messages:\n"
+        for element in elements:
+            response = response + self._format_message(
+                user_name=element["author_name"],
+                message=element["text"],
+                iso_timestamp=element["created_at"],
+            )
+        return response
+
+    @tool(
+        name="count_current_thread_messages",
+        description="return the number of messages in the current thread (including those outside the context window)",
+    )
+    def count_tool(
+        self,
+        *,
+        pattern: str,
+        ignore_case: bool,
+        messages_before: int,
+        messages_after: int,
+    ) -> str:
+        del pattern
+        del ignore_case
+        del messages_before
+        del messages_after
+
+        messages = self._messages_element()
+        count = len(
+            [
+                item
+                for item in messages.get_children()
+                if isinstance(item, Element) and item.tag_name == "message"
+            ]
+        )
+        return f"{count}"
+
+    @tool(
+        name="grep_current_thread",
+        description="search the current thread for text, includes messages outside the current context window",
+    )
+    def grep_tool(
+        self,
+        *,
+        pattern: str,
+        ignore_case: bool,
+        messages_before: int,
+        messages_after: int,
+    ) -> str:
+        elements = [
+            item
+            for item in self._messages_element().grep(
+                pattern,
+                ignore_case=ignore_case,
+                before=messages_before,
+                after=messages_after,
+            )
+            if isinstance(item, Element) and item.tag_name == "message"
+        ]
+        if len(elements) == 0:
+            return "no messages were found with the specified pattern"
+
+        response = "matching messages:\n"
+        for element in elements:
+            response = response + self._format_message(
+                user_name=element["author_name"],
+                message=element["text"],
+                iso_timestamp=element["created_at"],
+            )
+        return response
 
     def restore_session_context(self, *, context: AgentSessionContext) -> None:
         if self._thread is None:
@@ -485,6 +673,16 @@ class AgentProcessThreadAdapter(ThreadAdapter):
     async def handle_custom_event(
         self,
         *,
+        event: dict,
+    ) -> None:
+        await self._handle_custom_event_for_messages(
+            messages=self._messages_element(),
+            event=event,
+        )
+
+    async def _handle_custom_event_for_messages(
+        self,
+        *,
         messages: Element,
         event: dict,
     ) -> None:
@@ -504,17 +702,6 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             except asyncio.QueueShutDown:
                 break
 
-            if isinstance(queued_entry, _ClearThreadRequest):
-                try:
-                    await self._clear_thread_contents(messages=messages)
-                except Exception as exc:
-                    if not queued_entry.future.done():
-                        queued_entry.future.set_exception(exc)
-                else:
-                    if not queued_entry.future.done():
-                        queued_entry.future.set_result(None)
-                continue
-
             if isinstance(queued_entry, ThreadAdapterMessage):
                 await self._handle_agent_message(
                     messages=messages,
@@ -524,7 +711,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 continue
 
             if isinstance(queued_entry, dict):
-                await self.handle_custom_event(
+                await self._handle_custom_event_for_messages(
                     messages=messages,
                     event=queued_entry,
                 )
@@ -540,9 +727,35 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         if isinstance(message, ThreadCleared):
             await self.set_thread_turn_id(turn_id=None)
             await self.set_pending_messages(pending_messages=[])
+            await self._clear_thread_contents(messages=messages)
+            return
+        elif isinstance(message, AgentThreadEvent):
+            await self._handle_custom_event_for_messages(
+                messages=messages,
+                event=message.event,
+            )
+            return
+        elif isinstance(message, AgentThreadImage):
+            self._upsert_thread_image(
+                message_id=message.item_id or message.message_id,
+                turn_id=message.turn_id,
+                image_id=message.image_id,
+                mime_type=message.mime_type,
+                created_at=message.created_at,
+                created_by=message.created_by,
+                width=message.width,
+                height=message.height,
+                status=message.status,
+                status_detail=message.status_detail,
+            )
+            return
 
         if isinstance(message, (TurnStart, TurnSteer)):
-            self._write_turn_message(sender=sender, turn=message)
+            self._write_turn_message(
+                sender=sender,
+                turn=message,
+                turn_id=message.turn_id if isinstance(message, TurnSteer) else None,
+            )
         elif isinstance(message, AgentTextContentStarted):
             self._ensure_assistant_message(
                 messages=messages,
@@ -614,13 +827,6 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 self._upsert_event(messages=messages, event=normalized_event)
 
         if isinstance(message, TurnStarted):
-            if not self.set_message_turn_id(
-                message_id=message.source_message_id,
-                turn_id=message.turn_id,
-            ):
-                self._pending_turn_ids_by_message_id[message.source_message_id] = (
-                    message.turn_id
-                )
             await self.set_thread_turn_id(turn_id=message.turn_id)
             if normalized_event is not None:
                 await self._update_thread_status_from_event(event=normalized_event)
@@ -640,6 +846,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         *,
         sender: Participant | None,
         turn: TurnStart | TurnSteer,
+        turn_id: str | None,
     ) -> None:
         text_parts: list[str] = []
         attachments: list[dict[str, str]] = []
@@ -658,12 +865,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             return
 
         participant: Participant | str = sender if sender is not None else "user"
-        turn_id: str | None = turn.turn_id if isinstance(turn, TurnSteer) else None
-        if turn_id is None:
-            turn_id = self._pending_turn_ids_by_message_id.pop(turn.message_id, None)
-        else:
-            self._pending_turn_ids_by_message_id.pop(turn.message_id, None)
-        self.write_text_message(
+        self._append_text_message(
             text="\n\n".join(text_parts),
             participant=participant,
             message_id=turn.message_id,
@@ -697,6 +899,219 @@ class AgentProcessThreadAdapter(ThreadAdapter):
             raise RoomException("messages element is missing from thread document")
 
         return messages[0]
+
+    def _ensure_members_element(self) -> Element:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        members = self._thread.root.get_children_by_tag_name("members")
+        if len(members) > 0:
+            return members[0]
+
+        return self._thread.root.append_child(tag_name="members")
+
+    def _ensure_messages_element(self) -> Element:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        messages = self._thread.root.get_children_by_tag_name("messages")
+        if len(messages) > 0:
+            return messages[0]
+
+        return self._thread.root.append_child(tag_name="messages")
+
+    def ensure_member(self, *, participant: Participant | str) -> None:
+        if isinstance(participant, Participant):
+            participant_name = participant.get_attribute("name")
+        else:
+            participant_name = participant
+
+        if not isinstance(participant_name, str):
+            return
+
+        normalized_name = participant_name.strip()
+        if normalized_name == "":
+            return
+
+        members = self._ensure_members_element()
+        for member in members.get_children():
+            if member.tag_name != "member":
+                continue
+            if member.get_attribute("name") == normalized_name:
+                return
+
+        members.append_child(
+            tag_name="member",
+            attributes={"name": normalized_name},
+        )
+
+    def _append_text_message(
+        self,
+        *,
+        text: str,
+        participant: Participant | str,
+        message_id: str | None = None,
+        turn_id: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        role: str | None = None,
+    ) -> None:
+        self.ensure_member(participant=participant)
+        doc_messages = self._ensure_messages_element()
+
+        author_name = ""
+        if isinstance(participant, Participant):
+            participant_name = participant.get_attribute("name")
+            if isinstance(participant_name, str):
+                author_name = participant_name
+        else:
+            author_name = participant
+
+        attributes: dict[str, Any] = {
+            "text": text,
+            "created_at": _now_iso(),
+            "author_name": author_name,
+        }
+
+        normalized_role = role.strip() if isinstance(role, str) else ""
+        if normalized_role == "" and isinstance(participant, RemoteParticipant):
+            normalized_role = participant.role.strip()
+        if normalized_role == "" and participant is self._room.local_participant:
+            normalized_role = "agent"
+        if normalized_role != "":
+            attributes["role"] = normalized_role
+
+        if isinstance(message_id, str) and message_id.strip() != "":
+            attributes["id"] = message_id.strip()
+        if isinstance(turn_id, str) and turn_id.strip() != "":
+            attributes["turn_id"] = turn_id.strip()
+
+        message = doc_messages.append_child(
+            tag_name="message",
+            attributes=attributes,
+        )
+
+        if attachments is None:
+            return
+
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            path = attachment.get("path")
+            if not isinstance(path, str):
+                continue
+            normalized_path = path.strip()
+            if normalized_path == "":
+                continue
+            message.append_child(
+                tag_name="file",
+                attributes={"path": normalized_path},
+            )
+
+    def _upsert_thread_image(
+        self,
+        *,
+        message_id: str | None,
+        turn_id: str | None = None,
+        image_id: str | None = None,
+        mime_type: str | None = None,
+        created_at: str | None = None,
+        created_by: str | None = None,
+        width: int | float | None = None,
+        height: int | float | None = None,
+        status: str | None = None,
+        status_detail: str | None = None,
+    ) -> str:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        messages = self._messages_element()
+        resolved_message_id = (
+            message_id
+            if isinstance(message_id, str) and message_id.strip() != ""
+            else str(uuid.uuid4())
+        )
+
+        message = None
+        for child in messages.get_children():
+            if (
+                child.tag_name == "message"
+                and child.get_attribute("id") == resolved_message_id
+            ):
+                message = child
+                break
+
+        if message is None:
+            author_name = (
+                created_by
+                if isinstance(created_by, str) and created_by.strip() != ""
+                else self._room.local_participant.get_attribute("name")
+            )
+            if not isinstance(author_name, str):
+                author_name = ""
+
+            message_attributes: dict[str, Any] = {
+                "id": resolved_message_id,
+                "text": "",
+                "created_at": _now_iso(),
+                "author_name": author_name,
+                "role": "agent",
+            }
+            if isinstance(turn_id, str) and turn_id.strip() != "":
+                message_attributes["turn_id"] = turn_id.strip()
+
+            message = messages.append_child(
+                tag_name="message",
+                attributes=message_attributes,
+            )
+        else:
+            message.set_attribute("role", "agent")
+            if isinstance(turn_id, str) and turn_id.strip() != "":
+                message.set_attribute("turn_id", turn_id.strip())
+
+        image = None
+        for child in message.get_children():
+            if child.tag_name == "image":
+                image = child
+                break
+
+        normalized_width: int | None = None
+        if isinstance(width, (int, float)):
+            width_int = int(width)
+            if width_int > 0:
+                normalized_width = width_int
+
+        normalized_height: int | None = None
+        if isinstance(height, (int, float)):
+            height_int = int(height)
+            if height_int > 0:
+                normalized_height = height_int
+
+        image_attributes: dict[str, str | int] = {}
+        if isinstance(image_id, str) and image_id.strip() != "":
+            image_attributes["id"] = image_id
+        if isinstance(mime_type, str) and mime_type.strip() != "":
+            image_attributes["mime_type"] = mime_type
+        if isinstance(created_at, str) and created_at.strip() != "":
+            image_attributes["created_at"] = created_at
+        if isinstance(created_by, str) and created_by.strip() != "":
+            image_attributes["created_by"] = created_by
+        if normalized_width is not None:
+            image_attributes["width"] = normalized_width
+        if normalized_height is not None:
+            image_attributes["height"] = normalized_height
+        if isinstance(status, str) and status.strip() != "":
+            image_attributes["status"] = status.strip()
+        if isinstance(status_detail, str) and status_detail.strip() != "":
+            image_attributes["status_detail"] = status_detail.strip()
+
+        if image is None:
+            message.append_child(tag_name="image", attributes=image_attributes)
+            return resolved_message_id
+
+        for key, value in image_attributes.items():
+            image.set_attribute(key, value)
+
+        return resolved_message_id
 
     def _message_elements(self) -> list[Element]:
         messages = self._messages_element()
@@ -829,7 +1244,6 @@ class AgentProcessThreadAdapter(ThreadAdapter):
         self._active_message_elements_by_key.clear()
         self._active_reasoning_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
-        self._pending_turn_ids_by_message_id.clear()
 
     async def _clear_thread_contents(self, *, messages: Element) -> None:
         self._clear_active_turn_state()
@@ -1070,7 +1484,7 @@ class AgentProcessThreadAdapter(ThreadAdapter):
                 created_by=created_by,
                 annotations=annotations,
             )
-            self.write_image(
+            self._upsert_thread_image(
                 message_id=message.item_id,
                 turn_id=message.turn_id,
                 image_id=saved_image.id,
