@@ -4,6 +4,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
 from meshagent.api.messaging import BinaryContent, Content, JsonContent, TextContent
@@ -18,6 +19,8 @@ from .messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
+    AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_IN_PROGRESS,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
@@ -28,6 +31,7 @@ from .messages import (
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_IMAGE_GENERATION_STARTED,
     AgentError,
+    AgentContextCompacted,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
@@ -43,6 +47,7 @@ from .messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentThreadEvent,
     AgentToolCallPending,
     AgentToolCallInProgress,
     AgentToolCallLogDelta,
@@ -898,6 +903,8 @@ class _OpenAIAgentEventPublisher:
     _pending_handler_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _finished_handler_tool_call_ids: set[str] = field(default_factory=set)
     _started_image_generation_ids: set[str] = field(default_factory=set)
+    _emitted_compaction_ids: set[str] = field(default_factory=set)
+    _synthetic_item_counter: int = 0
 
     def set_function_tool_name_resolver(
         self,
@@ -923,6 +930,16 @@ class _OpenAIAgentEventPublisher:
 
         self._active_response_id = response_id
         self._output_item_ids.clear()
+        self._emitted_compaction_ids.clear()
+
+    def _response_id_from_event(self, *, event: dict[str, Any]) -> str | None:
+        response_id = _as_str(event.get("response_id"))
+        if response_id is not None:
+            return response_id
+        response = _as_dict(event.get("response"))
+        if response is None:
+            return None
+        return _as_str(response.get("id"))
 
     def _item_id_from_event(self, *, event: dict[str, Any]) -> str | None:
         output_index = _as_int(event.get("output_index"))
@@ -939,6 +956,16 @@ class _OpenAIAgentEventPublisher:
             )
 
         return item_id
+
+    def _synthetic_item_id(self, *, event: dict[str, Any], kind: str) -> str:
+        response_id = self._active_response_id
+        if response_id is None:
+            response_id = self._response_id_from_event(event=event)
+        sequence_number = _as_int(event.get("sequence_number"))
+        if sequence_number is not None:
+            return f"{kind}:{response_id or self.emitter.turn_id}:{sequence_number}"
+        self._synthetic_item_counter += 1
+        return f"{kind}:{response_id or self.emitter.turn_id}:{self._synthetic_item_counter}"
 
     def _mapped_output_item_id(
         self,
@@ -1048,6 +1075,62 @@ class _OpenAIAgentEventPublisher:
                                 item_id=item_id, text=text
                             )
             self.emitter.emit_reasoning_ended(item_id=item_id)
+            return
+
+        if item_type == "compaction":
+            if item_id is None:
+                item_id = self._synthetic_item_id(event=event, kind="compaction")
+                item = {**item, "id": item_id}
+            elif _as_str(item.get("id")) is None:
+                item = {**item, "id": item_id}
+            if completed and item_id in self._emitted_compaction_ids:
+                return
+            if not completed:
+                self.emitter.callback(
+                    AgentThreadEvent(
+                        type=AGENT_EVENT_THREAD_EVENT,
+                        thread_id=self.emitter.thread_id,
+                        event={
+                            "type": "agent.event",
+                            "source": "openai",
+                            "name": "openai.context_compaction",
+                            "kind": "message",
+                            "state": "in_progress",
+                            "headline": "Compacting context",
+                            "summary": "Compacting context",
+                            "item_id": item_id,
+                        },
+                    )
+                )
+                return
+            self._emitted_compaction_ids.add(item_id)
+            self.emitter.callback(
+                AgentContextCompacted(
+                    type=AGENT_EVENT_CONTEXT_COMPACTED,
+                    thread_id=self.emitter.thread_id,
+                    checkpoint_id=item_id,
+                    path=self.emitter.thread_id,
+                    through_sequence=0,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    messages=[item],
+                )
+            )
+            self.emitter.callback(
+                AgentThreadEvent(
+                    type=AGENT_EVENT_THREAD_EVENT,
+                    thread_id=self.emitter.thread_id,
+                    event={
+                        "type": "agent.event",
+                        "source": "openai",
+                        "name": "openai.context_compaction",
+                        "kind": "message",
+                        "state": "completed",
+                        "headline": "Compacted context",
+                        "summary": "Compacted context",
+                        "item_id": item_id,
+                    },
+                )
+            )
             return
 
         if item_type == "message" and completed and item_id is not None:
@@ -1267,6 +1350,26 @@ class _OpenAIAgentEventPublisher:
 
         if event_type == "response.output_item.done":
             self._on_output_item(event=event, completed=True)
+            return
+
+        if event_type in {
+            "response.completed",
+            "response.done",
+            "response.incomplete",
+        }:
+            response = _as_dict(event.get("response"))
+            if response is None:
+                return
+            outputs = response.get("output")
+            if not isinstance(outputs, list):
+                return
+            for output_index, item in enumerate(outputs):
+                if not isinstance(item, dict) or item.get("type") != "compaction":
+                    continue
+                self._on_output_item(
+                    event={**event, "item": item, "output_index": output_index},
+                    completed=True,
+                )
             return
 
         if event_type in {

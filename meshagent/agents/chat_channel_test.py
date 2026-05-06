@@ -18,6 +18,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_CLEAR,
@@ -34,9 +35,13 @@ from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentUsageUpdated,
     ApproveAgentToolCall,
     CapabilitiesRequest,
     ClearThread,
+    CloseThread,
+    AgentContextWindowUsage,
+    OpenThread,
     ThreadCleared,
     TurnEnded,
     TurnInterrupt,
@@ -1121,6 +1126,78 @@ async def test_chat_channel_sends_agent_text_events_to_open_participants() -> No
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_sends_usage_updates_to_open_participants() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, OpenThread)
+        assert room.messaging.sent_messages == []
+
+        await channel.on_message(
+            Message(
+                data=AgentUsageUpdated(
+                    type=AGENT_EVENT_USAGE_UPDATED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    usage={
+                        "input_tokens": 120,
+                        "output_tokens": 30,
+                    },
+                    context_window=AgentContextWindowUsage(
+                        used_tokens=480,
+                        total_tokens=128000,
+                        compaction_mode="auto",
+                        compaction_threshold=64000,
+                    ),
+                )
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        sent = room.messaging.sent_messages[0]
+        assert sent["to"] is caller
+        assert sent["type"] == "agent-message"
+        assert sent["message"] == {
+            "payload": {
+                "type": AGENT_EVENT_USAGE_UPDATED,
+                "thread_id": "/threads/test.thread",
+                "turn_id": "turn-1",
+                "message_id": sent["message"]["payload"]["message_id"],
+                "usage": {
+                    "input_tokens": 120.0,
+                    "output_tokens": 30.0,
+                },
+                "context_window": {
+                    "used_tokens": 480,
+                    "total_tokens": 128000,
+                    "compaction_mode": "auto",
+                    "compaction_threshold": 64000,
+                },
+            }
+        }
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubscribes() -> (
     None
 ):
@@ -1162,6 +1239,11 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
             AGENT_EVENT_TEXT_CONTENT_DELTA
         )
         assert room.messaging.sent_messages[0]["message"]["payload"]["text"] == "hello"
+        assert len(supervisor.sent) == 1
+        assert supervisor.sent[0].sender is caller
+        assert supervisor.sent[0].source is channel
+        assert isinstance(supervisor.sent[0].data, OpenThread)
+        assert supervisor.sent[0].data.thread_id == "/threads/test.thread"
 
         room.messaging.emit_message(
             RoomMessage(
@@ -1175,6 +1257,9 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
                 },
             )
         )
+        assert len(supervisor.sent) == 2
+        assert isinstance(supervisor.sent[1].data, CloseThread)
+        assert supervisor.sent[1].data.thread_id == "/threads/test.thread"
 
         await channel.on_message(
             Message(
@@ -1211,6 +1296,9 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
             )
         )
         assert len(room.messaging.sent_messages) == 1
+        assert len(supervisor.sent) == 3
+        assert isinstance(supervisor.sent[2].data, OpenThread)
+        assert supervisor.sent[2].data.thread_id == "/threads/test.thread"
 
         room.messaging.emit_message(
             RoomMessage(
@@ -1224,6 +1312,9 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
                 },
             )
         )
+        assert len(supervisor.sent) == 4
+        assert isinstance(supervisor.sent[3].data, CloseThread)
+        assert supervisor.sent[3].data.thread_id == "/threads/test.thread"
 
         await channel.on_message(
             Message(
@@ -1239,7 +1330,6 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
 
         assert len(room.messaging.sent_messages) == 1
         assert channel._open_participant_ids_by_thread == {}
-        assert supervisor.sent == []
     finally:
         await channel.stop(supervisor)
 

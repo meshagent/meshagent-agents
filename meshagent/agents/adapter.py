@@ -169,6 +169,13 @@ class LLMAdapter(Generic[TEvent]):
     def context_window_size(self, model: str) -> float:
         return float("inf")
 
+    def context_management_mode(self) -> str | None:
+        return None
+
+    def compaction_threshold(self, model: str) -> int | None:
+        del model
+        return None
+
     def needs_compaction(self, *, context: AgentSessionContext) -> bool:
         return False
 

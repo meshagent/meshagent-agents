@@ -82,6 +82,8 @@ _INBOUND_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_TURN_STEER: TurnSteer,
     AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
     AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
+    AGENT_MESSAGE_THREAD_OPEN: OpenThread,
+    AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
     AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,
     AGENT_MESSAGE_TOOL_CALL_REJECT: RejectAgentToolCall,
 }
@@ -360,14 +362,14 @@ class ChatChannel(ThreadedChannel):
                 thread_id=control_message.thread_id,
                 participant=sender,
             )
-            return True
+            return False
 
         if isinstance(control_message, CloseThread):
             self._remove_open_participant(
                 thread_id=control_message.thread_id,
                 participant_id=sender.id,
             )
-            return True
+            return False
 
         return False
 

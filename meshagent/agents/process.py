@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import mimetypes
 import re
 import shlex
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import (
@@ -34,6 +36,8 @@ from .version import __version__ as agents_version
 from .messages import (
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_CAPABILITIES_RESPONSE,
+    AGENT_MESSAGE_THREAD_CLOSE,
+    AGENT_MESSAGE_THREAD_OPEN,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_THREAD_EVENT,
@@ -45,6 +49,8 @@ from .messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STEER_REJECTED,
+    AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
@@ -53,6 +59,7 @@ from .messages import (
     AGENT_MESSAGE_TURN_STEER,
     AgentError,
     AgentFileContent,
+    AgentContextCompacted,
     AgentMessage,
     AgentTextContent,
     AgentToolCallApprovalRequested,
@@ -65,10 +72,14 @@ from .messages import (
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
     AgentThreadEvent,
+    AgentContextWindowUsage,
+    AgentUsageUpdated,
     ApproveAgentToolCall,
     CapabilitiesRequest,
     CapabilitiesResponse,
     ClearThread,
+    CloseThread,
+    OpenThread,
     RejectAgentToolCall,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
@@ -103,6 +114,8 @@ _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
         AGENT_MESSAGE_THREAD_CLEAR,
         AGENT_MESSAGE_CAPABILITIES_REQUEST,
         AGENT_MESSAGE_CAPABILITIES_RESPONSE,
+        AGENT_MESSAGE_THREAD_CLOSE,
+        AGENT_MESSAGE_THREAD_OPEN,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
         AGENT_MESSAGE_TOOL_CALL_REJECT,
         AGENT_MESSAGE_TURN_INTERRUPT,
@@ -883,6 +896,26 @@ class AgentSupervisor:
             )
             target_processes = [process]
 
+        elif message_type in {AGENT_MESSAGE_THREAD_OPEN, AGENT_MESSAGE_THREAD_CLOSE}:
+            if message_type == AGENT_MESSAGE_THREAD_OPEN:
+                thread_message = _coerce_message_data(message.data, OpenThread)
+            else:
+                thread_message = _coerce_message_data(message.data, CloseThread)
+
+            process = self._process_for_thread(thread_id=thread_message.thread_id)
+            if process is None and message_type == AGENT_MESSAGE_THREAD_OPEN:
+                process, _ = self._create_thread_process_for_route(
+                    thread_id=thread_message.thread_id
+                )
+            if process is None:
+                return
+
+            routed_message = self._copy_message(
+                message,
+                data=thread_message,
+            )
+            target_processes = [process]
+
         target_processes = await self._ensure_routing_processes_started(
             processes=target_processes
         )
@@ -1170,7 +1203,10 @@ class LLMAgentProcess(AgentProcess):
         self._format_message = format_message or default_format_message
         self.llm_adapter = llm_adapter
         self._turn_id: str | None = None
+        self._last_usage_update: AgentUsageUpdated | None = None
         self._handlers: dict[str, Callable[[Message], Awaitable[None]]] = {
+            AGENT_MESSAGE_THREAD_OPEN: self.on_thread_open,
+            AGENT_MESSAGE_THREAD_CLOSE: self.on_thread_close,
             AGENT_MESSAGE_TURN_START: self.on_turn_start,
             AGENT_MESSAGE_TURN_STEER: self.on_turn_steer,
             AGENT_MESSAGE_TURN_INTERRUPT: self.on_turn_interrupt,
@@ -1265,10 +1301,14 @@ class LLMAgentProcess(AgentProcess):
         del session_context
         return None
 
-    async def ensure_session_context(self, *, turn_id: str) -> AgentSessionContext:
+    async def ensure_session_context(
+        self, *, turn_id: str | None
+    ) -> AgentSessionContext:
+        restore_turn_id = turn_id or ""
         with tracer.start_as_current_span("agent.turn.context.load") as span:
             span.set_attribute("thread_id", self.thread_id)
-            span.set_attribute("turn_id", turn_id)
+            if turn_id is not None:
+                span.set_attribute("turn_id", turn_id)
             span.set_attribute("context.cached", self._session_context is not None)
             if self._session_context is None:
                 self._session_context = self.llm_adapter.create_session()
@@ -1285,13 +1325,218 @@ class LLMAgentProcess(AgentProcess):
 
                 with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
                     await self.on_restore_session_context(
-                        turn_id, self._session_context
+                        restore_turn_id, self._session_context
                     )
 
                 with tracer.start_as_current_span("agent.turn.context.start"):
                     await self._session_context.start()
 
         return self._session_context
+
+    @staticmethod
+    def _usage_context_window_total(value: float) -> int | None:
+        if not math.isfinite(value):
+            return None
+        return max(0, int(value))
+
+    @staticmethod
+    def _last_response_usage(usage: object) -> dict[str, float]:
+        if not isinstance(usage, dict):
+            return {}
+        out: dict[str, float] = {}
+        for key, value in usage.items():
+            if (
+                isinstance(key, str)
+                and isinstance(value, int | float)
+                and math.isfinite(value)
+            ):
+                out[key] = float(value)
+        return out
+
+    @staticmethod
+    def _last_response_context_used_tokens(value: object) -> int:
+        if isinstance(value, int | float) and math.isfinite(value):
+            return max(0, int(value))
+        return 0
+
+    def _cached_usage_update(
+        self,
+        *,
+        turn_id: str | None,
+    ) -> AgentUsageUpdated | None:
+        last_usage_update = self._last_usage_update
+        if last_usage_update is None:
+            return None
+        return last_usage_update.model_copy(update={"turn_id": turn_id})
+
+    async def _build_usage_update(
+        self,
+        *,
+        session: AgentSessionContext,
+        model: str,
+        toolkits: list[Toolkit],
+        turn_id: str | None,
+        include_usage: bool = True,
+        restore_context_from_storage: bool = False,
+    ) -> AgentUsageUpdated:
+        thread_id = self.thread_id
+        if thread_id is None:
+            raise RuntimeError("usage update requested without an active thread")
+
+        usage = (
+            self._last_response_usage(
+                session.metadata.get("last_response_flattened_usage")
+            )
+            if include_usage
+            else {}
+        )
+        context = session
+        restored_context_from_storage = False
+        if restore_context_from_storage:
+            thread_storage = self.thread_storage
+            if thread_storage is not None:
+                context = self.llm_adapter.create_session()
+                context.instructions = session.instructions
+                context.metadata.update(session.metadata)
+                context.previous_messages.extend(session.previous_messages)
+                context.previous_response_id = session.previous_response_id
+                thread_storage.restore_session_context(
+                    context=context,
+                    llm_adapter=self.llm_adapter,
+                )
+                restored_context_from_storage = True
+
+        used_tokens = self._last_response_context_used_tokens(
+            session.metadata.get("last_response_context_used_tokens")
+        )
+        count_missing_restored_usage = (
+            restored_context_from_storage
+            and include_usage
+            and len(usage) == 0
+            and (
+                len(context.messages) > 0
+                or len(context.previous_messages) > 0
+                or context.previous_response_id is not None
+            )
+        )
+        if count_missing_restored_usage:
+            try:
+                used_tokens = await self.llm_adapter.get_input_tokens(
+                    context=context,
+                    model=model,
+                    toolkits=toolkits,
+                )
+            except Exception:
+                logger.debug("failed to compute context window usage", exc_info=True)
+        compaction_threshold = session.metadata.get(
+            "last_response_compaction_threshold"
+        )
+        if isinstance(compaction_threshold, int):
+            used_tokens = min(used_tokens, compaction_threshold)
+        try:
+            context_window_size = self.llm_adapter.context_window_size(model)
+        except Exception:
+            logger.debug("failed to compute context window size", exc_info=True)
+            context_window_size = float("inf")
+        try:
+            context_management_mode = self.llm_adapter.context_management_mode()
+        except Exception:
+            logger.debug("failed to read context management mode", exc_info=True)
+            context_management_mode = None
+        try:
+            configured_compaction_threshold = self.llm_adapter.compaction_threshold(
+                model
+            )
+        except Exception:
+            logger.debug("failed to read compaction threshold", exc_info=True)
+            configured_compaction_threshold = None
+        return AgentUsageUpdated(
+            type=AGENT_EVENT_USAGE_UPDATED,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            usage=usage,
+            context_window=AgentContextWindowUsage(
+                used_tokens=max(0, int(used_tokens)),
+                total_tokens=self._usage_context_window_total(context_window_size),
+                compaction_mode=context_management_mode,
+                compaction_threshold=configured_compaction_threshold,
+            ),
+        )
+
+    async def _emit_usage_update(
+        self,
+        *,
+        session: AgentSessionContext,
+        model: str,
+        toolkits: list[Toolkit],
+        turn_id: str | None,
+        sender: Participant | None,
+        include_usage: bool = True,
+        restore_context_from_storage: bool = False,
+    ) -> None:
+        try:
+            usage_update = await self._build_usage_update(
+                session=session,
+                model=model,
+                toolkits=toolkits,
+                turn_id=turn_id,
+                include_usage=include_usage,
+                restore_context_from_storage=restore_context_from_storage,
+            )
+        except Exception:
+            logger.debug("failed to publish agent usage update", exc_info=True)
+            return
+
+        self._last_usage_update = usage_update
+        self.emit(sender=sender, payload=usage_update)
+
+    def _emit_cached_usage_update(
+        self,
+        *,
+        turn_id: str | None,
+        sender: Participant | None,
+    ) -> bool:
+        usage_update = self._cached_usage_update(turn_id=turn_id)
+        if usage_update is None:
+            return False
+        self.emit(sender=sender, payload=usage_update)
+        return True
+
+    async def _compact_context_if_needed(
+        self,
+        *,
+        session: AgentSessionContext,
+        model: str,
+        publish_event: Callable[[AgentMessage], None],
+    ) -> None:
+        if not self.llm_adapter.needs_compaction(context=session):
+            return
+
+        thread_id = self.thread_id
+        if thread_id is None:
+            return
+
+        thread_status_publisher = self.thread_status_publisher
+        if thread_status_publisher is not None:
+            await thread_status_publisher.set_thread_status(status="Compacting context")
+
+        try:
+            await self.llm_adapter.compact(context=session, model=model)
+        finally:
+            if thread_status_publisher is not None:
+                await thread_status_publisher.set_thread_status(status="Thinking")
+
+        publish_event(
+            AgentContextCompacted(
+                type=AGENT_EVENT_CONTEXT_COMPACTED,
+                thread_id=thread_id,
+                checkpoint_id=str(uuid.uuid4()),
+                path=thread_id,
+                through_sequence=0,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                messages=deepcopy(session.messages),
+            )
+        )
 
     def _record_accepted_turns(
         self,
@@ -2134,12 +2379,18 @@ class LLMAgentProcess(AgentProcess):
         session.metadata["thread_id"] = thread_id
         session.metadata["turn_id"] = turn_id
         try:
+            completed = False
             with tracer.start_as_current_span("agent.turn.llm") as span:
                 span.set_attribute("thread_id", thread_id)
                 span.set_attribute("turn_id", turn_id)
                 span.set_attribute("model", model)
                 span.set_attribute("toolkit_count", len(combined_toolkits))
                 span.set_attribute("tool_choice.configured", tool_choice is not None)
+                await self._compact_context_if_needed(
+                    session=session,
+                    model=model,
+                    publish_event=publish_event,
+                )
                 next_task = asyncio.create_task(
                     self.llm_adapter.next(
                         context=session,
@@ -2156,7 +2407,17 @@ class LLMAgentProcess(AgentProcess):
                 )
                 self._active_next_task = next_task
                 await next_task
+                completed = self._interrupt_requested_turn_id != turn_id
         finally:
+            await self._emit_usage_update(
+                session=session,
+                model=model,
+                toolkits=combined_toolkits,
+                turn_id=turn_id,
+                sender=sender,
+                include_usage=completed,
+                restore_context_from_storage=not completed,
+            )
             if had_thread_id:
                 session.metadata["thread_id"] = previous_thread_id
             else:
@@ -2515,6 +2776,23 @@ class LLMAgentProcess(AgentProcess):
 
         if not self._stop.is_set():
             self._schedule_next_turn()
+
+    async def on_thread_open(self, message: Message) -> None:
+        _coerce_message_data(message.data, OpenThread)
+        if self._emit_cached_usage_update(turn_id=self._turn_id, sender=message.sender):
+            return
+        session = await self.ensure_session_context(turn_id=None)
+        await self._emit_usage_update(
+            session=session,
+            model=self.llm_adapter.default_model(),
+            toolkits=self._toolkits,
+            turn_id=self._turn_id,
+            sender=message.sender,
+            restore_context_from_storage=True,
+        )
+
+    async def on_thread_close(self, message: Message) -> None:
+        _coerce_message_data(message.data, CloseThread)
 
     async def on_turn_start(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnStart)

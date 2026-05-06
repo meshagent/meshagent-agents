@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -26,6 +27,7 @@ from .messages import (
     AgentToolCallPending,
     AgentToolCallInProgress,
     AgentToolCallStarted,
+    AgentUsageUpdated,
     TurnStart,
     TurnSteer,
 )
@@ -197,12 +199,26 @@ class DefaultAgentEventReader:
             return
 
         if isinstance(message, AgentContextCompacted):
+            self.finalize()
             self._context.metadata["last_compaction"] = {
                 "checkpoint_id": message.checkpoint_id,
                 "path": message.path,
                 "through_sequence": message.through_sequence,
                 "created_at": message.created_at,
             }
+            if message.messages is not None:
+                self._text_by_item_id.clear()
+                self._files_by_item_id.clear()
+                self._tool_calls_by_item_id.clear()
+                self._context.messages.clear()
+                self._context.messages.extend(deepcopy(message.messages))
+                self._context.previous_messages.clear()
+                self._context.previous_response_id = None
+            return
+
+        if isinstance(message, AgentUsageUpdated):
+            self._context.usage.clear()
+            self._context.usage.update(message.usage)
             return
 
     def finalize(self) -> None:

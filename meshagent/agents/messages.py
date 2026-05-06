@@ -61,6 +61,7 @@ AGENT_EVENT_IMAGE_GENERATION_PARTIAL = "meshagent.agent.image_generation.partial
 AGENT_EVENT_IMAGE_GENERATION_COMPLETED = "meshagent.agent.image_generation.completed"
 AGENT_EVENT_IMAGE_GENERATION_FAILED = "meshagent.agent.image_generation.failed"
 AGENT_EVENT_CONTEXT_COMPACTED = "meshagent.agent.context.compacted"
+AGENT_EVENT_USAGE_UPDATED = "meshagent.agent.usage.updated"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
 AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
 
@@ -408,6 +409,21 @@ class AgentContextCompacted(AgentMessage):
     path: str
     through_sequence: int
     created_at: str | None = None
+    messages: list[dict[str, Any]] | None = None
+
+
+class AgentContextWindowUsage(BaseModel):
+    used_tokens: int
+    total_tokens: int | None = None
+    compaction_mode: str | None = None
+    compaction_threshold: int | None = None
+
+
+class AgentUsageUpdated(AgentMessage):
+    type: Literal[AGENT_EVENT_USAGE_UPDATED]
+    turn_id: str | None = None
+    usage: dict[str, float] = Field(default_factory=dict)
+    context_window: AgentContextWindowUsage
 
 
 class ApproveAgentToolCall(AgentMessage):
@@ -462,6 +478,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED: AgentImageGenerationCompleted,
     AGENT_EVENT_IMAGE_GENERATION_FAILED: AgentImageGenerationFailed,
     AGENT_EVENT_CONTEXT_COMPACTED: AgentContextCompacted,
+    AGENT_EVENT_USAGE_UPDATED: AgentUsageUpdated,
     AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,
     AGENT_MESSAGE_TOOL_CALL_REJECT: RejectAgentToolCall,
 }

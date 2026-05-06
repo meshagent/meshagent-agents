@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
@@ -51,6 +52,7 @@ from .messages import (
     AgentToolCallLogDelta,
     AgentToolCallPending,
     AgentToolCallStarted,
+    AgentUsageUpdated,
     ThreadCleared,
     TurnEnded,
     TurnInterrupted,
@@ -577,6 +579,18 @@ class DatasetThreadStorage(ThreadStorage):
             )
             return
 
+        if isinstance(message, AgentUsageUpdated):
+            await self._append_row(
+                turn_id=message.turn_id,
+                item_id=message.message_id,
+                data={
+                    "kind": "usage",
+                    "status": "completed",
+                    "message": message.model_dump(mode="json"),
+                },
+            )
+            return
+
         if isinstance(
             message,
             (
@@ -1086,6 +1100,18 @@ class DatasetThreadStorage(ThreadStorage):
     ) -> None:
         data = row.data
         kind = data.get("kind")
+        if kind == "compaction":
+            message = self._stored_agent_message(value=data.get("message"))
+            if (
+                isinstance(message, AgentContextCompacted)
+                and message.messages is not None
+            ):
+                context.messages.clear()
+                context.messages.extend(deepcopy(message.messages))
+                context.previous_messages.clear()
+                context.previous_response_id = None
+            return
+
         role = data.get("role")
         text = data.get("text")
         if kind == "message" and isinstance(text, str) and text != "":
@@ -1134,6 +1160,8 @@ class DatasetThreadStorage(ThreadStorage):
         message = self._stored_agent_message(value=data.get("message"))
         if message is not None:
             if kind == "compaction" and isinstance(message, AgentContextCompacted):
+                return [message]
+            if kind == "usage" and isinstance(message, AgentUsageUpdated):
                 return [message]
             if kind == "event" and isinstance(message, AgentThreadEvent):
                 return [message]

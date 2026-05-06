@@ -23,7 +23,9 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
+    AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_TURN_START,
+    AgentContextWindowUsage,
     AgentContextCompacted,
     AgentError,
     AgentGeneratedImage,
@@ -39,6 +41,7 @@ from meshagent.agents.messages import (
     AgentToolCallLogDelta,
     AgentToolCallLogLine,
     AgentToolCallStarted,
+    AgentUsageUpdated,
     TurnEnded,
     TurnInterrupted,
     TurnStart,
@@ -292,6 +295,126 @@ async def test_dataset_thread_storage_optimizes_after_append_threshold() -> None
     assert optimize_call["config"].compact_files is True
     assert optimize_call["config"].optimize_indices is False
     assert optimize_call["config"].cleanup_old_versions is False
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_persists_usage_updates() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentUsageUpdated(
+            type=AGENT_EVENT_USAGE_UPDATED,
+            thread_id="dataset://threads/demo",
+            message_id="usage-1",
+            turn_id="turn-1",
+            usage={"input_tokens": 120.0, "output_tokens": 30.0},
+            context_window=AgentContextWindowUsage(
+                used_tokens=480,
+                total_tokens=128000,
+                compaction_mode="auto",
+                compaction_threshold=64000,
+            ),
+        )
+    )
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(rows) == 1
+    data = _row_data(rows[0])
+    assert data["kind"] == "usage"
+    assert data["status"] == "completed"
+    assert data["message"]["type"] == AGENT_EVENT_USAGE_UPDATED
+    assert data["message"]["thread_id"] == "dataset://threads/demo"
+    assert data["message"]["turn_id"] == "turn-1"
+    assert data["message"]["usage"] == {
+        "input_tokens": 120.0,
+        "output_tokens": 30.0,
+    }
+    assert data["message"]["context_window"] == {
+        "used_tokens": 480,
+        "total_tokens": 128000,
+        "compaction_mode": "auto",
+        "compaction_threshold": 64000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_restores_usage_updates() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentUsageUpdated(
+            type=AGENT_EVENT_USAGE_UPDATED,
+            thread_id="dataset://threads/demo",
+            message_id="usage-1",
+            turn_id="turn-1",
+            usage={"gpt-test.input_tokens": 120.0, "gpt-test.output_tokens": 30.0},
+            context_window=AgentContextWindowUsage(
+                used_tokens=120,
+                total_tokens=128000,
+            ),
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
+
+    assert context.usage == {
+        "gpt-test.input_tokens": 120.0,
+        "gpt-test.output_tokens": 30.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_restores_compacted_context_messages() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="old-answer",
+            text="old answer",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentEnded(
+            type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="old-answer",
+        )
+    )
+    compacted_messages = [
+        {
+            "id": "compaction-1",
+            "type": "compaction",
+            "encrypted_content": "opaque",
+        }
+    ]
+    storage.push_message(
+        message=AgentContextCompacted(
+            type=AGENT_EVENT_CONTEXT_COMPACTED,
+            thread_id="dataset://threads/demo",
+            checkpoint_id="compaction-1",
+            path="dataset://threads/demo",
+            through_sequence=1,
+            messages=compacted_messages,
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
+
+    assert context.messages == compacted_messages
 
 
 @pytest.mark.asyncio

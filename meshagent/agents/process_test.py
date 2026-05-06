@@ -43,7 +43,10 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STEER_REJECTED,
+    AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_THREAD_CLEAR,
+    AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
     AGENT_MESSAGE_TURN_INTERRUPT,
@@ -51,10 +54,12 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_TURN_STEER,
     ApproveAgentToolCall,
     AgentError,
+    AgentContextCompacted,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
     AgentMessage,
+    AgentTextContent,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
     AgentReasoningContentStarted,
@@ -67,6 +72,7 @@ from meshagent.agents.messages import (
     AgentToolCallStarted,
     AgentToolCallEnded,
     ClearThread,
+    OpenThread,
     RejectAgentToolCall,
     TurnStart,
     TurnStartRejected,
@@ -269,6 +275,33 @@ class _LifecycleThreadStorage:
 
     def make_toolkit(self) -> Toolkit:
         return Toolkit(name="thread-storage", tools=[])
+
+
+class _RestoringLifecycleThreadStorage(_LifecycleThreadStorage):
+    def restore_session_context(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter=None,
+    ) -> None:
+        del llm_adapter
+        assistant_text_by_item_id: dict[str, list[str]] = {}
+        for message in self.messages:
+            if isinstance(message, TurnStart):
+                for item in message.content:
+                    if isinstance(item, AgentTextContent) and item.text != "":
+                        context.append_user_message(item.text)
+                continue
+
+            if isinstance(message, AgentTextContentDelta):
+                assistant_text_by_item_id.setdefault(message.item_id, []).append(
+                    message.text
+                )
+
+        for parts in assistant_text_by_item_id.values():
+            text = "".join(parts)
+            if text != "":
+                context.append_assistant_message(text)
 
 
 class _StorageThreadRecordingProcess(AgentProcess):
@@ -561,6 +594,327 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
             event_handler({"type": "adapter.event", "call_index": len(self.calls) - 1})
         self.call_event.set()
         return {"ok": True}
+
+
+class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
+    def __init__(self) -> None:
+        super().__init__(session=_LifecycleSession())
+        self.input_token_calls = 0
+
+    def context_window_size(self, model: str) -> float:
+        assert model in {"default-model", "gpt-test"}
+        return 128000
+
+    async def get_input_tokens(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str,
+        toolkits: list | None = None,
+        output_schema: dict | None = None,
+    ) -> int:
+        del output_schema
+        assert model in {"default-model", "gpt-test"}
+        assert toolkits is not None
+        self.input_token_calls += 1
+        return 120 + (self.input_token_calls * 10)
+
+    async def next(self, **kwargs) -> Any:
+        context = kwargs["context"]
+        context.usage["gpt-test.input_tokens"] = 1000
+        context.usage["gpt-test.output_tokens"] = 250
+        context.metadata["last_response_flattened_usage"] = {
+            "gpt-test.input_tokens": 1000.0,
+            "gpt-test.output_tokens": 250.0,
+        }
+        context.metadata["last_response_context_used_tokens"] = 1250
+        return await super().next(**kwargs)
+
+
+class _UsageCountingFailingLLMAdapter(_UsageRecordingLLMAdapter):
+    async def get_input_tokens(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str,
+        toolkits: list | None = None,
+        output_schema: dict | None = None,
+    ) -> int:
+        del context
+        del model
+        del toolkits
+        del output_schema
+        self.input_token_calls += 1
+        raise RuntimeError("count failed")
+
+
+class _CompactedUsageLLMAdapter(_UsageRecordingLLMAdapter):
+    async def next(self, **kwargs) -> Any:
+        context = kwargs["context"]
+        context.metadata["last_response_compaction_threshold"] = 250
+        return await super().next(**kwargs)
+
+
+class _OpenAIStyleUsageLLMAdapter(_UsageRecordingLLMAdapter):
+    async def next(self, **kwargs) -> Any:
+        context = kwargs["context"]
+        previous_input = float(context.usage.get("gpt-test.input_tokens", 0.0))
+        previous_output = float(context.usage.get("gpt-test.output_tokens", 0.0))
+        context.usage["gpt-test.input_tokens"] = previous_input + 300000.0
+        context.usage["gpt-test.output_tokens"] = previous_output + 1200.0
+        context.metadata["last_response_usage"] = {
+            "input_tokens": 64000,
+            "output_tokens": 1200,
+        }
+        context.metadata["last_response_flattened_usage"] = {
+            "gpt-test.input_tokens": 64000.0,
+            "gpt-test.output_tokens": 1200.0,
+        }
+        context.metadata["last_response_context_used_tokens"] = 65200
+        return await _RecordingLLMAdapter.next(self, **kwargs)
+
+
+class _CompactingLLMAdapter(_RecordingLLMAdapter):
+    def __init__(self) -> None:
+        super().__init__(session=_LifecycleSession())
+        self.compact_calls = 0
+
+    def needs_compaction(self, *, context: AgentSessionContext) -> bool:
+        del context
+        return self.compact_calls == 0
+
+    async def compact(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str | None = None,
+    ) -> None:
+        del model
+        self.compact_calls += 1
+        context.messages.clear()
+        context.messages.append(
+            {"id": "compaction-1", "type": "compaction", "encrypted_content": "opaque"}
+        )
+
+
+class _ThresholdManualCompactionLLMAdapter(_RecordingLLMAdapter):
+    def __init__(self, *, initial_tokens: int, compact_threshold: int) -> None:
+        session = _LifecycleSession()
+        session.metadata["token_count"] = initial_tokens
+        super().__init__(session=session)
+        self.compact_threshold = compact_threshold
+        self.compact_calls: list[int] = []
+
+    def context_window_size(self, model: str) -> float:
+        assert model == "gpt-test"
+        return 128000
+
+    def context_management_mode(self) -> str | None:
+        return "standalone"
+
+    def compaction_threshold(self, model: str) -> int | None:
+        assert model == "gpt-test"
+        return self.compact_threshold
+
+    async def get_input_tokens(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str,
+        toolkits: list | None = None,
+        output_schema: dict | None = None,
+    ) -> int:
+        del toolkits
+        del output_schema
+        assert model == "gpt-test"
+        return int(context.metadata.get("token_count", 0))
+
+    def needs_compaction(self, *, context: AgentSessionContext) -> bool:
+        return int(context.metadata.get("token_count", 0)) >= self.compact_threshold
+
+    async def compact(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str | None = None,
+    ) -> None:
+        assert model == "gpt-test"
+        token_count = int(context.metadata.get("token_count", 0))
+        self.compact_calls.append(token_count)
+        context.messages.clear()
+        context.previous_messages.clear()
+        context.previous_response_id = None
+        context.messages.append(
+            {
+                "id": "manual-compaction-1",
+                "type": "compaction",
+                "encrypted_content": "manual-opaque",
+            }
+        )
+        context.metadata["token_count"] = 128
+
+    async def next(self, **kwargs) -> Any:
+        context = kwargs["context"]
+        context.usage["gpt-test.input_tokens"] = float(
+            context.metadata.get("token_count", 0)
+        )
+        context.metadata["last_response_flattened_usage"] = {
+            "gpt-test.input_tokens": float(context.metadata.get("token_count", 0))
+        }
+        context.metadata["last_response_context_used_tokens"] = int(
+            context.metadata.get("token_count", 0)
+        )
+        return await super().next(**kwargs)
+
+
+class _ThresholdAutoCompactionLLMAdapter(_RecordingLLMAdapter):
+    def __init__(self, *, initial_tokens: int, compact_threshold: int) -> None:
+        session = _LifecycleSession()
+        session.metadata["token_count"] = initial_tokens
+        super().__init__(session=session)
+        self.compact_threshold = compact_threshold
+        self.compaction_calls: list[int] = []
+
+    def context_window_size(self, model: str) -> float:
+        assert model == "gpt-test"
+        return 128000
+
+    def context_management_mode(self) -> str | None:
+        return "auto"
+
+    def compaction_threshold(self, model: str) -> int | None:
+        assert model == "gpt-test"
+        return self.compact_threshold
+
+    async def get_input_tokens(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str,
+        toolkits: list | None = None,
+        output_schema: dict | None = None,
+    ) -> int:
+        del toolkits
+        del output_schema
+        assert model == "gpt-test"
+        return int(context.metadata.get("token_count", 0))
+
+    async def next(self, **kwargs) -> Any:
+        context = kwargs["context"]
+        event_handler = kwargs.get("event_handler")
+        token_count = int(context.metadata.get("token_count", 0))
+        if token_count >= self.compact_threshold:
+            self.compaction_calls.append(token_count)
+            context.messages.clear()
+            context.previous_messages.clear()
+            context.previous_response_id = None
+            context.messages.append(
+                {
+                    "id": "auto-compaction-1",
+                    "type": "compaction",
+                    "encrypted_content": "auto-opaque",
+                }
+            )
+            context.metadata["token_count"] = 96
+            if event_handler is not None:
+                event_handler(
+                    AgentContextCompacted(
+                        type=AGENT_EVENT_CONTEXT_COMPACTED,
+                        thread_id=str(context.metadata["thread_id"]),
+                        checkpoint_id="auto-compaction-1",
+                        path=str(context.metadata["thread_id"]),
+                        through_sequence=0,
+                        messages=[context.messages[0]],
+                    )
+                )
+        context.usage["gpt-test.input_tokens"] = float(
+            context.metadata.get("token_count", 0)
+        )
+        context.metadata["last_response_flattened_usage"] = {
+            "gpt-test.input_tokens": float(context.metadata.get("token_count", 0))
+        }
+        context.metadata["last_response_context_used_tokens"] = int(
+            context.metadata.get("token_count", 0)
+        )
+        return await super().next(**kwargs)
+
+
+class _CancellationUsageLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.call_started = asyncio.Event()
+        self.call_cancelled = asyncio.Event()
+        self.input_context_messages: list[list[dict[str, Any]]] = []
+
+    def default_model(self) -> str:
+        return "gpt-test"
+
+    def create_session(self) -> AgentSessionContext:
+        return _LifecycleSession()
+
+    def context_window_size(self, model: str) -> float:
+        assert model == "gpt-test"
+        return 128000
+
+    async def get_input_tokens(
+        self,
+        *,
+        context: AgentSessionContext,
+        model: str,
+        toolkits: list | None = None,
+        output_schema: dict | None = None,
+    ) -> int:
+        del toolkits
+        del output_schema
+        assert model == "gpt-test"
+        self.input_context_messages.append([*context.messages])
+        total = 0
+        for message in context.messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                total += len(content)
+        return total
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del caller
+        del toolkits
+        del output_schema
+        del steering_callback
+        del on_behalf_of
+        del options
+        del tool_choice
+        assert model == "gpt-test"
+
+        context.usage["gpt-test.input_tokens"] = 999
+        if event_handler is not None:
+            event_handler(
+                AgentTextContentDelta(
+                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    thread_id="thread-1",
+                    turn_id=str(context.metadata["turn_id"]),
+                    item_id="assistant-1",
+                    text="partial reply",
+                )
+            )
+        self.call_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.call_cancelled.set()
+            raise
 
 
 class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
@@ -2335,6 +2689,525 @@ async def test_llm_agent_process_passes_turn_id_to_restore_session_context() -> 
     assert process.restore_calls[0]["session_context"] is adapter.session
     assert adapter.calls[0]["caller"] is room.local_participant
 
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapter_next() -> (
+    None
+):
+    adapter = _UsageRecordingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 1
+    )
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    started_payload = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]
+    turn_id = started_payload["turn_id"]
+    usage_payloads = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)
+
+    assert [payload["turn_id"] for payload in usage_payloads] == [
+        None,
+        turn_id,
+    ]
+    assert [payload["context_window"]["used_tokens"] for payload in usage_payloads] == [
+        0,
+        1250,
+    ]
+    assert all(
+        payload["context_window"]["total_tokens"] == 128000
+        for payload in usage_payloads
+    )
+    assert usage_payloads[0]["usage"] == {}
+    assert usage_payloads[1]["usage"] == {
+        "gpt-test.input_tokens": 1000.0,
+        "gpt-test.output_tokens": 250.0,
+    }
+    assert adapter.input_token_calls == 0
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 3
+    )
+    usage_payloads = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)
+
+    assert usage_payloads[2]["turn_id"] is None
+    assert usage_payloads[2]["context_window"]["used_tokens"] == 1250
+    assert usage_payloads[2]["usage"] == {
+        "gpt-test.input_tokens": 1000.0,
+        "gpt-test.output_tokens": 250.0,
+    }
+    assert adapter.input_token_calls == 0
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_counts_open_context_only_when_saved_usage_missing() -> (
+    None
+):
+    adapter = _UsageRecordingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    thread_storage = _RestoringLifecycleThreadStorage(path="thread-1")
+    thread_storage.messages.append(
+        TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="thread-1",
+            content=[AgentTextContent(type="text", text="saved prompt")],
+        )
+    )
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 1
+    )
+
+    usage_payload = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)[0]
+    assert usage_payload["usage"] == {}
+    assert usage_payload["context_window"]["used_tokens"] == 130
+    assert adapter.input_token_calls == 1
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_usage_without_context_counting() -> None:
+    adapter = _UsageCountingFailingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 1
+    )
+
+    usage_payload = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)[0]
+    assert usage_payload["context_window"]["used_tokens"] == 1250
+    assert usage_payload["usage"] == {
+        "gpt-test.input_tokens": 1000.0,
+        "gpt-test.output_tokens": 250.0,
+    }
+    assert adapter.input_token_calls == 0
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_uses_last_flattened_usage_not_cumulative_usage() -> (
+    None
+):
+    adapter = _OpenAIStyleUsageLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    for _ in range(2):
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    model="gpt-test",
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 2
+    )
+
+    usage_payload = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)[-1]
+    assert usage_payload["usage"] == {
+        "gpt-test.input_tokens": 64000.0,
+        "gpt-test.output_tokens": 1200.0,
+    }
+    assert usage_payload["context_window"]["used_tokens"] == 65200
+    assert usage_payload["context_window"]["total_tokens"] == 128000
+
+    await process.stop(supervisor)
+
+
+def test_llm_agent_process_context_window_usage_uses_adapter_context_used_value() -> (
+    None
+):
+    assert LLMAgentProcess._last_response_context_used_tokens(330.0) == 330
+    assert (
+        LLMAgentProcess._last_response_context_used_tokens({"input_tokens": 330}) == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_caps_context_usage_after_compaction_event() -> None:
+    adapter = _CompactedUsageLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 1
+    )
+
+    usage_payload = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)[0]
+    assert usage_payload["usage"] == {
+        "gpt-test.input_tokens": 1000.0,
+        "gpt-test.output_tokens": 250.0,
+    }
+    assert usage_payload["context_window"] == {
+        "used_tokens": 250,
+        "total_tokens": 128000,
+        "compaction_mode": None,
+        "compaction_threshold": None,
+    }
+    assert adapter.input_token_calls == 0
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_compaction_status_and_event() -> None:
+    adapter = _CompactingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    publisher = _RecordingThreadStatusPublisher()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    compaction_payloads = supervisor.payloads(
+        message_type=AGENT_EVENT_CONTEXT_COMPACTED
+    )
+    assert adapter.compact_calls == 1
+    assert len(compaction_payloads) == 1
+    assert compaction_payloads[0]["messages"] == [
+        {"id": "compaction-1", "type": "compaction", "encrypted_content": "opaque"}
+    ]
+    assert [entry["status"] for entry in publisher.statuses[:3]] == [
+        "Thinking",
+        "Compacting context",
+        "Thinking",
+    ]
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_manual_compaction_emits_event_and_compacted_usage_at_threshold() -> (
+    None
+):
+    adapter = _ThresholdManualCompactionLLMAdapter(
+        initial_tokens=1000,
+        compact_threshold=1000,
+    )
+    supervisor = _RecordingSupervisor()
+    publisher = _RecordingThreadStatusPublisher()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    assert adapter.compact_calls == [1000]
+    compaction_payloads = supervisor.payloads(
+        message_type=AGENT_EVENT_CONTEXT_COMPACTED
+    )
+    assert len(compaction_payloads) == 1
+    assert compaction_payloads[0]["messages"] == [
+        {
+            "id": "manual-compaction-1",
+            "type": "compaction",
+            "encrypted_content": "manual-opaque",
+        }
+    ]
+    usage_payloads = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)
+    assert usage_payloads[-1]["context_window"] == {
+        "used_tokens": 128,
+        "total_tokens": 128000,
+        "compaction_mode": "standalone",
+        "compaction_threshold": 1000,
+    }
+    assert [entry["status"] for entry in publisher.statuses[:3]] == [
+        "Thinking",
+        "Compacting context",
+        "Thinking",
+    ]
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_auto_compaction_emits_event_and_compacted_usage_at_threshold() -> (
+    None
+):
+    adapter = _ThresholdAutoCompactionLLMAdapter(
+        initial_tokens=1000,
+        compact_threshold=1000,
+    )
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    assert adapter.compaction_calls == [1000]
+    compaction_payloads = supervisor.payloads(
+        message_type=AGENT_EVENT_CONTEXT_COMPACTED
+    )
+    assert len(compaction_payloads) == 1
+    assert compaction_payloads[0]["messages"] == [
+        {
+            "id": "auto-compaction-1",
+            "type": "compaction",
+            "encrypted_content": "auto-opaque",
+        }
+    ]
+    usage_payloads = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)
+    assert usage_payloads[-1]["context_window"] == {
+        "used_tokens": 96,
+        "total_tokens": 128000,
+        "compaction_mode": "auto",
+        "compaction_threshold": 1000,
+    }
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_auto_compaction_does_not_emit_below_threshold() -> (
+    None
+):
+    adapter = _ThresholdAutoCompactionLLMAdapter(
+        initial_tokens=999,
+        compact_threshold=1000,
+    )
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    assert adapter.compaction_calls == []
+    assert supervisor.payloads(message_type=AGENT_EVENT_CONTEXT_COMPACTED) == []
+    usage_payloads = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)
+    assert usage_payloads[-1]["context_window"] == {
+        "used_tokens": 999,
+        "total_tokens": 128000,
+        "compaction_mode": "auto",
+        "compaction_threshold": 1000,
+    }
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_empty_usage_after_cancelled_adapter_call() -> (
+    None
+):
+    adapter = _CancellationUsageLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    thread_storage = _RestoringLifecycleThreadStorage(path="thread-1")
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_started.wait(), timeout=1)
+    turn_id = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]["turn_id"]
+    process.send(
+        Message(
+            data=TurnInterrupt(
+                type=AGENT_MESSAGE_TURN_INTERRUPT,
+                thread_id="thread-1",
+                turn_id=turn_id,
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_cancelled.wait(), timeout=1)
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 1
+    )
+
+    usage_payload = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)[0]
+    assert usage_payload["turn_id"] == turn_id
+    assert usage_payload["usage"] == {}
+    assert usage_payload["context_window"] == {
+        "used_tokens": 0,
+        "total_tokens": 128000,
+        "compaction_mode": None,
+        "compaction_threshold": None,
+    }
+    assert adapter.input_context_messages == []
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+    assert supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)[0]["error"] == {
+        "message": "turn cancelled",
+        "code": "cancelled",
+    }
     await process.stop(supervisor)
 
 
