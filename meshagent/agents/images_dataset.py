@@ -39,7 +39,7 @@ class ImagesDataset:
                 pa.field("id", pa.string(), nullable=False),
                 pa.field(
                     "data",
-                    pa.binary(),
+                    pa.large_binary(),
                     nullable=False,
                     metadata={"content-type": "image/*"},
                 ),
