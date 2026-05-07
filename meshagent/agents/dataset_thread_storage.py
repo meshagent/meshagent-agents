@@ -1181,6 +1181,9 @@ class DatasetThreadStorage(ThreadStorage):
             if role == "user":
                 request = self._stored_agent_message(value=data.get("request"))
                 if isinstance(request, (TurnStart, TurnSteer)):
+                    sender_name = data.get("sender_name")
+                    if isinstance(sender_name, str) and sender_name.strip() != "":
+                        return [request.model_copy(update={"sender_name": sender_name})]
                     return [request]
                 return []
 
@@ -1368,6 +1371,13 @@ class DatasetThreadStorage(ThreadStorage):
                 self.count_tool,
             ],
         )
+
+    def agent_messages(self) -> list[AgentMessage]:
+        messages: list[AgentMessage] = []
+        for row in self._rows:
+            messages.extend(self._messages_from_row(row=row))
+
+        return messages
 
     @tool(
         name="get_message_range",

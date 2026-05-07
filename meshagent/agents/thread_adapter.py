@@ -211,16 +211,17 @@ class ThreadAdapter(ABC):
         if len(elements) == 0:
             return "no messages were found within the specified range"
 
-        response = "matching messages:\n"
-
+        formatted_messages = []
         for element in elements:
-            response = response + self._format_message(
-                user_name=element["author_name"],
-                message=element["text"],
-                iso_timestamp=element["created_at"],
+            formatted_messages.append(
+                self._format_message(
+                    user_name=element["author_name"],
+                    message=element["text"],
+                    iso_timestamp=element["created_at"],
+                )
             )
 
-        return response
+        return "matching messages:\n" + "\n".join(formatted_messages)
 
     @tool(
         name="count_current_thread_messages",
@@ -275,16 +276,17 @@ class ThreadAdapter(ABC):
         if len(elements) == 0:
             return "no messages were found with the specified pattern"
 
-        response = "matching messages:\n"
-
+        formatted_messages = []
         for element in elements:
-            response = response + self._format_message(
-                user_name=element["author_name"],
-                message=element["text"],
-                iso_timestamp=element["created_at"],
+            formatted_messages.append(
+                self._format_message(
+                    user_name=element["author_name"],
+                    message=element["text"],
+                    iso_timestamp=element["created_at"],
+                )
             )
 
-        return response
+        return "matching messages:\n" + "\n".join(formatted_messages)
 
     def append_messages(self, *, context: AgentSessionContext) -> None:
         doc_messages = None

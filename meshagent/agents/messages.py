@@ -68,6 +68,8 @@ AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
 
 
 class AgentMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     type: str
     thread_id: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))

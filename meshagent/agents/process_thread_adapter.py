@@ -34,6 +34,9 @@ from meshagent.tools import Toolkit, tool
 from .context import AgentSessionContext
 from .images_dataset import ImagesDataset
 from .messages import (
+    AGENT_EVENT_FILE_CONTENT_DELTA,
+    AGENT_EVENT_TEXT_CONTENT_DELTA,
+    AGENT_MESSAGE_TURN_START,
     AGENT_EVENT_TURN_INTERRUPTED,
     AgentError,
     AgentFileContent,
@@ -550,6 +553,80 @@ class MeshDocumentThreadStorage(ThreadStorage):
             ],
         )
 
+    def agent_messages(self) -> list[AgentMessage]:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        messages = self._message_elements()
+        if self._restore_message_count is not None:
+            messages = messages[: self._restore_message_count]
+
+        agent_messages: list[AgentMessage] = []
+        for index, message in enumerate(messages):
+            message_id = self._attribute_as_str(message, "id")
+            if message_id == "":
+                message_id = self._attribute_as_str(message, "turn_id")
+            if message_id == "":
+                message_id = f"{self._thread_path}:message:{index}"
+
+            author_name = self._attribute_as_str(message, "author_name")
+            role = self._message_role(message=message, author_name=author_name)
+
+            text = self._attribute_as_str(message, "text")
+            file_paths = [
+                self._attribute_as_str(child, "path")
+                for child in message.get_children()
+                if child.tag_name == "file"
+            ]
+            file_paths = [path for path in file_paths if path != ""]
+            if text == "" and len(file_paths) == 0:
+                continue
+
+            if role in {"agent", "assistant"}:
+                turn_id = self._attribute_as_str(message, "turn_id") or message_id
+                if text != "":
+                    agent_messages.append(
+                        AgentTextContentDelta(
+                            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                            thread_id=self._thread_path,
+                            message_id=message_id,
+                            turn_id=turn_id,
+                            item_id=message_id,
+                            text=text,
+                        ).model_copy(update={"sender_name": author_name})
+                    )
+                for file_index, path in enumerate(file_paths):
+                    item_id = f"{message_id}:file:{file_index}"
+                    agent_messages.append(
+                        AgentFileContentDelta(
+                            type=AGENT_EVENT_FILE_CONTENT_DELTA,
+                            thread_id=self._thread_path,
+                            message_id=item_id,
+                            turn_id=turn_id,
+                            item_id=item_id,
+                            url=path,
+                        ).model_copy(update={"sender_name": author_name})
+                    )
+                continue
+
+            content: list[AgentTextContent | AgentFileContent] = []
+            if text != "":
+                content.append(AgentTextContent(type="text", text=text))
+            for path in file_paths:
+                content.append(AgentFileContent(type="file", url=path))
+            if len(content) == 0:
+                continue
+            agent_messages.append(
+                TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id=self._thread_path,
+                    message_id=message_id,
+                    content=content,
+                ).model_copy(update={"sender_name": author_name})
+            )
+
+        return agent_messages
+
     @tool(
         name="get_message_range",
         description="gets a range of messages, index 0 is the first message in the conversation",
@@ -567,14 +644,16 @@ class MeshDocumentThreadStorage(ThreadStorage):
         if len(elements) == 0:
             return "no messages were found within the specified range"
 
-        response = "matching messages:\n"
+        formatted_messages = []
         for element in elements:
-            response = response + self._format_message(
-                user_name=element["author_name"],
-                message=element["text"],
-                iso_timestamp=element["created_at"],
+            formatted_messages.append(
+                self._format_message(
+                    user_name=element["author_name"],
+                    message=element["text"],
+                    iso_timestamp=element["created_at"],
+                )
             )
-        return response
+        return "matching messages:\n" + "\n".join(formatted_messages)
 
     @tool(
         name="count_current_thread_messages",
@@ -628,14 +707,16 @@ class MeshDocumentThreadStorage(ThreadStorage):
         if len(elements) == 0:
             return "no messages were found with the specified pattern"
 
-        response = "matching messages:\n"
+        formatted_messages = []
         for element in elements:
-            response = response + self._format_message(
-                user_name=element["author_name"],
-                message=element["text"],
-                iso_timestamp=element["created_at"],
+            formatted_messages.append(
+                self._format_message(
+                    user_name=element["author_name"],
+                    message=element["text"],
+                    iso_timestamp=element["created_at"],
+                )
             )
-        return response
+        return "matching messages:\n" + "\n".join(formatted_messages)
 
     def restore_session_context(
         self,

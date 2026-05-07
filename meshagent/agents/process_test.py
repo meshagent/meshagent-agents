@@ -18,6 +18,7 @@ from meshagent.agents.thread_status_publisher import (
     AgentMessageThreadStatusPublisher,
     ParticipantAttributeThreadStatusPublisher,
 )
+from meshagent.agents.thread_schema import thread_schema
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.messages import (
@@ -97,7 +98,7 @@ from meshagent.agents.process import (
     Message,
 )
 from meshagent.agents.thread_adapter import ThreadAdapter
-from meshagent.api import Participant, RemoteParticipant
+from meshagent.api import MeshDocument, Participant, RemoteParticipant
 from meshagent.api.messaging import BinaryContent, FileContent, JsonContent, TextContent
 from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
 
@@ -7435,6 +7436,52 @@ async def test_llm_agent_process_thread_adapter_restores_thread_state(
         ]
     finally:
         await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_mesh_document_thread_storage_message_range_separates_messages() -> None:
+    document = MeshDocument(schema=thread_schema, on_document_sync=None)
+    messages = document.root.append_child("messages")
+    messages.append_child(
+        "message",
+        {
+            "text": "hi",
+            "created_at": "2026-05-07T20:00:54.054542Z",
+            "author_name": "jesse.ezell@timu.com",
+            "role": "user",
+        },
+    )
+    messages.append_child(
+        "message",
+        {
+            "text": "hello",
+            "created_at": "2026-05-07T20:01:00.000000Z",
+            "author_name": "chatbot",
+            "role": "agent",
+        },
+    )
+
+    try:
+        adapter = MeshDocumentThreadStorage(
+            room=_ThreadRoom(document=document),
+            path="/threads/test.thread",
+        )
+        adapter._thread = document
+
+        result = await adapter.get_message_range.execute(
+            context=ToolContext(caller=object()),
+            start=0,
+            end=2,
+        )
+    finally:
+        document.close()
+
+    assert isinstance(result, TextContent)
+    assert result.text == (
+        "matching messages:\n"
+        "jesse.ezell@timu.com said at 2026-05-07T20:00:54.054542Z: hi\n"
+        "chatbot said at 2026-05-07T20:01:00.000000Z: hello"
+    )
 
 
 @pytest.mark.asyncio
