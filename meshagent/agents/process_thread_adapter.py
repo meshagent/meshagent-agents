@@ -47,7 +47,7 @@ from .messages import (
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
-    AgentMessage,
+    AgentThreadMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
     AgentReasoningContentStarted,
@@ -107,7 +107,7 @@ class _ActiveToolCall:
 
 @dataclass(slots=True)
 class ThreadAdapterMessage:
-    message: AgentMessage
+    message: AgentThreadMessage
     sender: Participant | None = None
 
 
@@ -532,7 +532,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
     def push_message(
         self,
         *,
-        message: AgentMessage,
+        message: AgentThreadMessage,
         sender: Participant | None = None,
     ) -> None:
         try:
@@ -553,7 +553,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
             ],
         )
 
-    def agent_messages(self) -> list[AgentMessage]:
+    def agent_messages(self) -> list[AgentThreadMessage]:
         if self._thread is None:
             raise RoomException("thread was not opened")
 
@@ -561,7 +561,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         if self._restore_message_count is not None:
             messages = messages[: self._restore_message_count]
 
-        agent_messages: list[AgentMessage] = []
+        agent_messages: list[AgentThreadMessage] = []
         for index, message in enumerate(messages):
             message_id = self._attribute_as_str(message, "id")
             if message_id == "":
@@ -825,7 +825,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self,
         *,
         messages: Element,
-        message: AgentMessage,
+        message: AgentThreadMessage,
         sender: Participant | None,
     ) -> None:
         normalized_event: _NormalizedThreadEvent | None = None
@@ -1497,7 +1497,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
     def _stringify_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
-    def _message_event_data(self, *, message: AgentMessage) -> str:
+    def _message_event_data(self, *, message: AgentThreadMessage) -> str:
         return _truncate_text(
             self._stringify_json(message.model_dump(mode="json")),
         )
@@ -1505,7 +1505,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
     def _tool_call_event_data(
         self,
         *,
-        message: AgentMessage,
+        message: AgentThreadMessage,
         active_tool_call: _ActiveToolCall | None = None,
     ) -> str:
         if not isinstance(message, AgentToolCallEnded):
@@ -2351,7 +2351,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
     def _normalized_event_from_message(
         self,
-        message: AgentMessage,
+        message: AgentThreadMessage,
     ) -> _NormalizedThreadEvent | None:
         if isinstance(message, ThreadCleared):
             self._clear_active_turn_state()

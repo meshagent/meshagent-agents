@@ -23,6 +23,7 @@ __all__ = [
 AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
 AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
+AGENT_MESSAGE_THREAD_START = "meshagent.agent.thread.start"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
 AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
 AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
@@ -38,6 +39,7 @@ AGENT_EVENT_TURN_STEERED = "meshagent.agent.turn.steered"
 AGENT_EVENT_TURN_STEER_REJECTED = "meshagent.agent.turn.steer.rejected"
 AGENT_EVENT_TURN_STARTED = "meshagent.agent.turn.started"
 AGENT_EVENT_TURN_ENDED = "meshagent.agent.turn.ended"
+AGENT_EVENT_THREAD_STARTED = "meshagent.agent.thread.started"
 AGENT_EVENT_REASONING_CONTENT_STARTED = "meshagent.agent.reasoning_content.started"
 AGENT_EVENT_REASONING_CONTENT_DELTA = "meshagent.agent.reasoning_content.delta"
 AGENT_EVENT_REASONING_CONTENT_ENDED = "meshagent.agent.reasoning_content.ended"
@@ -68,11 +70,12 @@ AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
 
 
 class AgentMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     type: str
-    thread_id: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+
+
+class AgentThreadMessage(AgentMessage):
+    thread_id: str
 
 
 class ToolChoice(BaseModel):
@@ -84,39 +87,51 @@ class TurnToolkitConfig(BaseModel):
     client_options: dict[str, Any] | None = None
 
 
-class TurnStart(AgentMessage):
-    type: Literal[AGENT_MESSAGE_TURN_START]
+class StartThread(AgentMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_START]
     content: list[AgentInputContent]
+    sender_name: str | None = None
     model: Optional[str] = None
     instructions: Optional[str] = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
 
 
-class TurnSteer(AgentMessage):
+class TurnStart(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_TURN_START]
+    content: list[AgentInputContent]
+    sender_name: str | None = None
+    model: Optional[str] = None
+    instructions: Optional[str] = None
+    toolkits: dict[str, TurnToolkitConfig] | None = None
+    tool_choice: ToolChoice | None = None
+
+
+class TurnSteer(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_STEER]
     content: list[AgentInputContent]
     turn_id: str
+    sender_name: str | None = None
 
 
-class TurnInterrupt(AgentMessage):
+class TurnInterrupt(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_INTERRUPT]
     turn_id: str
 
 
-class ClearThread(AgentMessage):
+class ClearThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLEAR]
 
 
-class OpenThread(AgentMessage):
+class OpenThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_OPEN]
 
 
-class CloseThread(AgentMessage):
+class CloseThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLOSE]
 
 
-class CapabilitiesRequest(AgentMessage):
+class CapabilitiesRequest(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_CAPABILITIES_REQUEST]
 
 
@@ -142,130 +157,142 @@ class ToolkitCapabilities(BaseModel):
     tools: list[ToolkitToolCapabilities] = Field(default_factory=list)
 
 
-class CapabilitiesResponse(AgentMessage):
+class CapabilitiesResponse(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_CAPABILITIES_RESPONSE]
     source_message_id: str
     version: str
     toolkits: list[ToolkitCapabilities]
 
 
-class ThreadCleared(AgentMessage):
+class ThreadCleared(AgentThreadMessage):
     type: Literal[AGENT_EVENT_THREAD_CLEARED]
     source_message_id: str
 
 
-class TurnStartAccepted(AgentMessage):
+class TurnStartAccepted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_START_ACCEPTED]
     source_message_id: str
+    content: list[AgentInputContent] = Field(default_factory=list)
+    sender_name: str | None = None
 
 
-class TurnStartRejected(AgentMessage):
+class TurnStartRejected(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_START_REJECTED]
     source_message_id: str
     error: AgentError
 
 
-class TurnInterruptAccepted(AgentMessage):
+class TurnInterruptAccepted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_INTERRUPT_ACCEPTED]
     turn_id: str
     source_message_id: str
 
 
-class TurnInterrupted(AgentMessage):
+class TurnInterrupted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_INTERRUPTED]
     turn_id: str
     source_message_id: str
 
 
-class TurnSteerAccepted(AgentMessage):
+class TurnSteerAccepted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_STEER_ACCEPTED]
     turn_id: str
     source_message_id: str
+    content: list[AgentInputContent] = Field(default_factory=list)
+    sender_name: str | None = None
 
 
-class TurnSteered(AgentMessage):
+class TurnSteered(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_STEERED]
     turn_id: str
     source_message_id: str
 
 
-class TurnSteerRejected(AgentMessage):
+class TurnSteerRejected(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_STEER_REJECTED]
     turn_id: str
     source_message_id: str
     error: AgentError
 
 
-class TurnStarted(AgentMessage):
+class TurnStarted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_STARTED]
     turn_id: str
     source_message_id: str
 
 
-class TurnEnded(AgentMessage):
+class TurnEnded(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_ENDED]
     turn_id: str
     error: Optional[AgentError]
 
 
-class AgentReasoningContentStarted(AgentMessage):
+class ThreadStarted(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_STARTED]
+    source_message_id: str
+    thread_id: str
+
+
+class AgentReasoningContentStarted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_REASONING_CONTENT_STARTED]
     turn_id: str
     item_id: str
 
 
-class AgentReasoningContentDelta(AgentMessage):
+class AgentReasoningContentDelta(AgentThreadMessage):
     type: Literal[AGENT_EVENT_REASONING_CONTENT_DELTA]
     turn_id: str
     item_id: str
     text: str
 
 
-class AgentReasoningContentEnded(AgentMessage):
+class AgentReasoningContentEnded(AgentThreadMessage):
     type: Literal[AGENT_EVENT_REASONING_CONTENT_ENDED]
     turn_id: str
     item_id: str
 
 
-class AgentTextContentStarted(AgentMessage):
+class AgentTextContentStarted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_STARTED]
     turn_id: str
     item_id: str
 
 
-class AgentTextContentDelta(AgentMessage):
+class AgentTextContentDelta(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_DELTA]
     turn_id: str
     item_id: str
     text: str
+    sender_name: str | None = None
 
 
-class AgentTextContentEnded(AgentMessage):
+class AgentTextContentEnded(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_ENDED]
     turn_id: str
     item_id: str
 
 
-class AgentFileContentStarted(AgentMessage):
+class AgentFileContentStarted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_FILE_CONTENT_STARTED]
     turn_id: str
     item_id: str
 
 
-class AgentFileContentDelta(AgentMessage):
+class AgentFileContentDelta(AgentThreadMessage):
     type: Literal[AGENT_EVENT_FILE_CONTENT_DELTA]
     turn_id: str
     item_id: str
     url: str
+    sender_name: str | None = None
 
 
-class AgentFileContentEnded(AgentMessage):
+class AgentFileContentEnded(AgentThreadMessage):
     type: Literal[AGENT_EVENT_FILE_CONTENT_ENDED]
     turn_id: str
     item_id: str
 
 
-class AgentToolCallPending(AgentMessage):
+class AgentToolCallPending(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_PENDING]
     turn_id: str
     item_id: str
@@ -276,7 +303,7 @@ class AgentToolCallPending(AgentMessage):
     arguments: Optional[dict] = None
 
 
-class AgentToolCallInProgress(AgentMessage):
+class AgentToolCallInProgress(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_IN_PROGRESS]
     turn_id: str
     item_id: str
@@ -287,7 +314,7 @@ class AgentToolCallInProgress(AgentMessage):
     arguments: Optional[dict] = None
 
 
-class AgentToolCallStarted(AgentMessage):
+class AgentToolCallStarted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_STARTED]
     turn_id: str
     item_id: str
@@ -303,7 +330,7 @@ class AgentToolCallLogLine(BaseModel):
     text: str
 
 
-class AgentToolCallLogDelta(AgentMessage):
+class AgentToolCallLogDelta(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_LOG_DELTA]
     turn_id: str
     item_id: str
@@ -312,7 +339,7 @@ class AgentToolCallLogDelta(AgentMessage):
     lines: list[AgentToolCallLogLine]
 
 
-class AgentToolCallEnded(AgentMessage):
+class AgentToolCallEnded(AgentThreadMessage):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     type: Literal[AGENT_EVENT_TOOL_CALL_ENDED]
@@ -331,7 +358,7 @@ class AgentToolCallEnded(AgentMessage):
         return result.to_json()
 
 
-class AgentToolCallApprovalRequested(AgentMessage):
+class AgentToolCallApprovalRequested(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED]
     turn_id: str
     item_id: str
@@ -342,7 +369,7 @@ class AgentToolCallApprovalRequested(AgentMessage):
     arguments: Optional[dict[str, Any]] = None
 
 
-class AgentThreadStatus(AgentMessage):
+class AgentThreadStatus(AgentThreadMessage):
     type: Literal[AGENT_EVENT_THREAD_STATUS]
     status: str | None
     mode: Literal["busy", "steerable"] | None = None
@@ -350,7 +377,7 @@ class AgentThreadStatus(AgentMessage):
     turn_id: str | None = None
 
 
-class AgentThreadEvent(AgentMessage):
+class AgentThreadEvent(AgentThreadMessage):
     type: Literal[AGENT_EVENT_THREAD_EVENT]
     event: dict[str, Any]
 
@@ -366,7 +393,7 @@ class AgentGeneratedImage(BaseModel):
     status_detail: str | None = None
 
 
-class AgentImageGenerationStarted(AgentMessage):
+class AgentImageGenerationStarted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_STARTED]
     turn_id: str
     item_id: str
@@ -377,7 +404,7 @@ class AgentImageGenerationStarted(AgentMessage):
     status_detail: str | None = None
 
 
-class AgentImageGenerationPartial(AgentMessage):
+class AgentImageGenerationPartial(AgentThreadMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_PARTIAL]
     turn_id: str
     item_id: str
@@ -390,7 +417,7 @@ class AgentImageGenerationPartial(AgentMessage):
     status_detail: str | None = None
 
 
-class AgentImageGenerationCompleted(AgentMessage):
+class AgentImageGenerationCompleted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_COMPLETED]
     turn_id: str
     item_id: str
@@ -402,7 +429,7 @@ class AgentImageGenerationCompleted(AgentMessage):
     status_detail: str | None = None
 
 
-class AgentImageGenerationFailed(AgentMessage):
+class AgentImageGenerationFailed(AgentThreadMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_FAILED]
     turn_id: str
     item_id: str
@@ -414,7 +441,7 @@ class AgentImageGenerationFailed(AgentMessage):
     status_detail: str | None = None
 
 
-class AgentContextCompacted(AgentMessage):
+class AgentContextCompacted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_CONTEXT_COMPACTED]
     checkpoint_id: str
     path: str
@@ -430,26 +457,27 @@ class AgentContextWindowUsage(BaseModel):
     compaction_threshold: int | None = None
 
 
-class AgentUsageUpdated(AgentMessage):
+class AgentUsageUpdated(AgentThreadMessage):
     type: Literal[AGENT_EVENT_USAGE_UPDATED]
     turn_id: str | None = None
     usage: dict[str, float] = Field(default_factory=dict)
     context_window: AgentContextWindowUsage
 
 
-class ApproveAgentToolCall(AgentMessage):
+class ApproveAgentToolCall(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TOOL_CALL_APPROVE]
     turn_id: str
     item_id: str
 
 
-class RejectAgentToolCall(AgentMessage):
+class RejectAgentToolCall(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TOOL_CALL_REJECT]
     turn_id: str
     item_id: str
 
 
 _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
+    AGENT_MESSAGE_THREAD_START: StartThread,
     AGENT_MESSAGE_TURN_START: TurnStart,
     AGENT_MESSAGE_TURN_STEER: TurnSteer,
     AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
@@ -468,6 +496,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_TURN_STEER_REJECTED: TurnSteerRejected,
     AGENT_EVENT_TURN_STARTED: TurnStarted,
     AGENT_EVENT_TURN_ENDED: TurnEnded,
+    AGENT_EVENT_THREAD_STARTED: ThreadStarted,
     AGENT_EVENT_REASONING_CONTENT_STARTED: AgentReasoningContentStarted,
     AGENT_EVENT_REASONING_CONTENT_DELTA: AgentReasoningContentDelta,
     AGENT_EVENT_REASONING_CONTENT_ENDED: AgentReasoningContentEnded,

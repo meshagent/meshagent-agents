@@ -38,7 +38,7 @@ from .messages import (
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
-    AgentMessage,
+    AgentThreadMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
     AgentReasoningContentStarted,
@@ -143,7 +143,7 @@ def _mime_type_from_output_format(output_format: Any) -> str:
 
 def _image_generation_status(
     *,
-    message: AgentMessage,
+    message: AgentThreadMessage,
 ) -> Literal["pending", "in_progress", "completed", "failed"]:
     if isinstance(message, AgentImageGenerationCompleted):
         return "completed"
@@ -193,7 +193,7 @@ class _StoredThreadRow:
 
 @dataclass(slots=True)
 class _QueuedThreadMessage:
-    message: AgentMessage
+    message: AgentThreadMessage
     sender: Participant | None
 
 
@@ -404,7 +404,7 @@ class DatasetThreadStorage(ThreadStorage):
     def push_message(
         self,
         *,
-        message: AgentMessage,
+        message: AgentThreadMessage,
         sender: Participant | None = None,
     ) -> None:
         try:
@@ -431,7 +431,7 @@ class DatasetThreadStorage(ThreadStorage):
     async def _handle_message(
         self,
         *,
-        message: AgentMessage,
+        message: AgentThreadMessage,
         sender: Participant | None,
     ) -> None:
         if isinstance(message, ThreadCleared):
@@ -745,7 +745,7 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         item_id: str,
         reason: Literal["completed", "cancelled", "failed"],
-        ended_message: AgentMessage | None = None,
+        ended_message: AgentThreadMessage | None = None,
     ) -> None:
         active = self._active_content_by_item_id.pop(item_id, None)
         if active is None:
@@ -1154,7 +1154,7 @@ class DatasetThreadStorage(ThreadStorage):
                     f"assistant attached a file available at {url}"
                 )
 
-    def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentMessage]:
+    def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:
         data = row.data
         kind = data.get("kind")
         message = self._stored_agent_message(value=data.get("message"))
@@ -1233,7 +1233,7 @@ class DatasetThreadStorage(ThreadStorage):
             if not isinstance(urls, list):
                 return []
             turn_id = row.turn_id or row.item_id
-            messages: list[AgentMessage] = []
+            messages: list[AgentThreadMessage] = []
             for url in urls:
                 if not isinstance(url, str) or url.strip() == "":
                     continue
@@ -1321,13 +1321,16 @@ class DatasetThreadStorage(ThreadStorage):
         return []
 
     @staticmethod
-    def _stored_agent_message(*, value: Any) -> AgentMessage | None:
+    def _stored_agent_message(*, value: Any) -> AgentThreadMessage | None:
         if not isinstance(value, dict):
             return None
         try:
-            return parse_agent_message(value)
+            message = parse_agent_message(value)
         except Exception:
             return None
+        if not isinstance(message, AgentThreadMessage):
+            return None
+        return message
 
     def _tool_log_delta_from_stored_lines(
         self,
@@ -1372,8 +1375,8 @@ class DatasetThreadStorage(ThreadStorage):
             ],
         )
 
-    def agent_messages(self) -> list[AgentMessage]:
-        messages: list[AgentMessage] = []
+    def agent_messages(self) -> list[AgentThreadMessage]:
+        messages: list[AgentThreadMessage] = []
         for row in self._rows:
             messages.extend(self._messages_from_row(row=row))
 

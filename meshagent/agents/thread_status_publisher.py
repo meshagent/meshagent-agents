@@ -10,7 +10,7 @@ from meshagent.api import Participant
 from meshagent.api.chan import ChanClosed
 from meshagent.agents.messages import (
     AGENT_EVENT_THREAD_STATUS,
-    AgentMessage,
+    AgentThreadMessage,
     AgentThreadStatus,
 )
 
@@ -238,7 +238,7 @@ class AgentMessageThreadStatusPublisher:
         self,
         *,
         thread_id: str,
-        publish: Callable[[AgentMessage], None],
+        publish: Callable[[AgentThreadMessage], None],
         mode: ThreadStatusMode = "steerable",
     ) -> None:
         self._thread_id = thread_id

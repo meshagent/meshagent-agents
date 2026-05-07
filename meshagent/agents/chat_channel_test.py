@@ -12,6 +12,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
@@ -26,6 +27,7 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TURN_INTERRUPT,
     AGENT_MESSAGE_TURN_START,
@@ -366,6 +368,76 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         assert isinstance(list_result, JsonContent)
         assert list_result.json["total"] == 1
         assert list_result.json["threads"][0]["path"] == result_path
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_start_thread_message_allocates_thread_and_routes_turn() -> (
+    None
+):
+    caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
+    sync = _FakeSync()
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        sync=sync,
+    )
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "content": [
+                            {"type": "text", "text": "Plan this friendly thread"},
+                            {"type": "file", "url": "uploads/plan.md"},
+                        ],
+                    }
+                },
+            )
+        )
+
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
+
+        assert len(room.messaging.sent_messages) == 1
+        response_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
+        assert response_payload["source_message_id"] == "start-thread-1"
+        result_path = response_payload["thread_id"]
+        assert isinstance(result_path, str)
+        _assert_uuid_thread_path(path=result_path, prefix="/threads/chat/")
+
+        assert len(supervisor.sent) == 1
+        sent = supervisor.sent[0]
+        assert sent.sender is caller
+        assert sent.source is channel
+        turn = sent.data
+        assert isinstance(turn, TurnStart)
+        assert turn.message_id == "start-thread-1"
+        assert turn.thread_id == result_path
+        assert turn.content == [
+            AgentTextContent(type="text", text="Plan this friendly thread"),
+            AgentFileContent(type="file", url="room:///uploads/plan.md"),
+        ]
+
+        assert channel._open_participant_ids_by_thread == {result_path: {caller.id}}
+        entries = sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("path") == result_path
+        assert entries[0].get_attribute("name") == "Plan this friendly thread"
     finally:
         await channel.stop(supervisor)
 

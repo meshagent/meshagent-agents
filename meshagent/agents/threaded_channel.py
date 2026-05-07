@@ -15,6 +15,7 @@ from meshagent.api import Element, MeshDocument, Participant, RoomClient
 from .adapter import LLMAdapter
 from .process import Channel
 from .thread_schema import thread_list_schema
+from .thread_storage import ThreadStorage
 
 logger = logging.getLogger("threaded-channel")
 
@@ -495,31 +496,10 @@ class ThreadedChannel(Channel):
         await self._close_thread_list_document()
 
     async def _next_available_thread_path(self, *, base_path: str) -> str:
-        try:
-            exists = await self._room.storage.exists(path=base_path)
-        except Exception:
-            return base_path
-
-        if not exists:
-            return base_path
-
-        thread_dir, filename = posixpath.split(base_path)
-        extension = self._thread_path_extension
-        if extension != "" and filename.endswith(extension):
-            base_name = filename[: -len(extension)]
-        else:
-            base_name = filename
-
-        for index in range(2, 1000):
-            candidate = posixpath.join(thread_dir, f"{base_name} {index}{extension}")
-            try:
-                if not await self._room.storage.exists(path=candidate):
-                    return candidate
-            except Exception:
-                return candidate
-
-        return posixpath.join(
-            thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}{extension}"
+        return await ThreadStorage.allocate_thread_path(
+            room=self._room,
+            base_path=base_path,
+            extension=self._thread_path_extension,
         )
 
     @staticmethod

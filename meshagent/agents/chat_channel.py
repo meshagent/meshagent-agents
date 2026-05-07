@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -19,6 +20,7 @@ from .messages import (
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_ENDED,
@@ -29,6 +31,7 @@ from .messages import (
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
     AGENT_MESSAGE_TURN_INTERRUPT,
@@ -47,7 +50,9 @@ from .messages import (
     AgentThreadStatus,
     OpenThread,
     RejectAgentToolCall,
+    StartThread,
     ThreadCleared,
+    ThreadStarted,
     TurnEnded,
     TurnInterrupt,
     TurnSteered,
@@ -82,6 +87,7 @@ class _PathMessagePayload(BaseModel):
 
 _INBOUND_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
+    AGENT_MESSAGE_THREAD_START: StartThread,
     AGENT_MESSAGE_TURN_START: TurnStart,
     AGENT_MESSAGE_TURN_STEER: TurnSteer,
     AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
@@ -93,6 +99,7 @@ _INBOUND_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
 }
 
 _THREAD_CONTROL_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
+    AGENT_MESSAGE_THREAD_START: StartThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
 }
@@ -386,8 +393,18 @@ class ChatChannel(ThreadedChannel):
         if message.type not in {AGENT_MESSAGE_TURN_START, AGENT_MESSAGE_TURN_STEER}:
             return
 
+        self._track_turn_input_payload(
+            message=message,
+            sender_name=sender.get_attribute("name"),
+        )
+
+    def _track_turn_input_payload(
+        self,
+        *,
+        message: AgentMessage,
+        sender_name: Any,
+    ) -> None:
         payload = message.model_dump(mode="json")
-        sender_name = sender.get_attribute("name")
         if isinstance(sender_name, str) and sender_name.strip() != "":
             payload["sender_name"] = sender_name.strip()
 
@@ -410,6 +427,16 @@ class ChatChannel(ThreadedChannel):
             return False
 
         control_message = model.model_validate(payload)
+        if isinstance(control_message, StartThread):
+            task = asyncio.create_task(
+                self._handle_start_thread_message(
+                    start_thread=control_message,
+                    sender=sender,
+                )
+            )
+            self._track_thread_list_background_task(task=task)
+            return True
+
         if isinstance(control_message, OpenThread):
             self._register_open_participant(
                 thread_id=control_message.thread_id,
@@ -429,6 +456,57 @@ class ChatChannel(ThreadedChannel):
             return False
 
         return False
+
+    async def _handle_start_thread_message(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant,
+    ) -> None:
+        if self.supervisor is None:
+            logger.warning(
+                "ignoring start-thread message because chat channel has no supervisor"
+            )
+            return
+
+        path = await self._new_thread_path()
+        turn_start = TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            message_id=start_thread.message_id,
+            thread_id=path,
+            content=start_thread.content,
+            sender_name=start_thread.sender_name,
+            model=start_thread.model,
+            instructions=start_thread.instructions,
+            toolkits=start_thread.toolkits,
+            tool_choice=start_thread.tool_choice,
+        )
+        self._begin_pending_thread_list_entry(path=path)
+        self._register_open_participant(thread_id=path, participant_id=sender.id)
+        self._track_turn_input_payload(
+            message=turn_start,
+            sender_name=start_thread.sender_name or sender.get_attribute("name"),
+        )
+        self._send_agent_payload_nowait(
+            participant=sender,
+            payload=ThreadStarted(
+                type=AGENT_EVENT_THREAD_STARTED,
+                source_message_id=start_thread.message_id,
+                thread_id=path,
+            ).model_dump(mode="json"),
+        )
+        await self.supervisor.route(
+            Message(sender=sender, source=self, data=turn_start)
+        )
+        message_text, attachments = self._text_and_attachments_from_content(
+            content=start_thread.content
+        )
+        self._schedule_pending_thread_list_entry(
+            path=path,
+            message_text=message_text,
+            attachments=attachments,
+            on_behalf_of=sender,
+        )
 
     def _send_buffered_agent_events(
         self,
@@ -578,6 +656,26 @@ class ChatChannel(ThreadedChannel):
 
         return content
 
+    @staticmethod
+    def _text_and_attachments_from_content(
+        *,
+        content: list[Any],
+    ) -> tuple[str, list[str]]:
+        text_parts: list[str] = []
+        attachments: list[str] = []
+        for item in content:
+            if isinstance(item, AgentTextContent):
+                if item.text.strip() != "":
+                    text_parts.append(item.text)
+                continue
+
+            if isinstance(item, AgentFileContent):
+                if item.url.strip() != "":
+                    attachments.append(item.url)
+                continue
+
+        return "\n".join(text_parts).strip(), attachments
+
     def _active_turn_id(self, *, thread_id: str) -> str | None:
         return self._active_turn_ids_by_thread.get(thread_id)
 
@@ -614,6 +712,7 @@ class ChatChannel(ThreadedChannel):
         normalized_payload = dict(payload)
         message_type = normalized_payload.get("type")
         if message_type not in {
+            AGENT_MESSAGE_THREAD_START,
             AGENT_MESSAGE_TURN_START,
             AGENT_MESSAGE_TURN_STEER,
         }:
