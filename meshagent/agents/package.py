@@ -52,10 +52,10 @@ from meshagent.tools.storage import (
 from .chat_channel import ChatChannel
 from .config import RulesConfig
 from .mail_channel import MailChannel
-from .process import AgentSupervisor, ContentScheme, LLMAgentProcess
+from .process import AgentSupervisor, ContentScheme, LLMAgentProcess, Message
 from .process_thread_adapter import MeshDocumentThreadStorage
 from .queue_channel import QueueChannel
-from .thread_status_publisher import ParticipantAttributeThreadStatusPublisher
+from .thread_status_publisher import AgentMessageThreadStatusPublisher
 from .toolkit_channel import ToolkitChannel
 from .skills import to_prompt
 from .version import __version__
@@ -2104,14 +2104,17 @@ class MeshagentPackage(PythonPackage):
                     toolkits.append(thread_storage.make_toolkit())
                     return toolkits
 
+                def publish_thread_status(message) -> None:
+                    self.send(Message(data=message, source=process))
+
                 process = LLMAgentProcess(
                     thread_id=thread_id,
                     participant=self._room.local_participant,
                     llm_adapter=process_llm_adapter,
                     thread_storage=thread_storage,
-                    thread_status_publisher=ParticipantAttributeThreadStatusPublisher(
-                        participant=self._room.local_participant,
-                        path=thread_id,
+                    thread_status_publisher=AgentMessageThreadStatusPublisher(
+                        thread_id=thread_id,
+                        publish=publish_thread_status,
                     ),
                     turn_instructions_provider=_turn_instructions_provider,
                     turn_toolkits_builder=_turn_toolkits_builder,

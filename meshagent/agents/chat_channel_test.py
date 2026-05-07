@@ -12,10 +12,13 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_THREAD_STATUS,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_EVENT_TURN_START_ACCEPTED,
+    AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_EVENT_USAGE_UPDATED,
@@ -35,6 +38,7 @@ from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentThreadStatus,
     AgentUsageUpdated,
     ApproveAgentToolCall,
     CapabilitiesRequest,
@@ -1335,6 +1339,110 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_agent_open_replays_current_thread_status() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        await channel.on_message(
+            Message(
+                data=AgentThreadStatus(
+                    type=AGENT_EVENT_THREAD_STATUS,
+                    thread_id="/threads/test.thread",
+                    status="Thinking",
+                    mode="steerable",
+                    started_at="2026-05-07T16:00:00Z",
+                    turn_id="turn-1",
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentThreadStatus(
+                    type=AGENT_EVENT_THREAD_STATUS,
+                    thread_id="/threads/test.thread",
+                    status="Generating image",
+                    mode="steerable",
+                    started_at="2026-05-07T16:00:05Z",
+                    turn_id="turn-1",
+                )
+            )
+        )
+        assert room.messaging.sent_messages == []
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert payload == {
+            "type": AGENT_EVENT_THREAD_STATUS,
+            "thread_id": "/threads/test.thread",
+            "message_id": payload["message_id"],
+            "status": "Generating image",
+            "mode": "steerable",
+            "started_at": "2026-05-07T16:00:05Z",
+            "turn_id": "turn-1",
+        }
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_CLOSE,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        await channel.on_message(
+            Message(
+                data=AgentThreadStatus(
+                    type=AGENT_EVENT_THREAD_STATUS,
+                    thread_id="/threads/test.thread",
+                    status=None,
+                    mode=None,
+                    started_at=None,
+                    turn_id=None,
+                )
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_participants() -> (
     None
 ):
@@ -1375,8 +1483,9 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
             )
         )
 
-        assert len(supervisor.sent) == 1
-        assert isinstance(supervisor.sent[0].data, TurnStart)
+        assert len(supervisor.sent) == 2
+        assert isinstance(supervisor.sent[0].data, OpenThread)
+        assert isinstance(supervisor.sent[1].data, TurnStart)
         assert room.messaging.sent_messages == []
 
         await channel.on_message(
@@ -1422,6 +1531,112 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_agent_open_replays_pending_turn_start_as_accepted() -> None:
+    sender = _FakeParticipant(name="sender", participant_id="sender-id")
+    viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
+    room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=sender.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_START,
+                        "thread_id": "/threads/test.thread",
+                        "message_id": "user-message-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, TurnStart)
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert payload["type"] == AGENT_EVENT_TURN_START_ACCEPTED
+        assert payload["source_message_id"] == "user-message-1"
+        assert payload["content"] == [{"type": "text", "text": "hello"}]
+        assert payload["sender_name"] == "sender"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_agent_open_replays_pending_turn_steer_as_accepted() -> None:
+    sender = _FakeParticipant(name="sender", participant_id="sender-id")
+    viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
+    room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=sender.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_STEER,
+                        "thread_id": "/threads/test.thread",
+                        "turn_id": "turn-1",
+                        "message_id": "user-message-2",
+                        "content": [{"type": "text", "text": "wait"}],
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, TurnSteer)
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert payload["type"] == AGENT_EVENT_TURN_STEER_ACCEPTED
+        assert payload["source_message_id"] == "user-message-2"
+        assert payload["turn_id"] == "turn-1"
+        assert payload["content"] == [{"type": "text", "text": "wait"}]
+        assert payload["sender_name"] == "sender"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_participants() -> (
     None
 ):
@@ -1462,8 +1677,9 @@ async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_pa
             )
         )
 
-        assert len(supervisor.sent) == 1
-        assert isinstance(supervisor.sent[0].data, TurnSteer)
+        assert len(supervisor.sent) == 2
+        assert isinstance(supervisor.sent[0].data, OpenThread)
+        assert isinstance(supervisor.sent[1].data, TurnSteer)
         assert room.messaging.sent_messages == []
 
         await channel.on_message(

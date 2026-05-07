@@ -55,6 +55,7 @@ AGENT_EVENT_TOOL_CALL_ENDED = "meshagent.agent.tool_call.ended"
 AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
     "meshagent.agent.tool_call.approval_requested"
 )
+AGENT_EVENT_THREAD_STATUS = "meshagent.agent.thread.status"
 AGENT_EVENT_THREAD_EVENT = "meshagent.agent.thread.event"
 AGENT_EVENT_IMAGE_GENERATION_STARTED = "meshagent.agent.image_generation.started"
 AGENT_EVENT_IMAGE_GENERATION_PARTIAL = "meshagent.agent.image_generation.partial"
@@ -339,6 +340,14 @@ class AgentToolCallApprovalRequested(AgentMessage):
     arguments: Optional[dict[str, Any]] = None
 
 
+class AgentThreadStatus(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_STATUS]
+    status: str | None
+    mode: Literal["busy", "steerable"] | None = None
+    started_at: str | None = None
+    turn_id: str | None = None
+
+
 class AgentThreadEvent(AgentMessage):
     type: Literal[AGENT_EVENT_THREAD_EVENT]
     event: dict[str, Any]
@@ -472,6 +481,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_TOOL_CALL_LOG_DELTA: AgentToolCallLogDelta,
     AGENT_EVENT_TOOL_CALL_ENDED: AgentToolCallEnded,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED: AgentToolCallApprovalRequested,
+    AGENT_EVENT_THREAD_STATUS: AgentThreadStatus,
     AGENT_EVENT_THREAD_EVENT: AgentThreadEvent,
     AGENT_EVENT_IMAGE_GENERATION_STARTED: AgentImageGenerationStarted,
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL: AgentImageGenerationPartial,

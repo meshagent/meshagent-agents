@@ -15,6 +15,7 @@ import meshagent.agents.process_thread_adapter as process_thread_adapter_module
 import meshagent.agents.thread_adapter as thread_adapter_module
 from meshagent.agents import MeshDocumentThreadStorage
 from meshagent.agents.thread_status_publisher import (
+    AgentMessageThreadStatusPublisher,
     ParticipantAttributeThreadStatusPublisher,
 )
 from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
@@ -29,6 +30,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
+    AGENT_EVENT_THREAD_STATUS,
     AGENT_EVENT_REASONING_CONTENT_DELTA,
     AGENT_EVENT_REASONING_CONTENT_ENDED,
     AGENT_EVENT_REASONING_CONTENT_STARTED,
@@ -71,6 +73,7 @@ from meshagent.agents.messages import (
     AgentToolCallPending,
     AgentToolCallStarted,
     AgentToolCallEnded,
+    AgentThreadStatus,
     ClearThread,
     OpenThread,
     RejectAgentToolCall,
@@ -3358,6 +3361,60 @@ async def test_llm_agent_process_publishes_custom_retry_status_events(
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_can_publish_thread_status_as_agent_messages() -> None:
+    adapter = _RecordingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    room = _ThreadRoom(document=_ThreadDocument())
+
+    def publish_thread_status(message: AgentMessage) -> None:
+        process.emit(sender=None, payload=message)
+
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="/threads/test.thread",
+        llm_adapter=adapter,
+        thread_status_publisher=AgentMessageThreadStatusPublisher(
+            thread_id="/threads/test.thread",
+            publish=publish_thread_status,
+        ),
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/test.thread",
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+        await _wait_for(
+            lambda: any(
+                payload["status"] == "Thinking"
+                and payload["turn_id"] is not None
+                and payload["mode"] == "steerable"
+                for payload in supervisor.payloads(
+                    message_type=AGENT_EVENT_THREAD_STATUS
+                )
+            )
+        )
+        await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+        await _wait_for(
+            lambda: any(
+                payload["status"] is None and payload["turn_id"] is None
+                for payload in supervisor.payloads(
+                    message_type=AGENT_EVENT_THREAD_STATUS
+                )
+            )
+        )
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_processes_queued_steer_messages_before_turn_end() -> (
     None
 ):
@@ -6409,6 +6466,54 @@ async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_
         assert room.local_participant.set_attribute_calls == previous_calls
     finally:
         await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_message_thread_status_publisher_publishes_status_messages() -> (
+    None
+):
+    published: list[AgentThreadStatus] = []
+
+    def publish(message: AgentMessage) -> None:
+        published.append(AgentThreadStatus.model_validate(message.model_dump()))
+
+    publisher = AgentMessageThreadStatusPublisher(
+        thread_id="/threads/test.thread",
+        publish=publish,
+    )
+
+    await publisher.set_thread_turn_id(turn_id="turn-1")
+    assert published[-1].type == AGENT_EVENT_THREAD_STATUS
+    assert published[-1].thread_id == "/threads/test.thread"
+    assert published[-1].turn_id == "turn-1"
+    assert published[-1].status is None
+
+    await publisher.set_thread_status(
+        status=" Generating image ",
+        pending_item_id=" image-1 ",
+    )
+    active_status = published[-1]
+    assert active_status.status == "Generating image"
+    assert active_status.mode == "steerable"
+    assert active_status.started_at is not None
+
+    await publisher.set_thread_status(
+        status="Generating image",
+        pending_item_id="image-1",
+    )
+    assert published[-1] == active_status
+
+    await publisher.set_thread_status(
+        status="Generating image",
+        pending_item_id="image-2",
+    )
+    assert published[-1] == active_status
+
+    await publisher.clear_thread_status()
+    assert published[-1].status is None
+    assert published[-1].mode is None
+    assert published[-1].started_at is None
+    assert published[-1].turn_id == "turn-1"
 
 
 @pytest.mark.asyncio

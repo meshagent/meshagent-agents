@@ -4,10 +4,15 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from meshagent.api import Participant
 from meshagent.api.chan import ChanClosed
+from meshagent.agents.messages import (
+    AGENT_EVENT_THREAD_STATUS,
+    AgentMessage,
+    AgentThreadStatus,
+)
 
 logger = logging.getLogger("agent.thread_status_publisher")
 
@@ -220,6 +225,136 @@ class ParticipantAttributeThreadStatusPublisher:
                 )
             except Exception:
                 logger.exception("unable to set thread status for %s", self._path)
+
+        asyncio.create_task(run())
+
+    async def clear_thread_status(self) -> None:
+        self._next_generation()
+        await self.set_thread_status(status=None)
+
+
+class AgentMessageThreadStatusPublisher:
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        publish: Callable[[AgentMessage], None],
+        mode: ThreadStatusMode = "steerable",
+    ) -> None:
+        self._thread_id = thread_id
+        self._publish = publish
+        self._mode = mode
+        self._lock = asyncio.Lock()
+        self._generation = 0
+        self._status_value: str | None = None
+        self._mode_value: ThreadStatusMode | None = None
+        self._started_at_value: str | None = None
+        self._turn_id_value: str | None = None
+
+    def _publish_current_status(self) -> None:
+        try:
+            self._publish(
+                AgentThreadStatus(
+                    type=AGENT_EVENT_THREAD_STATUS,
+                    thread_id=self._thread_id,
+                    status=self._status_value,
+                    mode=self._mode_value,
+                    started_at=self._started_at_value,
+                    turn_id=self._turn_id_value,
+                )
+            )
+        except Exception:
+            logger.exception("unable to publish thread status for %s", self._thread_id)
+
+    async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
+        async with self._lock:
+            if self._turn_id_value == turn_id:
+                return
+
+            self._turn_id_value = turn_id
+            self._publish_current_status()
+
+    async def set_pending_messages(
+        self,
+        *,
+        pending_messages: list[dict[str, Any]],
+    ) -> None:
+        del pending_messages
+
+    async def set_thread_status(
+        self,
+        *,
+        status: str | None,
+        mode: ThreadStatusMode | None = None,
+        pending_item_id: str | None = None,
+    ) -> None:
+        async with self._lock:
+            if status is None or status.strip() == "":
+                if (
+                    self._status_value is None
+                    and self._mode_value is None
+                    and self._started_at_value is None
+                ):
+                    return
+
+                self._status_value = None
+                self._mode_value = None
+                self._started_at_value = None
+                self._publish_current_status()
+                return
+
+            normalized_status = status.strip()
+            normalized_mode = mode if mode is not None else self._mode
+            del pending_item_id
+            started_at = self._started_at_value
+            if (
+                started_at is None
+                or self._status_value != normalized_status
+                or self._mode_value != normalized_mode
+            ):
+                started_at = (
+                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                )
+
+            if (
+                self._status_value == normalized_status
+                and self._mode_value == normalized_mode
+                and self._started_at_value == started_at
+            ):
+                return
+
+            self._status_value = normalized_status
+            self._mode_value = normalized_mode
+            self._started_at_value = started_at
+            self._publish_current_status()
+
+    def _next_generation(self) -> int:
+        self._generation += 1
+        return self._generation
+
+    async def _apply_thread_status(
+        self,
+        *,
+        status: str | None,
+        generation: int | None = None,
+    ) -> None:
+        async with self._lock:
+            if generation is not None and generation != self._generation:
+                return
+
+        await self.set_thread_status(status=status)
+
+    def set_thread_status_nowait(self, *, status: str | None) -> None:
+        generation = self._next_generation()
+
+        async def run() -> None:
+            try:
+                await self._apply_thread_status(
+                    status=status,
+                    generation=generation,
+                )
+            except Exception:
+                logger.exception("unable to set thread status for %s", self._thread_id)
 
         asyncio.create_task(run())
 
