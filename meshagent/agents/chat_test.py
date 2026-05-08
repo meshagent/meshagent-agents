@@ -529,7 +529,7 @@ async def test_send_and_save_chat_uses_thread_adapter_write_text_message() -> No
 
 @pytest.mark.asyncio
 async def test_thread_attach_file_tool_marks_message_as_agent() -> None:
-    bot = ChatBot(llm_adapter=_CaptureChatAdapter())
+    bot = ChatBot(name="chatbot", llm_adapter=_CaptureChatAdapter())
     room = _FakeRoom()
     bot._room = room
 
@@ -561,6 +561,7 @@ async def test_thread_attach_file_tool_marks_message_as_agent() -> None:
         child for child in messages.get_children() if child.tag_name == "message"
     )
     assert message.get_attribute("role") == "agent"
+    assert message.get_attribute("author_name") == "chatbot"
     assert message.get_children()[0].get_attribute("path") == "reports/output.pdf"
 
 

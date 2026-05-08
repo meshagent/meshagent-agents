@@ -1214,6 +1214,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             description="attach a file to the thread so the user can see it",
         )
         async def attach_file(path: str):
+            author_name = self._thread_agent_author_name()
             messages = thread_context.thread.root.get_elements_by_tag_name("messages")[
                 0
             ]
@@ -1225,7 +1226,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     "created_at": datetime.now(timezone.utc)
                     .isoformat()
                     .replace("+00:00", "Z"),
-                    "author_name": self.room.local_participant.get_attribute("name"),
+                    "author_name": author_name,
                     "role": "agent",
                 },
             )
@@ -1249,6 +1250,16 @@ class ChatBotBase(SingleRoomAgent, ABC):
         toolkit = self._open_threads[thread_context.path].make_toolkit()
 
         return [*self._toolkits, *toolkits, toolkit]
+
+    def _thread_agent_author_name(self) -> str:
+        if isinstance(self._name, str) and self._name.strip() != "":
+            return self._name.strip()
+        if isinstance(self._title, str) and self._title.strip() != "":
+            return self._title.strip()
+        participant_name = self.room.local_participant.get_attribute("name")
+        if isinstance(participant_name, str) and participant_name.strip() != "":
+            return participant_name.strip()
+        return "agent"
 
     @abstractmethod
     def default_model(self) -> str: ...
