@@ -19,6 +19,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TEXT_CONTENT_STARTED,
     AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_TOOL_CALL_ENDED,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_STARTED,
@@ -41,6 +42,7 @@ from meshagent.agents.messages import (
     AgentTextContentEnded,
     AgentTextContentStarted,
     AgentThreadEvent,
+    AgentToolCallArgumentsDelta,
     AgentToolCallPending,
     AgentToolCallEnded,
     AgentToolCallLogDelta,
@@ -825,6 +827,51 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     assert data["tool"] == "exec"
     ended = _row_data(rows[1])
     assert ended["type"] == AGENT_EVENT_TURN_ENDED
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_does_not_write_tool_argument_deltas() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentToolCallStarted(
+            type=AGENT_EVENT_TOOL_CALL_STARTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="started-tool",
+            namespace="openai.responses",
+            call_id="call-started",
+            toolkit="storage",
+            tool="write_file",
+            arguments={"path": "src/app.py"},
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallArgumentsDelta(
+            type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="started-tool",
+            delta='{"content":"partial',
+        )
+    )
+    storage.push_message(
+        message=TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            error=AgentError(message="cancelled", code=None),
+        )
+    )
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "demo")]
+    assert [row["type"] for row in rows] == [
+        AGENT_EVENT_TOOL_CALL_STARTED,
+        AGENT_EVENT_TURN_ENDED,
+    ]
 
 
 @pytest.mark.asyncio

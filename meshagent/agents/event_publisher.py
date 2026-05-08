@@ -23,6 +23,7 @@ from .messages import (
     AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_IN_PROGRESS,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_STARTED,
@@ -48,6 +49,7 @@ from .messages import (
     AgentTextContentEnded,
     AgentTextContentStarted,
     AgentThreadEvent,
+    AgentToolCallArgumentsDelta,
     AgentToolCallPending,
     AgentToolCallInProgress,
     AgentToolCallLogDelta,
@@ -119,6 +121,15 @@ def _parse_tool_arguments(value: Any) -> dict[str, Any] | None:
             return parsed
         return {"value": parsed}
     return None
+
+
+def _tool_arguments_delta_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, separators=(",", ":"))
+    except TypeError:
+        return str(value)
 
 
 def _parse_tool_log_lines(value: Any) -> list[AgentToolCallLogLine]:
@@ -919,6 +930,35 @@ class _AgentMessageEmitter:
             )
         )
 
+    def emit_tool_arguments_delta(
+        self,
+        *,
+        item_id: str,
+        delta: str,
+        info: _ToolCallInfo | None = None,
+    ) -> None:
+        if delta == "":
+            return
+        resolved_info = (
+            info
+            or self._pending_tool_calls.get(item_id)
+            or self._in_progress_tool_calls.get(item_id)
+            or self._started_tool_calls.get(item_id)
+        )
+        self.callback(
+            AgentToolCallArgumentsDelta(
+                type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                namespace=resolved_info.namespace
+                if resolved_info is not None
+                else _MESHAGENT_TOOL_NAMESPACE,
+                call_id=resolved_info.call_id if resolved_info is not None else None,
+                delta=delta,
+            )
+        )
+
     def emit_tool_ended(self, *, info: _ToolCallInfo) -> None:
         self.emit_tool_started(info=info)
         existing = self._ended_tool_calls.get(info.item_id)
@@ -1477,6 +1517,19 @@ class _OpenAIAgentEventPublisher:
             self._on_text_delta(event=event)
             return
 
+        if event_type in {
+            "response.function_call_arguments.delta",
+            "response.mcp_call.arguments.delta",
+        }:
+            item_id = self._item_id_from_event(event=event)
+            if item_id is None:
+                return
+            self.emitter.emit_tool_arguments_delta(
+                item_id=item_id,
+                delta=_tool_arguments_delta_text(event.get("delta")),
+            )
+            return
+
         if event_type == "response.output_text.done":
             self._on_text_done(event=event, field_name="text")
             return
@@ -1768,7 +1821,12 @@ class _AnthropicAgentEventPublisher:
                 return
 
             if state.kind == "tool" and delta_type == "input_json_delta":
-                state.arguments_text += _as_text(delta.get("partial_json")) or ""
+                partial_json = _as_text(delta.get("partial_json")) or ""
+                state.arguments_text += partial_json
+                self._openai_publisher.emitter.emit_tool_arguments_delta(
+                    item_id=state.item_id,
+                    delta=partial_json,
+                )
                 return
 
             if state.kind == "file":

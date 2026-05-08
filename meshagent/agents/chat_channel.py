@@ -22,6 +22,8 @@ from .messages import (
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+    AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
@@ -48,6 +50,7 @@ from .messages import (
     ClearThread,
     CloseThread,
     AgentThreadStatus,
+    AgentToolCallEnded,
     OpenThread,
     RejectAgentToolCall,
     StartThread,
@@ -135,6 +138,9 @@ class ChatChannel(ThreadedChannel):
         self._active_turn_ids_by_thread: dict[str, str] = {}
         self._open_participant_ids_by_thread: dict[str, set[str]] = {}
         self._event_buffer_by_thread: dict[str, list[dict[str, Any]]] = {}
+        self._tool_argument_delta_buffer_by_thread_item: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
         self._thread_status_by_thread: dict[str, dict[str, Any]] = {}
         self._turn_input_payloads_by_message_id: dict[str, dict[str, Any]] = {}
         self._max_event_buffer_size = 512
@@ -183,6 +189,7 @@ class ChatChannel(ThreadedChannel):
         self._active_turn_ids_by_thread.clear()
         self._open_participant_ids_by_thread.clear()
         self._event_buffer_by_thread.clear()
+        self._tool_argument_delta_buffer_by_thread_item.clear()
         self._thread_status_by_thread.clear()
         self._turn_input_payloads_by_message_id.clear()
 
@@ -293,6 +300,20 @@ class ChatChannel(ThreadedChannel):
             return
 
         thread_id = raw_thread_id.strip()
+        if payload.get("type") == AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA:
+            raw_item_id = payload.get("item_id")
+            if not isinstance(raw_item_id, str) or raw_item_id.strip() == "":
+                return
+            key = (thread_id, raw_item_id.strip())
+            existing = self._tool_argument_delta_buffer_by_thread_item.get(key)
+            if existing is None:
+                self._tool_argument_delta_buffer_by_thread_item[key] = dict(payload)
+                return
+            existing["delta"] = f"{existing.get('delta', '')}{payload.get('delta', '')}"
+            existing["message_id"] = payload.get(
+                "message_id", existing.get("message_id")
+            )
+            return
         buffer = self._event_buffer_by_thread.setdefault(thread_id, [])
         buffer.append(dict(payload))
         if len(buffer) > self._max_event_buffer_size:
@@ -349,6 +370,7 @@ class ChatChannel(ThreadedChannel):
             thread_cleared = self._coerce_message(data=data, model=ThreadCleared)
             self._clear_tracked_thread_state(thread_id=thread_cleared.thread_id)
             self._event_buffer_by_thread.pop(thread_cleared.thread_id, None)
+            self._clear_tool_argument_delta_buffer(thread_id=thread_cleared.thread_id)
             self._thread_status_by_thread.pop(thread_cleared.thread_id, None)
             return
 
@@ -358,7 +380,15 @@ class ChatChannel(ThreadedChannel):
             if tracked_turn_id == turn_ended.turn_id:
                 self._active_turn_ids_by_thread.pop(turn_ended.thread_id, None)
             self._event_buffer_by_thread.pop(turn_ended.thread_id, None)
+            self._clear_tool_argument_delta_buffer(thread_id=turn_ended.thread_id)
             self._thread_status_by_thread.pop(turn_ended.thread_id, None)
+            return
+
+        if data.type == AGENT_EVENT_TOOL_CALL_ENDED:
+            tool_call_ended = self._coerce_message(data=data, model=AgentToolCallEnded)
+            self._tool_argument_delta_buffer_by_thread_item.pop(
+                (tool_call_ended.thread_id, tool_call_ended.item_id), None
+            )
 
     def _on_room_message(self, *, message: RoomMessage) -> None:
         sender = self._room.messaging.get_participant(message.from_participant_id)
@@ -583,6 +613,18 @@ class ChatChannel(ThreadedChannel):
                     buffered_accepted_source_message_ids.add(source_message_id)
             self._send_agent_payload_nowait(participant=participant, payload=payload)
 
+        status_payload = self._thread_status_by_thread.get(thread_id)
+        if status_payload is not None:
+            self._send_agent_payload_nowait(
+                participant=participant,
+                payload=status_payload,
+            )
+
+        for payload in self._coalesced_tool_argument_delta_payloads(
+            thread_id=thread_id
+        ):
+            self._send_agent_payload_nowait(participant=participant, payload=payload)
+
         for payload in self._pending_accepted_turn_payloads(thread_id=thread_id):
             source_message_id = payload.get("source_message_id")
             if (
@@ -592,12 +634,24 @@ class ChatChannel(ThreadedChannel):
                 continue
             self._send_agent_payload_nowait(participant=participant, payload=payload)
 
-        status_payload = self._thread_status_by_thread.get(thread_id)
-        if status_payload is not None:
-            self._send_agent_payload_nowait(
-                participant=participant,
-                payload=status_payload,
-            )
+    def _coalesced_tool_argument_delta_payloads(
+        self, *, thread_id: str
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(payload)
+            for (
+                payload_thread_id,
+                _,
+            ), payload in self._tool_argument_delta_buffer_by_thread_item.items()
+            if payload_thread_id == thread_id
+        ]
+
+    def _clear_tool_argument_delta_buffer(self, *, thread_id: str) -> None:
+        self._tool_argument_delta_buffer_by_thread_item = {
+            key: payload
+            for key, payload in self._tool_argument_delta_buffer_by_thread_item.items()
+            if key[0] != thread_id
+        }
 
     def _pending_accepted_turn_payloads(
         self, *, thread_id: str

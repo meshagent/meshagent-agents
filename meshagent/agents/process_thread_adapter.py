@@ -55,6 +55,7 @@ from .messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentToolCallArgumentsDelta,
     AgentToolCallApprovalRequested,
     AgentToolCallEnded,
     AgentToolCallInProgress,
@@ -94,6 +95,10 @@ _APPLY_PATCH_PATH_RES = (
     re.compile(r"^(?:\+\+\+ b/|--- a/)(?P<path>.+)$", re.MULTILINE),
 )
 _IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+
+
+def _status_total_bytes(total_bytes: int) -> int | None:
+    return total_bytes if total_bytes > 100 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +419,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._active_event_elements_by_key: dict[str, Element] = {}
         self._active_event_elements_by_item_id: dict[str, Element] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
+        self._tool_argument_delta_bytes_by_item_id: dict[str, int] = {}
         self._saved_image_ids_by_item_id: dict[str, str] = {}
         self._thread_status_lock = asyncio.Lock()
         self._thread_status_generation = 0
@@ -424,6 +430,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._thread_status_turn_id_value: str | None = None
         self._thread_status_pending_messages_value: list[dict[str, Any]] = []
         self._thread_status_pending_item_id_value: str | None = None
+        self._thread_status_total_bytes_value: int | None = None
         self._restore_message_count: int | None = None
 
     async def start(self) -> None:
@@ -947,6 +954,24 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 item_id=message.item_id,
                 lines=message.lines,
             )
+        elif isinstance(message, AgentToolCallArgumentsDelta):
+            delta_bytes = len(message.delta.encode("utf-8"))
+            if delta_bytes > 0:
+                total_delta_bytes = (
+                    self._tool_argument_delta_bytes_by_item_id.get(message.item_id, 0)
+                    + delta_bytes
+                )
+                self._tool_argument_delta_bytes_by_item_id[message.item_id] = (
+                    total_delta_bytes
+                )
+                if (
+                    self._thread_status_pending_item_id_value == message.item_id
+                    and self._thread_status_value is not None
+                ):
+                    await self.set_thread_status(
+                        status=self._thread_status_value,
+                        total_bytes=_status_total_bytes(total_delta_bytes),
+                    )
         else:
             if isinstance(message, AgentToolCallEnded):
                 await self._persist_generated_image_result(message=message)
@@ -968,6 +993,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 await self._update_thread_status_from_event(event=normalized_event)
             if isinstance(message, AgentToolCallEnded):
                 self._active_tool_calls_by_item_id.pop(message.item_id, None)
+                self._tool_argument_delta_bytes_by_item_id.pop(message.item_id, None)
 
     def _write_turn_message(
         self,
@@ -1372,6 +1398,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._active_message_elements_by_key.clear()
         self._active_reasoning_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
+        self._tool_argument_delta_bytes_by_item_id.clear()
 
     async def _clear_thread_contents(self, *, messages: Element) -> None:
         self._clear_active_turn_state()
@@ -2775,6 +2802,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
     def _thread_status_pending_item_id_attribute_name(self) -> str:
         return f"thread.status.pending_item_id.{self.path}"
 
+    def _thread_status_total_bytes_attribute_name(self) -> str:
+        return f"thread.status.total_bytes.{self.path}"
+
     def processing_thread_status_mode(self) -> ThreadStatusMode:
         return "steerable"
 
@@ -2837,6 +2867,14 @@ class MeshDocumentThreadStorage(ThreadStorage):
             self._thread_status_pending_item_id_attribute_name(),
             self._thread_status_pending_item_id_value,
         )
+        await self._set_local_participant_attribute(
+            self._thread_status_total_bytes_attribute_name(),
+            (
+                str(self._thread_status_total_bytes_value)
+                if self._thread_status_total_bytes_value is not None
+                else None
+            ),
+        )
 
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._thread_status_lock:
@@ -2870,18 +2908,23 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         status: str | None,
         mode: ThreadStatusMode | None = None,
+        total_bytes: int | None = None,
     ) -> None:
         if status is None or status.strip() == "":
             self._thread_status_value = None
             self._thread_status_mode_value = None
             self._thread_status_started_at_value = None
             self._thread_status_pending_item_id_value = None
+            self._thread_status_total_bytes_value = None
             await self._write_thread_status_attributes()
             return
 
         normalized_status = status.strip()
         normalized_mode = (
             mode if mode is not None else self.processing_thread_status_mode()
+        )
+        normalized_total_bytes = (
+            total_bytes if total_bytes is not None and total_bytes > 0 else None
         )
         started_at = self._thread_status_started_at_value
         if (
@@ -2895,12 +2938,14 @@ class MeshDocumentThreadStorage(ThreadStorage):
             self._thread_status_value == normalized_status
             and self._thread_status_mode_value == normalized_mode
             and self._thread_status_started_at_value == started_at
+            and self._thread_status_total_bytes_value == normalized_total_bytes
         ):
             return
 
         self._thread_status_value = normalized_status
         self._thread_status_mode_value = normalized_mode
         self._thread_status_started_at_value = started_at
+        self._thread_status_total_bytes_value = normalized_total_bytes
         await self._write_thread_status_attributes()
 
     def _next_thread_status_generation(self) -> int:
@@ -2911,21 +2956,28 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self,
         *,
         status: str | None,
+        total_bytes: int | None = None,
         generation: int | None = None,
     ) -> None:
         async with self._thread_status_lock:
             if generation is not None and generation != self._thread_status_generation:
                 return
 
-            await self.set_thread_status(status=status)
+            await self.set_thread_status(status=status, total_bytes=total_bytes)
 
-    def _set_thread_status_nowait(self, *, status: str | None) -> None:
+    def _set_thread_status_nowait(
+        self,
+        *,
+        status: str | None,
+        total_bytes: int | None = None,
+    ) -> None:
         generation = self._next_thread_status_generation()
 
         async def run() -> None:
             try:
                 await self._apply_thread_status(
                     status=status,
+                    total_bytes=total_bytes,
                     generation=generation,
                 )
             except Exception:
@@ -2959,7 +3011,15 @@ class MeshDocumentThreadStorage(ThreadStorage):
             self._thread_status_pending_item_id_value = (
                 event.item_id.strip() if event.item_id.strip() != "" else None
             )
-            await self.set_thread_status(status=text)
+            total_bytes = None
+            if self._thread_status_pending_item_id_value is not None:
+                total_bytes = _status_total_bytes(
+                    self._tool_argument_delta_bytes_by_item_id.get(
+                        self._thread_status_pending_item_id_value,
+                        0,
+                    )
+                )
+            await self.set_thread_status(status=text, total_bytes=total_bytes)
             return
 
         fallback_status = "Thinking"

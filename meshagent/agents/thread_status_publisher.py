@@ -38,6 +38,7 @@ class ThreadStatusPublisher(Protocol):
         status: str | None,
         mode: ThreadStatusMode | None = None,
         pending_item_id: str | None = None,
+        total_bytes: int | None = None,
     ) -> None: ...
 
     async def clear_thread_status(self) -> None: ...
@@ -63,6 +64,7 @@ class ParticipantAttributeThreadStatusPublisher:
         self._turn_id_value: str | None = None
         self._pending_messages_value: list[dict[str, Any]] = []
         self._pending_item_id_value: str | None = None
+        self._total_bytes_value: int | None = None
 
     def _attribute_name(self, suffix: str) -> str:
         return f"thread.status{suffix}.{self._attribute_path_suffix}"
@@ -84,6 +86,9 @@ class ParticipantAttributeThreadStatusPublisher:
 
     def _pending_item_id_attribute_name(self) -> str:
         return self._attribute_name(".pending_item_id")
+
+    def _total_bytes_attribute_name(self) -> str:
+        return self._attribute_name(".total_bytes")
 
     async def _set_attribute(self, name: str, value: str | None) -> None:
         try:
@@ -123,6 +128,12 @@ class ParticipantAttributeThreadStatusPublisher:
             self._pending_item_id_attribute_name(),
             self._pending_item_id_value,
         )
+        await self._set_attribute(
+            self._total_bytes_attribute_name(),
+            str(self._total_bytes_value)
+            if self._total_bytes_value is not None
+            else None,
+        )
 
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._lock:
@@ -152,6 +163,7 @@ class ParticipantAttributeThreadStatusPublisher:
         status: str | None,
         mode: ThreadStatusMode | None = None,
         pending_item_id: str | None = None,
+        total_bytes: int | None = None,
     ) -> None:
         async with self._lock:
             if status is None or status.strip() == "":
@@ -159,6 +171,7 @@ class ParticipantAttributeThreadStatusPublisher:
                 self._mode_value = None
                 self._started_at_value = None
                 self._pending_item_id_value = None
+                self._total_bytes_value = None
                 await self._write_status_attributes()
                 return
 
@@ -167,6 +180,11 @@ class ParticipantAttributeThreadStatusPublisher:
             normalized_pending_item_id = (
                 pending_item_id.strip()
                 if isinstance(pending_item_id, str) and pending_item_id.strip() != ""
+                else None
+            )
+            normalized_total_bytes = (
+                total_bytes
+                if isinstance(total_bytes, int) and total_bytes > 0
                 else None
             )
             started_at = self._started_at_value
@@ -189,6 +207,7 @@ class ParticipantAttributeThreadStatusPublisher:
                 and self._mode_value == normalized_mode
                 and self._started_at_value == started_at
                 and self._pending_item_id_value == normalized_pending_item_id
+                and self._total_bytes_value == normalized_total_bytes
             ):
                 return
 
@@ -196,6 +215,7 @@ class ParticipantAttributeThreadStatusPublisher:
             self._mode_value = normalized_mode
             self._started_at_value = started_at
             self._pending_item_id_value = normalized_pending_item_id
+            self._total_bytes_value = normalized_total_bytes
             await self._write_status_attributes()
 
     def _next_generation(self) -> int:
@@ -250,6 +270,8 @@ class AgentMessageThreadStatusPublisher:
         self._mode_value: ThreadStatusMode | None = None
         self._started_at_value: str | None = None
         self._turn_id_value: str | None = None
+        self._pending_item_id_value: str | None = None
+        self._total_bytes_value: int | None = None
 
     def _publish_current_status(self) -> None:
         try:
@@ -261,6 +283,8 @@ class AgentMessageThreadStatusPublisher:
                     mode=self._mode_value,
                     started_at=self._started_at_value,
                     turn_id=self._turn_id_value,
+                    pending_item_id=self._pending_item_id_value,
+                    total_bytes=self._total_bytes_value,
                 )
             )
         except Exception:
@@ -287,6 +311,7 @@ class AgentMessageThreadStatusPublisher:
         status: str | None,
         mode: ThreadStatusMode | None = None,
         pending_item_id: str | None = None,
+        total_bytes: int | None = None,
     ) -> None:
         async with self._lock:
             if status is None or status.strip() == "":
@@ -294,18 +319,31 @@ class AgentMessageThreadStatusPublisher:
                     self._status_value is None
                     and self._mode_value is None
                     and self._started_at_value is None
+                    and self._pending_item_id_value is None
+                    and self._total_bytes_value is None
                 ):
                     return
 
                 self._status_value = None
                 self._mode_value = None
                 self._started_at_value = None
+                self._pending_item_id_value = None
+                self._total_bytes_value = None
                 self._publish_current_status()
                 return
 
             normalized_status = status.strip()
             normalized_mode = mode if mode is not None else self._mode
-            del pending_item_id
+            normalized_pending_item_id = (
+                pending_item_id.strip()
+                if isinstance(pending_item_id, str) and pending_item_id.strip() != ""
+                else None
+            )
+            normalized_total_bytes = (
+                total_bytes
+                if isinstance(total_bytes, int) and total_bytes > 0
+                else None
+            )
             started_at = self._started_at_value
             if (
                 started_at is None
@@ -320,12 +358,16 @@ class AgentMessageThreadStatusPublisher:
                 self._status_value == normalized_status
                 and self._mode_value == normalized_mode
                 and self._started_at_value == started_at
+                and self._pending_item_id_value == normalized_pending_item_id
+                and self._total_bytes_value == normalized_total_bytes
             ):
                 return
 
             self._status_value = normalized_status
             self._mode_value = normalized_mode
             self._started_at_value = started_at
+            self._pending_item_id_value = normalized_pending_item_id
+            self._total_bytes_value = normalized_total_bytes
             self._publish_current_status()
 
     def _next_generation(self) -> int:

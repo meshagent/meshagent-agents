@@ -6,6 +6,7 @@ import pytest
 
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.chat_channel import ChatChannel
+import meshagent.agents.thread_storage as thread_storage_module
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -17,6 +18,8 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+    AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
@@ -41,6 +44,8 @@ from meshagent.agents.messages import (
     AgentTextContentEnded,
     AgentTextContentStarted,
     AgentThreadStatus,
+    AgentToolCallArgumentsDelta,
+    AgentToolCallPending,
     AgentUsageUpdated,
     ApproveAgentToolCall,
     CapabilitiesRequest,
@@ -139,6 +144,13 @@ class _FakeStorage:
     async def exists(self, *, path: str) -> bool:
         self.exists_calls.append(path)
         return path in self._existing_paths
+
+
+class _HangingStorage(_FakeStorage):
+    async def exists(self, *, path: str) -> bool:
+        self.exists_calls.append(path)
+        await asyncio.Event().wait()
+        return False
 
 
 class _FakeMessaging:
@@ -438,6 +450,62 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
         assert entries[0].get_attribute("name") == "Plan this friendly thread"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_start_thread_message_responds_when_storage_exists_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        thread_storage_module,
+        "THREAD_PATH_EXISTS_TIMEOUT_SECONDS",
+        0.01,
+    )
+    caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
+    storage = _HangingStorage()
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        storage=storage,
+    )
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="agents/assistant/threads",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
+        )
+
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
+
+        assert len(room.messaging.sent_messages) == 1
+        response_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
+        assert response_payload["source_message_id"] == "start-thread-1"
+        result_path = response_payload["thread_id"]
+        assert isinstance(result_path, str)
+        _assert_uuid_thread_path(path=result_path, prefix="agents/assistant/threads/")
+        assert storage.exists_calls == [result_path]
+        assert len(supervisor.sent) == 1
+        assert supervisor.sent[0].data.thread_id == result_path
     finally:
         await channel.stop(supervisor)
 
@@ -1473,6 +1541,91 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_agent_open_replays_coalesced_tool_argument_delta() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        await channel.on_message(
+            Message(
+                data=AgentToolCallPending(
+                    type=AGENT_EVENT_TOOL_CALL_PENDING,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="tool-1",
+                    toolkit="storage",
+                    tool="write_file",
+                    arguments={"path": "src/app.py"},
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentToolCallArgumentsDelta(
+                    type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="tool-1",
+                    delta="abc",
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentToolCallArgumentsDelta(
+                    type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="tool-1",
+                    delta="def",
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentThreadStatus(
+                    type=AGENT_EVENT_THREAD_STATUS,
+                    thread_id="/threads/test.thread",
+                    status="Preparing Command",
+                    mode="busy",
+                    started_at="2026-05-07T16:00:00Z",
+                    turn_id="turn-1",
+                    pending_item_id="tool-1",
+                )
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        payloads = [sent["message"]["payload"] for sent in room.messaging.sent_messages]
+        assert [payload["type"] for payload in payloads] == [
+            AGENT_EVENT_TOOL_CALL_PENDING,
+            AGENT_EVENT_THREAD_STATUS,
+            AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+        ]
+        assert payloads[1]["status"] == "Preparing Command"
+        assert payloads[1]["pending_item_id"] == "tool-1"
+        assert payloads[2]["item_id"] == "tool-1"
+        assert payloads[2]["delta"] == "abcdef"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_agent_open_replays_current_thread_status() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
@@ -1522,15 +1675,12 @@ async def test_chat_channel_agent_open_replays_current_thread_status() -> None:
 
         assert len(room.messaging.sent_messages) == 1
         payload = room.messaging.sent_messages[0]["message"]["payload"]
-        assert payload == {
-            "type": AGENT_EVENT_THREAD_STATUS,
-            "thread_id": "/threads/test.thread",
-            "message_id": payload["message_id"],
-            "status": "Generating image",
-            "mode": "steerable",
-            "started_at": "2026-05-07T16:00:05Z",
-            "turn_id": "turn-1",
-        }
+        assert payload["type"] == AGENT_EVENT_THREAD_STATUS
+        assert payload["thread_id"] == "/threads/test.thread"
+        assert payload["status"] == "Generating image"
+        assert payload["mode"] == "steerable"
+        assert payload["started_at"] == "2026-05-07T16:00:05Z"
+        assert payload["turn_id"] == "turn-1"
 
         room.messaging.emit_message(
             RoomMessage(

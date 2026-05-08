@@ -52,6 +52,7 @@ AGENT_EVENT_FILE_CONTENT_ENDED = "meshagent.agent.file_content.ended"
 AGENT_EVENT_TOOL_CALL_PENDING = "meshagent.agent.tool_call.pending"
 AGENT_EVENT_TOOL_CALL_IN_PROGRESS = "meshagent.agent.tool_call.in_progress"
 AGENT_EVENT_TOOL_CALL_STARTED = "meshagent.agent.tool_call.started"
+AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA = "meshagent.agent.tool_call.arguments_delta"
 AGENT_EVENT_TOOL_CALL_LOG_DELTA = "meshagent.agent.tool_call.log_delta"
 AGENT_EVENT_TOOL_CALL_ENDED = "meshagent.agent.tool_call.ended"
 AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
@@ -336,6 +337,15 @@ class AgentToolCallStarted(AgentLLMMessage):
     arguments: Optional[dict] = None
 
 
+class AgentToolCallArgumentsDelta(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA]
+    turn_id: str
+    item_id: str
+    namespace: str = "meshagent"
+    call_id: str | None = None
+    delta: str
+
+
 class AgentToolCallLogLine(BaseModel):
     source: Literal["stdout", "stderr"]
     text: str
@@ -386,6 +396,8 @@ class AgentThreadStatus(AgentThreadMessage):
     mode: Literal["busy", "steerable"] | None = None
     started_at: str | None = None
     turn_id: str | None = None
+    pending_item_id: str | None = None
+    total_bytes: int | None = None
 
 
 class AgentThreadEvent(AgentLLMMessage):
@@ -520,6 +532,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_TOOL_CALL_PENDING: AgentToolCallPending,
     AGENT_EVENT_TOOL_CALL_IN_PROGRESS: AgentToolCallInProgress,
     AGENT_EVENT_TOOL_CALL_STARTED: AgentToolCallStarted,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA: AgentToolCallArgumentsDelta,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA: AgentToolCallLogDelta,
     AGENT_EVENT_TOOL_CALL_ENDED: AgentToolCallEnded,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED: AgentToolCallApprovalRequested,

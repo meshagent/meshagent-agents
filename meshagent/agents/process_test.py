@@ -27,11 +27,13 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TOOL_CALL_PENDING,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_EVENT_THREAD_STATUS,
+    AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_REASONING_CONTENT_DELTA,
     AGENT_EVENT_REASONING_CONTENT_ENDED,
     AGENT_EVENT_REASONING_CONTENT_STARTED,
@@ -69,11 +71,13 @@ from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentToolCallArgumentsDelta,
     AgentToolCallLogDelta,
     AgentToolCallLogLine,
     AgentToolCallPending,
     AgentToolCallStarted,
     AgentToolCallEnded,
+    AgentThreadEvent,
     AgentThreadStatus,
     ClearThread,
     OpenThread,
@@ -462,12 +466,14 @@ class _RecordingThreadStatusPublisher:
         status: str | None,
         mode=None,
         pending_item_id: str | None = None,
+        total_bytes: int | None = None,
     ) -> None:
         self.statuses.append(
             {
                 "status": status,
                 "mode": mode,
                 "pending_item_id": pending_item_id,
+                "total_bytes": total_bytes,
             }
         )
 
@@ -1151,6 +1157,160 @@ class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
         del tool_choice
         if event_handler is not None:
             event_handler({"type": "shell_started"})
+        self.started.set()
+        await self.release.wait()
+        return {"ok": True}
+
+
+class _ToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            del event
+            callback(
+                AgentToolCallPending(
+                    type=AGENT_EVENT_TOOL_CALL_PENDING,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="write-tool",
+                    toolkit="storage",
+                    tool="write_file",
+                    arguments={"path": "src/app.py"},
+                )
+            )
+            callback(
+                AgentToolCallArgumentsDelta(
+                    type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="write-tool",
+                    delta="x" * 120,
+                )
+            )
+
+        return publish
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del caller
+        del toolkits
+        del output_schema
+        if event_handler is not None:
+            event_handler({"type": "argument_delta_started"})
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
+        self.started.set()
+        await self.release.wait()
+        return {"ok": True}
+
+
+class _ToolEventArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            del event
+            callback(
+                AgentThreadEvent(
+                    type=AGENT_EVENT_THREAD_EVENT,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="shell-tool",
+                    event={
+                        "type": "agent.event",
+                        "state": "pending",
+                        "headline": "Preparing Command",
+                    },
+                )
+            )
+            callback(
+                AgentToolCallArgumentsDelta(
+                    type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="shell-tool",
+                    delta="x" * 140,
+                )
+            )
+
+        return publish
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del caller
+        del toolkits
+        del output_schema
+        if event_handler is not None:
+            event_handler({"type": "argument_delta_started"})
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
         self.started.set()
         await self.release.wait()
         return {"ok": True}
@@ -4581,6 +4741,82 @@ async def test_llm_agent_process_publishes_tool_status_from_agent_messages() -> 
         await process.stop(supervisor)
 
 
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_tool_argument_delta_size() -> None:
+    adapter = _ToolArgumentDeltaStatusLLMAdapter()
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write the file"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Preparing to write src/app.py"
+                and status["pending_item_id"] == "write-tool"
+                and status["total_bytes"] == 120
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_tool_event_argument_delta_size() -> None:
+    adapter = _ToolEventArgumentDeltaStatusLLMAdapter()
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "run the command"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Preparing Command"
+                and status["pending_item_id"] == "shell-tool"
+                and status["total_bytes"] == 140
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
 def test_llm_agent_process_does_not_handle_clear_thread() -> None:
     room = _DownloadRecordingRoom()
     llm_adapter = _RecordingLLMAdapter()
@@ -6661,29 +6897,36 @@ async def test_agent_message_thread_status_publisher_publishes_status_messages()
     await publisher.set_thread_status(
         status=" Generating image ",
         pending_item_id=" image-1 ",
+        total_bytes=240,
     )
     active_status = published[-1]
     assert active_status.status == "Generating image"
     assert active_status.mode == "steerable"
     assert active_status.started_at is not None
+    assert active_status.pending_item_id == "image-1"
+    assert active_status.total_bytes == 240
 
     await publisher.set_thread_status(
         status="Generating image",
         pending_item_id="image-1",
+        total_bytes=240,
     )
     assert published[-1] == active_status
 
     await publisher.set_thread_status(
         status="Generating image",
         pending_item_id="image-2",
+        total_bytes=240,
     )
-    assert published[-1] == active_status
+    assert published[-1].pending_item_id == "image-2"
 
     await publisher.clear_thread_status()
     assert published[-1].status is None
     assert published[-1].mode is None
     assert published[-1].started_at is None
     assert published[-1].turn_id == "turn-1"
+    assert published[-1].pending_item_id is None
+    assert published[-1].total_bytes is None
 
 
 @pytest.mark.asyncio

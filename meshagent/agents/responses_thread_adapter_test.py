@@ -6,6 +6,8 @@ from meshagent.agents.messages import (
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    AgentToolCallArgumentsDelta,
+    AgentToolCallPending,
 )
 from meshagent.agents.responses_thread_adapter import (
     _headline_for_response_event,
@@ -61,6 +63,43 @@ def test_openai_event_publisher_preserves_commentary_message_phase() -> None:
     assert messages[1].phase == "commentary"
     assert isinstance(messages[2], AgentTextContentEnded)
     assert messages[2].phase == "commentary"
+
+
+def test_openai_event_publisher_emits_tool_argument_delta() -> None:
+    messages: list[AgentMessage] = []
+    publisher = make_openai_agent_event_publisher(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        callback=messages.append,
+    )
+
+    publisher(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item_id": "tool-1",
+            "item": {
+                "id": "tool-1",
+                "type": "function_call",
+                "name": "write_file",
+                "call_id": "call-1",
+                "arguments": "",
+            },
+        }
+    )
+    publisher(
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": '{"path":"src/app.py"',
+        }
+    )
+
+    assert isinstance(messages[0], AgentToolCallPending)
+    assert isinstance(messages[1], AgentToolCallArgumentsDelta)
+    assert messages[1].item_id == "tool-1"
+    assert messages[1].call_id == "call-1"
+    assert messages[1].delta == '{"path":"src/app.py"'
 
 
 def test_openai_event_publisher_emits_commentary_from_completed_snapshot() -> None:

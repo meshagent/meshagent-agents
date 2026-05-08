@@ -49,6 +49,7 @@ from .messages import (
     AgentThreadStatus,
     AgentToolCallEnded,
     AgentToolCallInProgress,
+    AgentToolCallArgumentsDelta,
     AgentToolCallLogDelta,
     AgentToolCallPending,
     AgentToolCallApprovalRequested,
@@ -657,6 +658,9 @@ class DatasetThreadStorage(ThreadStorage):
                 )
                 self._active_tool_calls_by_item_id[message.item_id] = active
             active.logs.extend([line.model_dump(mode="json") for line in message.lines])
+            return
+
+        if isinstance(message, AgentToolCallArgumentsDelta):
             return
 
         if isinstance(message, AgentToolCallEnded):

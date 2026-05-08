@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import posixpath
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -13,6 +14,8 @@ from .messages import AgentThreadMessage
 if TYPE_CHECKING:
     from .adapter import LLMAdapter
 
+THREAD_PATH_EXISTS_TIMEOUT_SECONDS = 2.0
+
 
 @runtime_checkable
 class ThreadStorage(Protocol):
@@ -24,7 +27,10 @@ class ThreadStorage(Protocol):
         extension: str = ".thread",
     ) -> str:
         try:
-            exists = await room.storage.exists(path=base_path)
+            exists = await asyncio.wait_for(
+                room.storage.exists(path=base_path),
+                timeout=THREAD_PATH_EXISTS_TIMEOUT_SECONDS,
+            )
         except Exception:
             return base_path
 
@@ -40,7 +46,11 @@ class ThreadStorage(Protocol):
         for index in range(2, 1000):
             candidate = posixpath.join(thread_dir, f"{base_name} {index}{extension}")
             try:
-                if not await room.storage.exists(path=candidate):
+                candidate_exists = await asyncio.wait_for(
+                    room.storage.exists(path=candidate),
+                    timeout=THREAD_PATH_EXISTS_TIMEOUT_SECONDS,
+                )
+                if not candidate_exists:
                     return candidate
             except Exception:
                 return candidate
