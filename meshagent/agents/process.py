@@ -60,6 +60,7 @@ from .messages import (
     AgentError,
     AgentFileContent,
     AgentContextCompacted,
+    AgentLLMMessage,
     AgentMessage,
     AgentTextContent,
     AgentToolCallApprovalRequested,
@@ -495,6 +496,16 @@ class Channel:
 
         supervisor.send(Message(data=payload, sender=sender, source=self))
 
+    def send_agent_message_to_participant(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        del participant
+        del payload
+        return False
+
     def get_agent_toolkits(self) -> list[Toolkit]:
         return []
 
@@ -751,7 +762,7 @@ class AgentSupervisor:
             process = self.create_thread_process(thread_id)
         except Exception as exc:
             logger.exception(
-                "failed to create process for thread %s; dropping message",
+                "failed to create process for thread %s; rejecting message",
                 thread_id,
             )
             return None, self._thread_process_creation_rejection(error=exc)
@@ -1495,12 +1506,36 @@ class LLMAgentProcess(AgentProcess):
         *,
         turn_id: str | None,
         sender: Participant | None,
+        source: Channel | AgentProcess | None = None,
     ) -> bool:
         usage_update = self._cached_usage_update(turn_id=turn_id)
         if usage_update is None:
             return False
-        self.emit(sender=sender, payload=usage_update)
+        self._send_thread_open_usage_update(
+            usage_update=usage_update,
+            sender=sender,
+            source=source,
+        )
         return True
+
+    def _send_thread_open_usage_update(
+        self,
+        *,
+        usage_update: AgentUsageUpdated,
+        sender: Participant | None,
+        source: Channel | AgentProcess | None = None,
+    ) -> None:
+        if (
+            sender is not None
+            and isinstance(source, Channel)
+            and source.send_agent_message_to_participant(
+                participant=sender,
+                payload=usage_update,
+            )
+        ):
+            return
+
+        super().emit(sender=sender, payload=usage_update)
 
     async def _compact_context_if_needed(
         self,
@@ -2219,6 +2254,21 @@ class LLMAgentProcess(AgentProcess):
         if turn_id is None or thread_id is None:
             raise RuntimeError("turn publisher requested without an active turn")
 
+        llm_provider = self.llm_adapter.provider_name()
+
+        def enrich_llm_message(message: AgentMessage) -> AgentMessage:
+            if not isinstance(message, AgentLLMMessage):
+                return message
+
+            updates: dict[str, str] = {}
+            if message.provider is None and llm_provider is not None:
+                updates["provider"] = llm_provider
+            if message.model is None:
+                updates["model"] = model
+            if len(updates) == 0:
+                return message
+            return message.model_copy(update=updates)
+
         def thread_status_from_agent_message(
             message: AgentMessage,
         ) -> tuple[str, str | None] | None:
@@ -2329,6 +2379,7 @@ class LLMAgentProcess(AgentProcess):
         def publish_event(message: AgentMessage) -> None:
             if self._interrupt_requested_turn_id == turn_id:
                 return
+            message = enrich_llm_message(message)
             publish_agent_message_status(message)
             self.emit(sender=sender, payload=message)
 
@@ -2523,7 +2574,7 @@ class LLMAgentProcess(AgentProcess):
             ),
             *queued_turn.queued_messages,
         ]
-        turn_id = str(uuid.uuid4())
+        turn_id = queued_turn.request.turn_id or str(uuid.uuid4())
         turn_span_context = tracer.start_as_current_span("agent.turn")
         turn_span = turn_span_context.__enter__()
         turn_span.set_attribute("thread_id", queued_turn.request.thread_id)
@@ -2779,16 +2830,29 @@ class LLMAgentProcess(AgentProcess):
 
     async def on_thread_open(self, message: Message) -> None:
         _coerce_message_data(message.data, OpenThread)
-        if self._emit_cached_usage_update(turn_id=self._turn_id, sender=message.sender):
-            return
-        session = await self.ensure_session_context(turn_id=None)
-        await self._emit_usage_update(
-            session=session,
-            model=self.llm_adapter.default_model(),
-            toolkits=self._toolkits,
+        if self._emit_cached_usage_update(
             turn_id=self._turn_id,
             sender=message.sender,
-            restore_context_from_storage=True,
+            source=message.source,
+        ):
+            return
+        session = await self.ensure_session_context(turn_id=None)
+        try:
+            usage_update = await self._build_usage_update(
+                session=session,
+                model=self.llm_adapter.default_model(),
+                toolkits=self._toolkits,
+                turn_id=self._turn_id,
+                restore_context_from_storage=True,
+            )
+        except Exception:
+            logger.debug("failed to publish agent usage update", exc_info=True)
+            return
+        self._last_usage_update = usage_update
+        self._send_thread_open_usage_update(
+            usage_update=usage_update,
+            sender=message.sender,
+            source=message.source,
         )
 
     async def on_thread_close(self, message: Message) -> None:
@@ -2796,6 +2860,8 @@ class LLMAgentProcess(AgentProcess):
 
     async def on_turn_start(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnStart)
+        turn_id = turn.turn_id or str(uuid.uuid4())
+        turn = turn.model_copy(update={"turn_id": turn_id})
         queued_message = _QueuedTurnMessage(
             sender=message.sender,
             request=turn,
@@ -2815,6 +2881,7 @@ class LLMAgentProcess(AgentProcess):
             payload=TurnStartAccepted(
                 type=AGENT_EVENT_TURN_START_ACCEPTED,
                 thread_id=turn.thread_id,
+                turn_id=turn_id,
                 source_message_id=turn.message_id,
             ),
         )

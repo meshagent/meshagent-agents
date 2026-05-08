@@ -751,6 +751,68 @@ async def test_chat_channel_attach_file_emits_file_content_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_attach_file_publishes_file_content_to_open_participants() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(
+        participants=[caller],
+        messaging_enabled=True,
+        storage=_FakeStorage(existing_paths={"docs/report.pdf"}),
+    )
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        attach_file_tool = next(
+            tool
+            for tool in channel.get_agent_toolkits()[0].tools
+            if tool.name == "attach_file"
+        )
+
+        await attach_file_tool.execute(
+            context=ToolContext(
+                caller=caller,
+                caller_context={
+                    "thread_id": "/threads/test.thread",
+                    "turn_id": "turn-1",
+                },
+            ),
+            path="docs/report.pdf",
+        )
+
+        payloads = [
+            sent["message"]["payload"]
+            for sent in room.messaging.sent_messages
+            if sent["type"] == "agent-message"
+        ]
+        assert [payload["type"] for payload in payloads] == [
+            AGENT_EVENT_FILE_CONTENT_STARTED,
+            AGENT_EVENT_FILE_CONTENT_DELTA,
+            AGENT_EVENT_FILE_CONTENT_ENDED,
+        ]
+        assert payloads[1]["url"] == "room:///docs/report.pdf"
+        assert payloads[0]["item_id"] == payloads[1]["item_id"]
+        assert payloads[1]["item_id"] == payloads[2]["item_id"]
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
@@ -1558,7 +1620,13 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
         assert len(supervisor.sent) == 2
         assert isinstance(supervisor.sent[0].data, OpenThread)
         assert isinstance(supervisor.sent[1].data, TurnStart)
-        assert room.messaging.sent_messages == []
+        assert len(room.messaging.sent_messages) == 1
+        input_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert input_payload["type"] == AGENT_MESSAGE_TURN_START
+        assert input_payload["message_id"] == "user-message-1"
+        assert input_payload["content"] == [{"type": "text", "text": "hello"}]
+        assert input_payload["sender_name"] == "sender"
 
         await channel.on_message(
             Message(
@@ -1571,9 +1639,9 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
             )
         )
 
-        assert len(room.messaging.sent_messages) == 1
-        sent_payload = room.messaging.sent_messages[0]["message"]["payload"]
-        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert len(room.messaging.sent_messages) == 2
+        sent_payload = room.messaging.sent_messages[1]["message"]["payload"]
+        assert room.messaging.sent_messages[1]["to"] == viewer
         assert sent_payload["type"] == AGENT_EVENT_TURN_STARTED
         assert sent_payload["source_message_id"] == "user-message-1"
         assert sent_payload["content"] == [{"type": "text", "text": "hello"}]
@@ -1592,9 +1660,14 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
             )
         )
 
-        assert len(room.messaging.sent_messages) == 2
-        replayed_payload = room.messaging.sent_messages[1]["message"]["payload"]
-        assert room.messaging.sent_messages[1]["to"] == late_viewer
+        assert len(room.messaging.sent_messages) == 4
+        replayed_input_payload = room.messaging.sent_messages[2]["message"]["payload"]
+        replayed_payload = room.messaging.sent_messages[3]["message"]["payload"]
+        assert room.messaging.sent_messages[2]["to"] == late_viewer
+        assert replayed_input_payload["type"] == AGENT_MESSAGE_TURN_START
+        assert replayed_input_payload["message_id"] == "user-message-1"
+        assert replayed_input_payload["content"] == [{"type": "text", "text": "hello"}]
+        assert room.messaging.sent_messages[3]["to"] == late_viewer
         assert replayed_payload["type"] == AGENT_EVENT_TURN_STARTED
         assert replayed_payload["source_message_id"] == "user-message-1"
         assert replayed_payload["content"] == [{"type": "text", "text": "hello"}]
@@ -1643,13 +1716,19 @@ async def test_chat_channel_agent_open_replays_pending_turn_start_as_accepted() 
             )
         )
 
-        assert len(room.messaging.sent_messages) == 1
-        payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert len(room.messaging.sent_messages) == 2
+        input_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        payload = room.messaging.sent_messages[1]["message"]["payload"]
         assert room.messaging.sent_messages[0]["to"] == viewer
+        assert input_payload["type"] == AGENT_MESSAGE_TURN_START
+        assert input_payload["message_id"] == "user-message-1"
+        assert input_payload["content"] == [{"type": "text", "text": "hello"}]
+        assert input_payload["sender_name"] == "sender"
+        assert room.messaging.sent_messages[1]["to"] == viewer
         assert payload["type"] == AGENT_EVENT_TURN_START_ACCEPTED
         assert payload["source_message_id"] == "user-message-1"
-        assert payload["content"] == [{"type": "text", "text": "hello"}]
-        assert payload["sender_name"] == "sender"
+        assert "content" not in payload
+        assert "sender_name" not in payload or payload["sender_name"] is None
     finally:
         await channel.stop(supervisor)
 
@@ -1696,14 +1775,21 @@ async def test_chat_channel_agent_open_replays_pending_turn_steer_as_accepted() 
             )
         )
 
-        assert len(room.messaging.sent_messages) == 1
-        payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert len(room.messaging.sent_messages) == 2
+        input_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        payload = room.messaging.sent_messages[1]["message"]["payload"]
         assert room.messaging.sent_messages[0]["to"] == viewer
+        assert input_payload["type"] == AGENT_MESSAGE_TURN_STEER
+        assert input_payload["message_id"] == "user-message-2"
+        assert input_payload["turn_id"] == "turn-1"
+        assert input_payload["content"] == [{"type": "text", "text": "wait"}]
+        assert input_payload["sender_name"] == "sender"
+        assert room.messaging.sent_messages[1]["to"] == viewer
         assert payload["type"] == AGENT_EVENT_TURN_STEER_ACCEPTED
         assert payload["source_message_id"] == "user-message-2"
         assert payload["turn_id"] == "turn-1"
-        assert payload["content"] == [{"type": "text", "text": "wait"}]
-        assert payload["sender_name"] == "sender"
+        assert "content" not in payload
+        assert "sender_name" not in payload or payload["sender_name"] is None
     finally:
         await channel.stop(supervisor)
 
@@ -1752,7 +1838,13 @@ async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_pa
         assert len(supervisor.sent) == 2
         assert isinstance(supervisor.sent[0].data, OpenThread)
         assert isinstance(supervisor.sent[1].data, TurnSteer)
-        assert room.messaging.sent_messages == []
+        assert len(room.messaging.sent_messages) == 1
+        input_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert input_payload["type"] == AGENT_MESSAGE_TURN_STEER
+        assert input_payload["message_id"] == "user-message-2"
+        assert input_payload["content"] == [{"type": "text", "text": "wait"}]
+        assert input_payload["sender_name"] == "sender"
 
         await channel.on_message(
             Message(
@@ -1765,9 +1857,9 @@ async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_pa
             )
         )
 
-        assert len(room.messaging.sent_messages) == 1
-        sent_payload = room.messaging.sent_messages[0]["message"]["payload"]
-        assert room.messaging.sent_messages[0]["to"] == viewer
+        assert len(room.messaging.sent_messages) == 2
+        sent_payload = room.messaging.sent_messages[1]["message"]["payload"]
+        assert room.messaging.sent_messages[1]["to"] == viewer
         assert sent_payload["type"] == AGENT_EVENT_TURN_STEERED
         assert sent_payload["source_message_id"] == "user-message-2"
         assert sent_payload["content"] == [{"type": "text", "text": "wait"}]

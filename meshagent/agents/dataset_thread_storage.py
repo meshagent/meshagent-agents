@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import pyarrow as pa
 
-from meshagent.api import DatasetOptimizeConfig, Participant, RoomClient
+from meshagent.api import DatasetJson, DatasetOptimizeConfig, Participant, RoomClient
 from meshagent.api.messaging import TextContent
 from meshagent.tools import Toolkit, tool
 
@@ -29,7 +29,7 @@ from .messages import (
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AgentContextCompacted,
-    AgentFileContent,
+    AgentError,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
@@ -42,25 +42,30 @@ from .messages import (
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
     AgentReasoningContentStarted,
-    AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
     AgentThreadEvent,
+    AgentThreadStatus,
     AgentToolCallEnded,
     AgentToolCallInProgress,
     AgentToolCallLogDelta,
     AgentToolCallPending,
+    AgentToolCallApprovalRequested,
     AgentToolCallStarted,
     AgentUsageUpdated,
     ThreadCleared,
     TurnEnded,
+    TurnInterrupt,
+    TurnInterruptAccepted,
     TurnInterrupted,
     TurnStart,
     TurnStartAccepted,
     TurnStartRejected,
+    TurnStarted,
     TurnSteer,
     TurnSteerAccepted,
+    TurnSteered,
     TurnSteerRejected,
     parse_agent_message,
 )
@@ -154,6 +159,19 @@ def _image_generation_status(
     return "pending"
 
 
+def _is_cancellation_error(error: AgentError) -> bool:
+    normalized_code = error.code.strip().lower() if error.code is not None else ""
+    normalized_message = error.message.strip().lower()
+    return (
+        "cancel" in normalized_code
+        or "interrupt" in normalized_code
+        or "abort" in normalized_code
+        or "cancel" in normalized_message
+        or "interrupt" in normalized_message
+        or "abort" in normalized_message
+    )
+
+
 def _normalize_path_parts(*, path: str) -> list[str]:
     parts = [part for part in path.strip().split("/") if part != ""]
     if len(parts) == 0:
@@ -186,6 +204,7 @@ def _normalize_dataset_thread_storage_path(*, path: str) -> _DatasetThreadStorag
 class _StoredThreadRow:
     turn_id: str | None
     item_id: str
+    message_type: str | None
     sequence: int
     timestamp: str
     data: dict[str, Any]
@@ -208,6 +227,8 @@ class _ActiveContent:
     turn_id: str
     item_id: str
     message_id: str
+    provider: str | None = None
+    model: str | None = None
     parts: list[str] = field(default_factory=list)
 
 
@@ -216,6 +237,8 @@ class _ActiveToolCall:
     turn_id: str
     item_id: str
     message_id: str
+    provider: str | None = None
+    model: str | None = None
     namespace: str = "meshagent"
     call_id: str | None = None
     toolkit: str | None = None
@@ -223,6 +246,17 @@ class _ActiveToolCall:
     arguments: dict[str, Any] | None = None
     stage: Literal["pending", "in_progress", "started"] | None = None
     logs: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _ActiveImageGeneration:
+    turn_id: str
+    item_id: str
+    message_id: str
+    provider: str | None = None
+    model: str | None = None
+    started: AgentImageGenerationStarted | None = None
+    partial: AgentImageGenerationPartial | None = None
 
 
 class DatasetThreadStorage(ThreadStorage):
@@ -252,8 +286,12 @@ class DatasetThreadStorage(ThreadStorage):
         self._rows: list[_StoredThreadRow] = []
         self._next_sequence = 0
         self._pending_user_turns: dict[str, _QueuedThreadMessage] = {}
+        self._pending_user_turn_rows: dict[str, _StoredThreadRow] = {}
         self._active_content_by_item_id: dict[str, _ActiveContent] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
+        self._active_image_generations_by_item_id: dict[
+            str, _ActiveImageGeneration
+        ] = {}
 
     @property
     def path(self) -> str:
@@ -272,9 +310,14 @@ class DatasetThreadStorage(ThreadStorage):
             [
                 pa.field("turn_id", pa.string()),
                 pa.field("item_id", pa.string(), nullable=False),
+                pa.field("type", pa.string()),
                 pa.field("sequence", pa.int64(), nullable=False),
                 pa.field("timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
-                pa.field("data", pa.large_string(), nullable=False),
+                pa.field(
+                    "data",
+                    pa.json_(pa.large_string()),
+                    nullable=False,
+                ),
             ]
         )
 
@@ -369,18 +412,31 @@ class DatasetThreadStorage(ThreadStorage):
         raw_data = record.get("data")
         if not isinstance(item_id, str) or not isinstance(sequence, int):
             return None
-        if not isinstance(raw_data, str):
-            return None
-
-        try:
-            data = json.loads(raw_data)
-        except json.JSONDecodeError:
+        if isinstance(raw_data, DatasetJson):
+            data = raw_data.to_json()
+        elif isinstance(raw_data, dict):
+            data = raw_data
+        elif isinstance(raw_data, str):
+            try:
+                data = json.loads(raw_data)
+            except json.JSONDecodeError:
+                return None
+        else:
             return None
         if not isinstance(data, dict):
             return None
 
         raw_turn_id = record.get("turn_id")
         turn_id = raw_turn_id if isinstance(raw_turn_id, str) else None
+        raw_type = record.get("type")
+        raw_data_type = data.get("type")
+        message_type = (
+            raw_type
+            if isinstance(raw_type, str)
+            else raw_data_type
+            if isinstance(raw_data_type, str)
+            else None
+        )
         raw_timestamp = record.get("timestamp")
         if isinstance(raw_timestamp, datetime):
             timestamp = (
@@ -396,6 +452,7 @@ class DatasetThreadStorage(ThreadStorage):
         return _StoredThreadRow(
             turn_id=turn_id,
             item_id=item_id,
+            message_type=message_type,
             sequence=sequence,
             timestamp=timestamp,
             data=data,
@@ -436,26 +493,55 @@ class DatasetThreadStorage(ThreadStorage):
     ) -> None:
         if isinstance(message, ThreadCleared):
             self._pending_user_turns.clear()
+            self._pending_user_turn_rows.clear()
             self._active_content_by_item_id.clear()
             self._active_tool_calls_by_item_id.clear()
+            await self._append_message_row(message=message)
             return
 
-        if isinstance(message, (TurnStart, TurnSteer)):
-            self._pending_user_turns[message.message_id] = _QueuedThreadMessage(
+        if isinstance(message, TurnStart):
+            await self._flush_all_active(reason="completed")
+            queued = _QueuedThreadMessage(
                 message=message,
                 sender=sender,
             )
+            self._pending_user_turns[message.message_id] = queued
+            row = await self._append_message_row(
+                message=self._turn_input_with_sender_name(queued=queued)
+            )
+            self._pending_user_turn_rows[message.message_id] = row
+            return
+
+        if isinstance(message, TurnSteer):
+            await self._flush_turn_active_items(
+                turn_id=message.turn_id,
+                reason="completed",
+            )
+            queued = _QueuedThreadMessage(
+                message=message,
+                sender=sender,
+            )
+            self._pending_user_turns[message.message_id] = queued
+            row = await self._append_message_row(
+                message=self._turn_input_with_sender_name(queued=queued)
+            )
+            self._pending_user_turn_rows[message.message_id] = row
             return
 
         if isinstance(message, TurnStartAccepted):
+            await self._flush_all_active(reason="completed")
             await self._commit_pending_user_turn(
                 source_message_id=message.source_message_id,
-                turn_id=None,
+                turn_id=message.turn_id,
                 accepted_message=message,
             )
             return
 
         if isinstance(message, TurnSteerAccepted):
+            await self._flush_turn_active_items(
+                turn_id=message.turn_id,
+                reason="completed",
+            )
             await self._commit_pending_user_turn(
                 source_message_id=message.source_message_id,
                 turn_id=message.turn_id,
@@ -465,10 +551,14 @@ class DatasetThreadStorage(ThreadStorage):
 
         if isinstance(message, TurnSteerRejected):
             self._pending_user_turns.pop(message.source_message_id, None)
+            self._pending_user_turn_rows.pop(message.source_message_id, None)
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, TurnStartRejected):
             self._pending_user_turns.pop(message.source_message_id, None)
+            self._pending_user_turn_rows.pop(message.source_message_id, None)
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, AgentTextContentStarted):
@@ -477,6 +567,8 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 item_id=message.item_id,
                 message_id=message.message_id,
+                provider=message.provider,
+                model=message.model,
             )
             return
 
@@ -499,6 +591,8 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 item_id=message.item_id,
                 message_id=message.message_id,
+                provider=message.provider,
+                model=message.model,
             )
             return
 
@@ -521,6 +615,8 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 item_id=message.item_id,
                 message_id=message.message_id,
+                provider=message.provider,
+                model=message.model,
             )
             return
 
@@ -551,6 +647,8 @@ class DatasetThreadStorage(ThreadStorage):
                     turn_id=message.turn_id,
                     item_id=message.item_id,
                     message_id=message.message_id,
+                    provider=message.provider,
+                    model=message.model,
                     namespace=message.namespace,
                     call_id=message.call_id,
                     stage="in_progress",
@@ -568,27 +666,11 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         if isinstance(message, AgentContextCompacted):
-            await self._append_row(
-                turn_id=None,
-                item_id=message.message_id,
-                data={
-                    "kind": "compaction",
-                    "status": "completed",
-                    "message": message.model_dump(mode="json"),
-                },
-            )
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, AgentUsageUpdated):
-            await self._append_row(
-                turn_id=message.turn_id,
-                item_id=message.message_id,
-                data={
-                    "kind": "usage",
-                    "status": "completed",
-                    "message": message.model_dump(mode="json"),
-                },
-            )
+            await self._append_message_row(message=message)
             return
 
         if isinstance(
@@ -601,37 +683,21 @@ class DatasetThreadStorage(ThreadStorage):
             ),
         ):
             if isinstance(
-                message,
-                (AgentImageGenerationStarted, AgentImageGenerationPartial),
+                message, (AgentImageGenerationStarted, AgentImageGenerationPartial)
             ):
+                self._record_image_generation_state(message=message)
                 return
             if isinstance(
                 message,
                 (AgentImageGenerationCompleted, AgentImageGenerationFailed),
             ):
                 self._active_tool_calls_by_item_id.pop(message.item_id, None)
-            await self._append_row(
-                turn_id=message.turn_id,
-                item_id=message.item_id,
-                data={
-                    "kind": "image_generation",
-                    "role": "assistant",
-                    "status": _image_generation_status(message=message),
-                    "message": message.model_dump(mode="json"),
-                },
-            )
+                self._active_image_generations_by_item_id.pop(message.item_id, None)
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, AgentThreadEvent):
-            await self._append_row(
-                turn_id=None,
-                item_id=message.message_id,
-                data={
-                    "kind": "event",
-                    "status": "completed",
-                    "message": message.model_dump(mode="json"),
-                },
-            )
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, TurnInterrupted):
@@ -639,6 +705,7 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 reason="cancelled",
             )
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, TurnEnded):
@@ -646,6 +713,10 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 reason="failed" if message.error is not None else "completed",
             )
+            await self._append_message_row(message=message)
+            return
+
+        await self._append_message_row(message=message)
 
     def _ensure_active_content(
         self,
@@ -657,6 +728,10 @@ class DatasetThreadStorage(ThreadStorage):
     ) -> _ActiveContent:
         active = self._active_content_by_item_id.get(message.item_id)
         if active is not None:
+            if active.provider is None:
+                active.provider = message.provider
+            if active.model is None:
+                active.model = message.model
             return active
 
         active = _ActiveContent(
@@ -664,6 +739,8 @@ class DatasetThreadStorage(ThreadStorage):
             turn_id=message.turn_id,
             item_id=message.item_id,
             message_id=message.message_id,
+            provider=message.provider,
+            model=message.model,
         )
         self._active_content_by_item_id[message.item_id] = active
         return active
@@ -679,6 +756,8 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 item_id=message.item_id,
                 message_id=message.message_id,
+                provider=message.provider,
+                model=message.model,
                 namespace=message.namespace,
                 call_id=message.call_id,
             )
@@ -686,6 +765,10 @@ class DatasetThreadStorage(ThreadStorage):
 
         active.namespace = message.namespace
         active.call_id = message.call_id
+        if active.provider is None:
+            active.provider = message.provider
+        if active.model is None:
+            active.model = message.model
         active.toolkit = message.toolkit
         active.tool = message.tool
         active.arguments = message.arguments
@@ -696,6 +779,32 @@ class DatasetThreadStorage(ThreadStorage):
         else:
             active.stage = "pending"
 
+    def _record_image_generation_state(
+        self,
+        *,
+        message: AgentImageGenerationStarted | AgentImageGenerationPartial,
+    ) -> None:
+        active = self._active_image_generations_by_item_id.get(message.item_id)
+        if active is None:
+            active = _ActiveImageGeneration(
+                turn_id=message.turn_id,
+                item_id=message.item_id,
+                message_id=message.message_id,
+                provider=message.provider,
+                model=message.model,
+            )
+            self._active_image_generations_by_item_id[message.item_id] = active
+
+        active.turn_id = message.turn_id
+        if active.provider is None:
+            active.provider = message.provider
+        if active.model is None:
+            active.model = message.model
+        if isinstance(message, AgentImageGenerationPartial):
+            active.partial = message
+        else:
+            active.started = message
+
     async def _commit_pending_user_turn(
         self,
         *,
@@ -704,41 +813,24 @@ class DatasetThreadStorage(ThreadStorage):
         accepted_message: TurnStartAccepted | TurnSteerAccepted,
     ) -> None:
         queued = self._pending_user_turns.pop(source_message_id, None)
-        if queued is None:
-            return
-        if not isinstance(queued.message, (TurnStart, TurnSteer)):
-            return
+        del queued
+        pending_row = self._pending_user_turn_rows.pop(source_message_id, None)
+        if turn_id is not None and pending_row is not None:
+            await self._set_row_turn_id(row=pending_row, turn_id=turn_id)
+        await self._append_message_row(message=accepted_message, turn_id=turn_id)
 
-        text_parts: list[str] = []
-        attachments: list[str] = []
-        for item in queued.message.content:
-            if isinstance(item, AgentTextContent):
-                normalized_text = item.text.strip()
-                if normalized_text != "":
-                    text_parts.append(normalized_text)
-            elif isinstance(item, AgentFileContent):
-                normalized_url = item.url.strip()
-                if normalized_url != "":
-                    attachments.append(normalized_url)
-
-        if len(text_parts) == 0 and len(attachments) == 0:
-            return
-
-        sender_name = self._sender_name(sender=queued.sender) or "user"
-        await self._append_row(
-            turn_id=turn_id,
-            item_id=queued.message.message_id,
-            data={
-                "kind": "message",
-                "role": "user",
-                "status": "completed",
-                "text": "\n\n".join(text_parts),
-                "attachments": attachments,
-                "sender_name": sender_name,
-                "request": queued.message.model_dump(mode="json"),
-                "accepted": accepted_message.model_dump(mode="json"),
-            },
-        )
+    def _turn_input_with_sender_name(
+        self,
+        *,
+        queued: _QueuedThreadMessage,
+    ) -> TurnStart | TurnSteer:
+        message = queued.message
+        if not isinstance(message, (TurnStart, TurnSteer)):
+            raise TypeError("queued message must be a turn input")
+        sender_name = message.sender_name or self._sender_name(sender=queued.sender)
+        if sender_name is None:
+            return message
+        return message.model_copy(update={"sender_name": sender_name})
 
     async def _flush_content_item(
         self,
@@ -751,42 +843,55 @@ class DatasetThreadStorage(ThreadStorage):
         if active is None:
             return
 
-        status = _TERMINAL_REASON_TO_STATUS[reason]
+        del reason
         if active.kind in {"text", "reasoning"}:
             text = "".join(active.parts)
             if text.strip() == "":
                 return
-            await self._append_row(
-                turn_id=active.turn_id,
-                item_id=active.item_id,
-                data={
-                    "kind": "message" if active.kind == "text" else "reasoning",
-                    "role": "assistant",
-                    "status": status,
-                    "text": text,
-                    "message": None
-                    if ended_message is None
-                    else ended_message.model_dump(mode="json"),
-                },
+            message_cls = (
+                AgentTextContentDelta
+                if active.kind == "text"
+                else AgentReasoningContentDelta
             )
+            message_type = (
+                AGENT_EVENT_TEXT_CONTENT_DELTA
+                if active.kind == "text"
+                else AGENT_EVENT_REASONING_CONTENT_DELTA
+            )
+            await self._append_message_row(
+                message=message_cls(
+                    type=message_type,
+                    thread_id=self.path,
+                    message_id=active.message_id,
+                    turn_id=active.turn_id,
+                    item_id=active.item_id,
+                    text=text,
+                    provider=active.provider,
+                    model=active.model,
+                )
+            )
+            if ended_message is not None:
+                await self._append_message_row(message=ended_message)
             return
 
         urls = [part for part in active.parts if part.strip() != ""]
         if len(urls) == 0:
             return
-        await self._append_row(
-            turn_id=active.turn_id,
-            item_id=active.item_id,
-            data={
-                "kind": "file",
-                "role": "assistant",
-                "status": status,
-                "urls": urls,
-                "message": None
-                if ended_message is None
-                else ended_message.model_dump(mode="json"),
-            },
-        )
+        for url in urls:
+            await self._append_message_row(
+                message=AgentFileContentDelta(
+                    type=AGENT_EVENT_FILE_CONTENT_DELTA,
+                    thread_id=self.path,
+                    message_id=active.message_id,
+                    turn_id=active.turn_id,
+                    item_id=active.item_id,
+                    url=url,
+                    provider=active.provider,
+                    model=active.model,
+                )
+            )
+        if ended_message is not None:
+            await self._append_message_row(message=ended_message)
 
     async def _flush_tool_call(
         self,
@@ -804,6 +909,8 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=ended_message.turn_id,
                 item_id=ended_message.item_id,
                 message_id=ended_message.message_id,
+                provider=ended_message.provider,
+                model=ended_message.model,
                 namespace=ended_message.namespace,
                 call_id=ended_message.call_id,
             )
@@ -823,24 +930,39 @@ class DatasetThreadStorage(ThreadStorage):
         ):
             return
 
-        await self._append_row(
+        del reason
+        if active.toolkit is not None and active.tool is not None:
+            await self._append_message_row(
+                message=AgentToolCallStarted(
+                    type=AGENT_EVENT_TOOL_CALL_STARTED,
+                    thread_id=self.path,
+                    message_id=active.message_id,
+                    turn_id=active.turn_id,
+                    item_id=active.item_id,
+                    namespace=active.namespace,
+                    call_id=active.call_id,
+                    toolkit=active.toolkit,
+                    tool=active.tool,
+                    arguments=active.arguments,
+                    provider=active.provider,
+                    model=active.model,
+                )
+            )
+
+        log_message = self._tool_log_delta_from_stored_lines(
             turn_id=active.turn_id,
             item_id=active.item_id,
-            data={
-                "kind": "tool_call",
-                "role": "assistant",
-                "status": _TERMINAL_REASON_TO_STATUS[reason],
-                "namespace": active.namespace,
-                "call_id": active.call_id,
-                "toolkit": active.toolkit,
-                "tool": active.tool,
-                "arguments": active.arguments,
-                "logs": active.logs,
-                "message": None
-                if ended_message is None
-                else ended_message.model_dump(mode="json"),
-            },
+            namespace=active.namespace,
+            call_id=active.call_id,
+            provider=active.provider,
+            model=active.model,
+            logs=active.logs,
         )
+        if log_message is not None:
+            await self._append_message_row(message=log_message)
+
+        if ended_message is not None:
+            await self._append_message_row(message=ended_message)
 
     async def _persist_generated_image_result(
         self,
@@ -855,6 +977,15 @@ class DatasetThreadStorage(ThreadStorage):
         if active_tool_call.tool.strip().lower() != "image_generation":
             return False
         if message.error is not None:
+            if _is_cancellation_error(message.error):
+                await self._flush_image_generation(
+                    item_id=active_tool_call.item_id,
+                    reason="cancelled",
+                )
+            else:
+                self._active_image_generations_by_item_id.pop(
+                    active_tool_call.item_id, None
+                )
             failed_message = AgentImageGenerationFailed(
                 type="meshagent.agent.image_generation.failed",
                 thread_id=message.thread_id,
@@ -865,20 +996,12 @@ class DatasetThreadStorage(ThreadStorage):
                 toolkit=active_tool_call.toolkit or "image_generation",
                 tool=active_tool_call.tool or "image_generation",
                 arguments=active_tool_call.arguments,
+                provider=active_tool_call.provider,
+                model=active_tool_call.model,
                 error=message.error,
                 status_detail=message.error.message,
             )
-            await self._append_row(
-                turn_id=active_tool_call.turn_id,
-                item_id=active_tool_call.item_id,
-                data={
-                    "kind": "image_generation",
-                    "role": "assistant",
-                    "status": "failed",
-                    "status_detail": failed_message.status_detail,
-                    "message": failed_message.model_dump(mode="json"),
-                },
-            )
+            await self._append_message_row(message=failed_message)
             return True
 
         image_uri: str | None = None
@@ -906,6 +1029,7 @@ class DatasetThreadStorage(ThreadStorage):
 
         if image_uri is None:
             return False
+        self._active_image_generations_by_item_id.pop(active_tool_call.item_id, None)
         completed_message = AgentImageGenerationCompleted(
             type="meshagent.agent.image_generation.completed",
             thread_id=message.thread_id,
@@ -916,6 +1040,8 @@ class DatasetThreadStorage(ThreadStorage):
             toolkit=active_tool_call.toolkit or "image_generation",
             tool=active_tool_call.tool or "image_generation",
             arguments=active_tool_call.arguments,
+            provider=active_tool_call.provider,
+            model=active_tool_call.model,
             images=[
                 AgentGeneratedImage(
                     uri=image_uri,
@@ -926,17 +1052,7 @@ class DatasetThreadStorage(ThreadStorage):
                 )
             ],
         )
-        await self._append_row(
-            turn_id=active_tool_call.turn_id,
-            item_id=active_tool_call.item_id,
-            data={
-                "kind": "image_generation",
-                "role": "assistant",
-                "status": "completed",
-                "status_detail": completed_message.status_detail,
-                "message": completed_message.model_dump(mode="json"),
-            },
-        )
+        await self._append_message_row(message=completed_message)
         return True
 
     async def _flush_turn_active_items(
@@ -961,6 +1077,14 @@ class DatasetThreadStorage(ThreadStorage):
         for item_id in tool_item_ids:
             await self._flush_tool_call(item_id=item_id, reason=reason)
 
+        image_item_ids = [
+            item_id
+            for item_id, active in self._active_image_generations_by_item_id.items()
+            if active.turn_id == turn_id
+        ]
+        for item_id in image_item_ids:
+            await self._flush_image_generation(item_id=item_id, reason=reason)
+
     async def _flush_all_active(
         self,
         *,
@@ -970,6 +1094,105 @@ class DatasetThreadStorage(ThreadStorage):
             await self._flush_content_item(item_id=item_id, reason=reason)
         for item_id in list(self._active_tool_calls_by_item_id):
             await self._flush_tool_call(item_id=item_id, reason=reason)
+        for item_id in list(self._active_image_generations_by_item_id):
+            await self._flush_image_generation(item_id=item_id, reason=reason)
+
+    async def _flush_image_generation(
+        self,
+        *,
+        item_id: str,
+        reason: Literal["completed", "cancelled", "failed"],
+    ) -> None:
+        active = self._active_image_generations_by_item_id.pop(item_id, None)
+        if active is None or reason != "cancelled" or active.partial is None:
+            return
+        await self._append_message_row(message=active.partial)
+
+    async def _append_message_row(
+        self,
+        *,
+        message: AgentThreadMessage,
+        turn_id: str | None = None,
+        item_id: str | None = None,
+    ) -> _StoredThreadRow:
+        return await self._append_row(
+            turn_id=turn_id if turn_id is not None else self._message_turn_id(message),
+            item_id=item_id if item_id is not None else self._message_item_id(message),
+            data=message.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _message_turn_id(message: AgentThreadMessage) -> str | None:
+        if isinstance(message, TurnStart):
+            return message.turn_id
+        if isinstance(
+            message,
+            (
+                TurnSteer,
+                TurnStartAccepted,
+                TurnInterrupt,
+                TurnInterruptAccepted,
+                TurnInterrupted,
+                TurnSteerAccepted,
+                TurnSteered,
+                TurnSteerRejected,
+                TurnStarted,
+                TurnEnded,
+                AgentReasoningContentStarted,
+                AgentReasoningContentDelta,
+                AgentReasoningContentEnded,
+                AgentTextContentStarted,
+                AgentTextContentDelta,
+                AgentTextContentEnded,
+                AgentFileContentStarted,
+                AgentFileContentDelta,
+                AgentFileContentEnded,
+                AgentToolCallPending,
+                AgentToolCallInProgress,
+                AgentToolCallStarted,
+                AgentToolCallLogDelta,
+                AgentToolCallEnded,
+                AgentToolCallApprovalRequested,
+                AgentImageGenerationStarted,
+                AgentImageGenerationPartial,
+                AgentImageGenerationCompleted,
+                AgentImageGenerationFailed,
+                AgentUsageUpdated,
+            ),
+        ):
+            return message.turn_id
+        if isinstance(message, AgentThreadStatus):
+            return message.turn_id
+        return None
+
+    @staticmethod
+    def _message_item_id(message: AgentThreadMessage) -> str:
+        if isinstance(
+            message,
+            (
+                AgentReasoningContentStarted,
+                AgentReasoningContentDelta,
+                AgentReasoningContentEnded,
+                AgentTextContentStarted,
+                AgentTextContentDelta,
+                AgentTextContentEnded,
+                AgentFileContentStarted,
+                AgentFileContentDelta,
+                AgentFileContentEnded,
+                AgentToolCallPending,
+                AgentToolCallInProgress,
+                AgentToolCallStarted,
+                AgentToolCallLogDelta,
+                AgentToolCallEnded,
+                AgentToolCallApprovalRequested,
+                AgentImageGenerationStarted,
+                AgentImageGenerationPartial,
+                AgentImageGenerationCompleted,
+                AgentImageGenerationFailed,
+            ),
+        ):
+            return message.item_id
+        return message.message_id
 
     async def _append_row(
         self,
@@ -977,7 +1200,7 @@ class DatasetThreadStorage(ThreadStorage):
         turn_id: str | None,
         item_id: str,
         data: dict[str, Any],
-    ) -> None:
+    ) -> _StoredThreadRow:
         await self._ensure_ready()
         timestamp = _now_iso()
         sequence = self._next_sequence
@@ -986,6 +1209,9 @@ class DatasetThreadStorage(ThreadStorage):
         row = _StoredThreadRow(
             turn_id=turn_id,
             item_id=normalized_item_id,
+            message_type=data.get("type")
+            if isinstance(data.get("type"), str)
+            else None,
             sequence=sequence,
             timestamp=timestamp,
             data=data,
@@ -997,15 +1223,30 @@ class DatasetThreadStorage(ThreadStorage):
                 {
                     "turn_id": row.turn_id,
                     "item_id": row.item_id,
+                    "type": row.message_type,
                     "sequence": row.sequence,
                     "timestamp": row.timestamp,
-                    "data": json.dumps(row.data),
+                    "data": DatasetJson(row.data),
                 }
             ],
         )
         self._rows.append(row)
         self._rows.sort(key=lambda stored: stored.sequence)
         self._note_appended_row()
+        return row
+
+    async def _set_row_turn_id(self, *, row: _StoredThreadRow, turn_id: str) -> None:
+        if row.turn_id == turn_id and row.data.get("turn_id") == turn_id:
+            return
+        updated_data = {**row.data, "turn_id": turn_id}
+        await self._room.datasets.update(
+            table=self._table_name,
+            namespace=self._namespace,
+            where=f"sequence = {row.sequence}",
+            values={"turn_id": turn_id, "data": DatasetJson(updated_data)},
+        )
+        row.turn_id = turn_id
+        row.data = updated_data
 
     def _note_appended_row(self) -> None:
         if self._optimize_after_append_count <= 0:
@@ -1099,6 +1340,17 @@ class DatasetThreadStorage(ThreadStorage):
         row: _StoredThreadRow,
     ) -> None:
         data = row.data
+        raw_message = self._stored_agent_message(value=data)
+        if (
+            isinstance(raw_message, AgentContextCompacted)
+            and raw_message.messages is not None
+        ):
+            context.messages.clear()
+            context.messages.extend(deepcopy(raw_message.messages))
+            context.previous_messages.clear()
+            context.previous_response_id = None
+            return
+
         kind = data.get("kind")
         if kind == "compaction":
             message = self._stored_agent_message(value=data.get("message"))
@@ -1156,6 +1408,10 @@ class DatasetThreadStorage(ThreadStorage):
 
     def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:
         data = row.data
+        raw_message = self._stored_agent_message(value=data)
+        if raw_message is not None:
+            return [raw_message]
+
         kind = data.get("kind")
         message = self._stored_agent_message(value=data.get("message"))
         if message is not None:
@@ -1340,6 +1596,8 @@ class DatasetThreadStorage(ThreadStorage):
         namespace: str,
         call_id: str | None,
         logs: list[Any],
+        provider: str | None = None,
+        model: str | None = None,
     ) -> AgentToolCallLogDelta | None:
         lines = []
         for line in logs:
@@ -1360,6 +1618,8 @@ class DatasetThreadStorage(ThreadStorage):
                 "item_id": item_id,
                 "namespace": namespace,
                 "call_id": call_id,
+                "provider": provider,
+                "model": model,
                 "lines": lines,
             }
         )
@@ -1442,6 +1702,10 @@ class DatasetThreadStorage(ThreadStorage):
     @staticmethod
     def _format_row_for_search(*, row: _StoredThreadRow) -> str:
         data = row.data
+        message_type = data.get("type")
+        if isinstance(message_type, str):
+            return f"{message_type} at {row.timestamp}: {json.dumps(data)}"
+
         kind = data.get("kind")
         role = data.get("role")
         text = data.get("text")

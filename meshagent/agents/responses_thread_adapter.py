@@ -1709,43 +1709,12 @@ class ResponsesThreadAdapter(ThreadAdapter):
         item_id = self._resolve_image_item_id(event=event)
         width, height = _extract_image_dimensions(event=event)
 
-        partial_image_b64 = event.get("partial_image_b64")
-        if not isinstance(partial_image_b64, str) or partial_image_b64.strip() == "":
-            raise RoomException("missing partial_image_b64 in image generation event")
-
-        try:
-            image_bytes = base64.b64decode(partial_image_b64)
-        except Exception as ex:
-            messages = self._messages_element()
-            await self._emit_image_status_event(
-                messages=messages,
-                item_id=item_id,
-                state="failed",
-                headline="Image save failed",
-                details=[f"invalid image payload: {ex}"],
-                width=width,
-                height=height,
-            )
-            return
-
-        output_format = event.get("output_format")
-        mime_type = _mime_type_from_output_format(output_format=output_format)
-
-        created_by = self._room.local_participant.get_attribute("name")
-        if not isinstance(created_by, str):
-            created_by = ""
-
-        await self._persist_generated_image(
+        messages = self._messages_element()
+        await self._emit_image_status_event(
+            messages=messages,
             item_id=item_id,
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-            created_by=created_by,
-            source=_PARTIAL_IMAGE_SOURCE,
-            annotations={
-                "output_format": str(output_format)
-                if isinstance(output_format, str)
-                else "",
-            },
+            state="in_progress",
+            headline="Generating image",
             width=width,
             height=height,
         )

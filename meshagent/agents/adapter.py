@@ -156,6 +156,9 @@ class LLMAdapter(Generic[TEvent]):
     def default_model(self) -> str:
         raise NotImplementedError
 
+    def provider_name(self) -> str | None:
+        return None
+
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()
 
@@ -270,6 +273,9 @@ class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
 
     def default_model(self) -> str:
         return "toolkit"
+
+    def provider_name(self) -> str | None:
+        return "meshagent"
 
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()

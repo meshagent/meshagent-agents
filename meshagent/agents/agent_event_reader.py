@@ -29,7 +29,9 @@ from .messages import (
     AgentToolCallStarted,
     AgentUsageUpdated,
     TurnStart,
+    TurnStartAccepted,
     TurnSteer,
+    TurnSteerAccepted,
 )
 
 
@@ -85,7 +87,15 @@ class DefaultAgentEventReader:
     def consume(self, message: AgentMessage) -> None:
         self._record_event(message=message)
 
-        if isinstance(message, (TurnStart, TurnSteer)):
+        if (
+            isinstance(message, (TurnStartAccepted, TurnSteerAccepted))
+            and not message.content
+        ):
+            return
+
+        if isinstance(
+            message, (TurnStart, TurnSteer, TurnStartAccepted, TurnSteerAccepted)
+        ):
             self._append_user_turn(message=message)
             return
 
@@ -234,7 +244,9 @@ class DefaultAgentEventReader:
             self._context.metadata["agent_events"] = events
         events.append(message.model_dump(mode="json"))
 
-    def _append_user_turn(self, *, message: TurnStart | TurnSteer) -> None:
+    def _append_user_turn(
+        self, *, message: TurnStart | TurnSteer | TurnStartAccepted | TurnSteerAccepted
+    ) -> None:
         content: list[dict[str, Any]] = []
         text_parts: list[str] = []
         for item in message.content:

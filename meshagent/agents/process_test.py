@@ -138,6 +138,22 @@ class _RecordingChannel(_LifecycleChannel):
         self.message_event.set()
 
 
+class _ThreadOpenResponseChannel(_RecordingChannel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.direct_payloads: list[AgentMessage] = []
+
+    def send_agent_message_to_participant(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        del participant
+        self.direct_payloads.append(payload)
+        return True
+
+
 class _RecordingProcess(AgentProcess):
     def __init__(self, *, handled_type: str) -> None:
         super().__init__()
@@ -375,6 +391,7 @@ class _RecordedTracer:
 
 
 class _PayloadMessage(AgentMessage):
+    thread_id: str | None = None
     payload: str | None = None
 
 
@@ -562,6 +579,9 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
 
     def default_model(self) -> str:
         return "default-model"
+
+    def provider_name(self) -> str | None:
+        return "test-provider"
 
     def create_session(self) -> AgentSessionContext:
         return self.session
@@ -1143,6 +1163,9 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
 
     def default_model(self) -> str:
         return "default-model"
+
+    def provider_name(self) -> str | None:
+        return "test-provider"
 
     def create_session(self) -> AgentSessionContext:
         return self.session
@@ -2098,7 +2121,7 @@ async def test_agent_supervisor_route_initializes_thread_storage_before_returnin
 
 
 @pytest.mark.asyncio
-async def test_agent_supervisor_drops_message_when_thread_process_creation_fails() -> (
+async def test_agent_supervisor_rejects_turn_start_when_thread_process_creation_fails() -> (
     None
 ):
     supervisor = _FailingThreadCreatingSupervisor()
@@ -2784,6 +2807,43 @@ async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapt
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_thread_open_usage_replies_to_source_without_storage_or_broadcast() -> (
+    None
+):
+    adapter = _UsageRecordingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    source_channel = _ThreadOpenResponseChannel()
+    broadcast_channel = _RecordingChannel()
+    supervisor.add_channel(broadcast_channel)
+    thread_storage = _LifecycleThreadStorage(path="thread-1")
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            ),
+            sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+            source=source_channel,
+        )
+    )
+    await _wait_for(lambda: len(source_channel.direct_payloads) == 1)
+
+    assert source_channel.direct_payloads[0].type == AGENT_EVENT_USAGE_UPDATED
+    assert thread_storage.messages == []
+    assert broadcast_channel.received == []
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_counts_open_context_only_when_saved_usage_missing() -> (
     None
 ):
@@ -3252,9 +3312,15 @@ async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
 
     assert started_payload["thread_id"] == "thread-1"
     assert started_payload["item_id"] == "assistant-1"
+    assert started_payload["provider"] == "test-provider"
+    assert started_payload["model"] == "default-model"
     assert delta_payload["turn_id"] == started_payload["turn_id"]
     assert delta_payload["text"] == "hello"
+    assert delta_payload["provider"] == "test-provider"
+    assert delta_payload["model"] == "default-model"
     assert ended_payload["turn_id"] == started_payload["turn_id"]
+    assert ended_payload["provider"] == "test-provider"
+    assert ended_payload["model"] == "default-model"
 
     await process.stop(supervisor)
 

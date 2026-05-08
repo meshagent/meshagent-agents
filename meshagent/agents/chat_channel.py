@@ -57,6 +57,7 @@ from .messages import (
     TurnInterrupt,
     TurnSteered,
     TurnStart,
+    TurnStartAccepted,
     TurnStarted,
     TurnSteer,
 )
@@ -186,6 +187,9 @@ class ChatChannel(ThreadedChannel):
         self._turn_input_payloads_by_message_id.clear()
 
     async def on_message(self, message: Message) -> None:
+        self._publish_agent_event_to_open_participants(message=message)
+
+    def _publish_agent_event_to_open_participants(self, *, message: Message) -> None:
         self._track_agent_event(message=message)
         payload = self._outbound_agent_message_payload(message=message)
         if self._should_buffer_agent_event(payload=payload):
@@ -198,20 +202,6 @@ class ChatChannel(ThreadedChannel):
 
     def _outbound_agent_message_payload(self, *, message: Message) -> dict[str, Any]:
         payload = message.data.model_dump(mode="json")
-        if message.data.type == AGENT_EVENT_TURN_START_ACCEPTED:
-            return self._outbound_turn_input_payload(
-                payload=payload,
-                source_message_id=payload.get("source_message_id"),
-                remove=False,
-            )
-
-        if message.data.type == AGENT_EVENT_TURN_STEER_ACCEPTED:
-            return self._outbound_turn_input_payload(
-                payload=payload,
-                source_message_id=payload.get("source_message_id"),
-                remove=False,
-            )
-
         if message.data.type == AGENT_EVENT_TURN_STARTED:
             source_message_id = self._coerce_message(
                 data=message.data, model=TurnStarted
@@ -285,6 +275,18 @@ class ChatChannel(ThreadedChannel):
                 exc_info=True,
             )
 
+    def send_agent_message_to_participant(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        self._send_agent_payload_nowait(
+            participant=participant,
+            payload=payload.model_dump(mode="json"),
+        )
+        return True
+
     def _buffer_agent_event(self, *, payload: dict[str, Any]) -> None:
         raw_thread_id = payload.get("thread_id")
         if not isinstance(raw_thread_id, str) or raw_thread_id.strip() == "":
@@ -321,9 +323,26 @@ class ChatChannel(ThreadedChannel):
 
         if data.type == AGENT_EVENT_TURN_STARTED:
             turn_started = self._coerce_message(data=data, model=TurnStarted)
+            self._fill_turn_input_turn_id(
+                thread_id=turn_started.thread_id,
+                source_message_id=turn_started.source_message_id,
+                turn_id=turn_started.turn_id,
+            )
             self._active_turn_ids_by_thread[turn_started.thread_id] = (
                 turn_started.turn_id
             )
+            return
+
+        if data.type == AGENT_EVENT_TURN_START_ACCEPTED:
+            turn_start_accepted = self._coerce_message(
+                data=data, model=TurnStartAccepted
+            )
+            if turn_start_accepted.turn_id is not None:
+                self._fill_turn_input_turn_id(
+                    thread_id=turn_start_accepted.thread_id,
+                    source_message_id=turn_start_accepted.source_message_id,
+                    turn_id=turn_start_accepted.turn_id,
+                )
             return
 
         if data.type == AGENT_EVENT_THREAD_CLEARED:
@@ -382,6 +401,7 @@ class ChatChannel(ThreadedChannel):
             return
 
         self._track_inbound_agent_message(message=agent_message, sender=sender)
+        self._broadcast_inbound_turn_input(message=agent_message, sender=sender)
         self.emit(sender=sender, payload=agent_message)
 
     def _track_inbound_agent_message(
@@ -409,6 +429,44 @@ class ChatChannel(ThreadedChannel):
             payload["sender_name"] = sender_name.strip()
 
         self._turn_input_payloads_by_message_id[message.message_id] = payload
+
+    def _fill_turn_input_turn_id(
+        self,
+        *,
+        thread_id: str,
+        source_message_id: str,
+        turn_id: str,
+    ) -> None:
+        input_payload = self._turn_input_payloads_by_message_id.get(source_message_id)
+        if input_payload is not None:
+            input_payload["turn_id"] = turn_id
+
+        for payload in self._event_buffer_by_thread.get(thread_id, []):
+            if (
+                payload.get("type") == AGENT_MESSAGE_TURN_START
+                and payload.get("message_id") == source_message_id
+            ):
+                payload["turn_id"] = turn_id
+
+    def _broadcast_inbound_turn_input(
+        self,
+        *,
+        message: AgentMessage,
+        sender: Participant,
+    ) -> None:
+        if not isinstance(message, (TurnStart, TurnSteer)):
+            return
+        payload = self._outbound_turn_input_payload(
+            payload=message.model_dump(mode="json"),
+            source_message_id=message.message_id,
+            remove=False,
+        )
+        if self._should_buffer_agent_event(payload=payload):
+            self._buffer_agent_event(payload=payload)
+        for participant in self._open_participants(thread_id=message.thread_id):
+            if participant.id in {sender.id, self.room.local_participant.id}:
+                continue
+            self._send_agent_payload_nowait(participant=participant, payload=payload)
 
     def _handle_agent_control_message(
         self,
@@ -566,18 +624,10 @@ class ChatChannel(ThreadedChannel):
                 "source_message_id": source_message_id,
             }
             turn_id = input_payload.get("turn_id")
-            if accepted_type == AGENT_EVENT_TURN_STEER_ACCEPTED and isinstance(
-                turn_id, str
-            ):
+            if isinstance(turn_id, str):
                 payload["turn_id"] = turn_id
 
-            payloads.append(
-                self._outbound_turn_input_payload(
-                    payload=payload,
-                    source_message_id=source_message_id,
-                    remove=False,
-                )
-            )
+            payloads.append(payload)
 
         return payloads
 
@@ -1112,34 +1162,30 @@ class ChatChannel(ThreadedChannel):
 
             item_id = str(uuid.uuid4())
             sender = context.on_behalf_of or context.caller
-            outer.emit(
-                sender=sender,
-                payload=AgentFileContentStarted(
+            for payload in (
+                AgentFileContentStarted(
                     type=AGENT_EVENT_FILE_CONTENT_STARTED,
                     thread_id=thread_id,
                     turn_id=turn_id,
                     item_id=item_id,
                 ),
-            )
-            outer.emit(
-                sender=sender,
-                payload=AgentFileContentDelta(
+                AgentFileContentDelta(
                     type=AGENT_EVENT_FILE_CONTENT_DELTA,
                     thread_id=thread_id,
                     turn_id=turn_id,
                     item_id=item_id,
                     url=normalized_url,
                 ),
-            )
-            outer.emit(
-                sender=sender,
-                payload=AgentFileContentEnded(
+                AgentFileContentEnded(
                     type=AGENT_EVENT_FILE_CONTENT_ENDED,
                     thread_id=thread_id,
                     turn_id=turn_id,
                     item_id=item_id,
                 ),
-            )
+            ):
+                message = Message(sender=sender, source=outer, data=payload)
+                outer._publish_agent_event_to_open_participants(message=message)
+                outer.emit(sender=sender, payload=payload)
 
         return attach_file
 

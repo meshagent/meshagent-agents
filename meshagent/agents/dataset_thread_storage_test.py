@@ -12,6 +12,8 @@ from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.dataset_thread_storage import DatasetThreadStorage
 from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+    AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
@@ -23,13 +25,16 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
+    AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_TURN_START,
+    AGENT_MESSAGE_TURN_STEER,
     AgentContextWindowUsage,
     AgentContextCompacted,
     AgentError,
     AgentGeneratedImage,
     AgentImageGenerationCompleted,
+    AgentImageGenerationPartial,
     AgentImageGenerationStarted,
     AgentTextContent,
     AgentTextContentDelta,
@@ -46,8 +51,10 @@ from meshagent.agents.messages import (
     TurnInterrupted,
     TurnStart,
     TurnStartAccepted,
+    TurnSteer,
+    TurnSteerAccepted,
 )
-from meshagent.api import Participant
+from meshagent.api import DatasetJson, Participant
 from meshagent.api.messaging import BinaryContent, JsonContent, TextContent
 
 
@@ -57,6 +64,7 @@ class _FakeDatasets:
         self.rows: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
         self.create_calls: list[dict[str, Any]] = []
         self.optimize_calls: list[dict[str, Any]] = []
+        self.update_calls: list[dict[str, Any]] = []
 
     @staticmethod
     def _key(
@@ -129,7 +137,43 @@ class _FakeDatasets:
         namespace: list[str] | None = None,
     ) -> None:
         key = self._key(table=table, namespace=namespace)
-        self.rows.setdefault(key, []).extend(records)
+        self.rows.setdefault(key, []).extend(
+            [self._stored_record(record) for record in records]
+        )
+
+    @staticmethod
+    def _stored_record(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value.to_json() if isinstance(value, DatasetJson) else value
+            for key, value in record.items()
+        }
+
+    async def update(
+        self,
+        *,
+        table: str,
+        where: str,
+        values: dict[str, Any],
+        namespace: list[str] | None = None,
+    ) -> None:
+        self.update_calls.append(
+            {
+                "table": table,
+                "where": where,
+                "values": values,
+                "namespace": namespace,
+            }
+        )
+        prefix = "sequence = "
+        assert where.startswith(prefix)
+        sequence = int(where[len(prefix) :])
+        key = self._key(table=table, namespace=namespace)
+        stored_values = self._stored_record(values)
+        for row in self.rows.setdefault(key, []):
+            if row.get("sequence") == sequence:
+                row.update(stored_values)
+                return
+        raise AssertionError(f"row not found for {where}")
 
     async def optimize(
         self,
@@ -158,7 +202,8 @@ def _participant(name: str) -> Participant:
 
 
 def _row_data(row: dict[str, Any]) -> dict[str, Any]:
-    data = json.loads(row["data"])
+    raw_data = row["data"]
+    data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
     assert isinstance(data, dict)
     return data
 
@@ -243,18 +288,35 @@ async def test_dataset_thread_storage_persists_only_accepted_user_turns() -> Non
         message=TurnStartAccepted(
             type=AGENT_EVENT_TURN_START_ACCEPTED,
             thread_id="dataset://threads/demo",
+            turn_id="turn-accepted",
             source_message_id="accepted",
         )
     )
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 1
-    data = _row_data(rows[0])
-    assert data["kind"] == "message"
-    assert data["role"] == "user"
-    assert data["text"] == "save this"
-    assert data["sender_name"] == "caller"
+    assert len(rows) == 3
+    unaccepted_data = _row_data(rows[0])
+    accepted_input_data = _row_data(rows[1])
+    accepted_data = _row_data(rows[2])
+    assert unaccepted_data["type"] == AGENT_MESSAGE_TURN_START
+    assert unaccepted_data["content"] == [{"type": "text", "text": "do not save"}]
+    assert unaccepted_data["sender_name"] == "caller"
+    assert rows[0]["item_id"] == "unaccepted"
+    assert rows[0]["type"] == AGENT_MESSAGE_TURN_START
+    assert accepted_input_data["type"] == AGENT_MESSAGE_TURN_START
+    assert accepted_input_data["turn_id"] == "turn-accepted"
+    assert accepted_input_data["content"] == [{"type": "text", "text": "save this"}]
+    assert accepted_input_data["sender_name"] == "caller"
+    assert rows[1]["item_id"] == "accepted"
+    assert rows[1]["turn_id"] == "turn-accepted"
+    assert rows[1]["type"] == AGENT_MESSAGE_TURN_START
+    assert accepted_data["type"] == AGENT_EVENT_TURN_START_ACCEPTED
+    assert accepted_data["turn_id"] == "turn-accepted"
+    assert accepted_data["source_message_id"] == "accepted"
+    assert accepted_data["content"] == []
+    assert rows[2]["type"] == AGENT_EVENT_TURN_START_ACCEPTED
+    assert "sender_name" not in accepted_data or accepted_data["sender_name"] is None
 
 
 @pytest.mark.asyncio
@@ -288,7 +350,7 @@ async def test_dataset_thread_storage_optimizes_after_append_threshold() -> None
 
     await storage.stop()
 
-    assert len(room.datasets.optimize_calls) == 1
+    assert len(room.datasets.optimize_calls) == 2
     optimize_call = room.datasets.optimize_calls[0]
     assert optimize_call["table"] == "demo"
     assert optimize_call["namespace"] == ["threads"]
@@ -323,16 +385,14 @@ async def test_dataset_thread_storage_persists_usage_updates() -> None:
     rows = room.datasets.rows[(("threads",), "demo")]
     assert len(rows) == 1
     data = _row_data(rows[0])
-    assert data["kind"] == "usage"
-    assert data["status"] == "completed"
-    assert data["message"]["type"] == AGENT_EVENT_USAGE_UPDATED
-    assert data["message"]["thread_id"] == "dataset://threads/demo"
-    assert data["message"]["turn_id"] == "turn-1"
-    assert data["message"]["usage"] == {
+    assert data["type"] == AGENT_EVENT_USAGE_UPDATED
+    assert data["thread_id"] == "dataset://threads/demo"
+    assert data["turn_id"] == "turn-1"
+    assert data["usage"] == {
         "input_tokens": 120.0,
         "output_tokens": 30.0,
     }
-    assert data["message"]["context_window"] == {
+    assert data["context_window"] == {
         "used_tokens": 480,
         "total_tokens": 128000,
         "compaction_mode": "auto",
@@ -429,6 +489,8 @@ async def test_dataset_thread_storage_flushes_partial_text_on_interrupt() -> Non
             thread_id="dataset://threads/demo",
             turn_id="turn-1",
             item_id="text-1",
+            provider="openai",
+            model="gpt-test",
         )
     )
     storage.push_message(
@@ -460,12 +522,15 @@ async def test_dataset_thread_storage_flushes_partial_text_on_interrupt() -> Non
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 1
+    assert len(rows) == 2
     data = _row_data(rows[0])
-    assert data["kind"] == "message"
-    assert data["role"] == "assistant"
-    assert data["status"] == "cancelled"
+    assert data["type"] == AGENT_EVENT_TEXT_CONTENT_DELTA
+    assert rows[0]["item_id"] == "text-1"
     assert data["text"] == "partial answer"
+    assert data["provider"] == "openai"
+    assert data["model"] == "gpt-test"
+    interrupted = _row_data(rows[1])
+    assert interrupted["type"] == AGENT_EVENT_TURN_INTERRUPTED
 
 
 @pytest.mark.asyncio
@@ -496,10 +561,63 @@ async def test_dataset_thread_storage_flushes_unended_text_on_successful_turn_en
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 1
+    assert len(rows) == 2
     data = _row_data(rows[0])
-    assert data["status"] == "completed"
+    assert data["type"] == AGENT_EVENT_TEXT_CONTENT_DELTA
     assert data["text"] == "complete enough"
+    ended = _row_data(rows[1])
+    assert ended["type"] == AGENT_EVENT_TURN_ENDED
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_flushes_previous_turn_before_accepted_steer() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            text="answer before steer",
+        )
+    )
+    storage.push_message(
+        message=TurnSteer(
+            type=AGENT_MESSAGE_TURN_STEER,
+            thread_id="dataset://threads/demo",
+            message_id="steer-1",
+            turn_id="turn-1",
+            content=[{"type": "text", "text": "add this"}],
+        ),
+        sender=_participant("caller"),
+    )
+    storage.push_message(
+        message=TurnSteerAccepted(
+            type=AGENT_EVENT_TURN_STEER_ACCEPTED,
+            thread_id="dataset://threads/demo",
+            source_message_id="steer-1",
+            turn_id="turn-1",
+        )
+    )
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(rows) == 3
+    first = _row_data(rows[0])
+    second = _row_data(rows[1])
+    third = _row_data(rows[2])
+    assert first["type"] == AGENT_EVENT_TEXT_CONTENT_DELTA
+    assert first["text"] == "answer before steer"
+    assert second["type"] == AGENT_MESSAGE_TURN_STEER
+    assert second["content"] == [{"type": "text", "text": "add this"}]
+    assert second["sender_name"] == "caller"
+    assert third["type"] == AGENT_EVENT_TURN_STEER_ACCEPTED
+    assert third["content"] == []
 
 
 @pytest.mark.asyncio
@@ -599,15 +717,16 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 1
+    assert len(rows) == 2
     data = _row_data(rows[0])
-    assert data["kind"] == "tool_call"
     assert rows[0]["item_id"] == "started-tool"
-    assert data["status"] == "failed"
+    assert data["type"] == AGENT_EVENT_TOOL_CALL_STARTED
     assert data["namespace"] == "openai.responses"
     assert data["call_id"] == "call-started"
     assert data["toolkit"] == "shell"
     assert data["tool"] == "exec"
+    ended = _row_data(rows[1])
+    assert ended["type"] == AGENT_EVENT_TURN_ENDED
 
 
 @pytest.mark.asyncio
@@ -646,13 +765,12 @@ async def test_dataset_thread_storage_does_not_persist_binary_image_generation_r
     assert ((), "images") not in room.datasets.rows
 
     thread_rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(thread_rows) == 1
+    assert len(thread_rows) == 2
     assert thread_rows[0]["item_id"] == "image-tool"
     data = _row_data(thread_rows[0])
-    assert data["kind"] == "tool_call"
-    assert data["status"] == "completed"
-    message = data["message"]
-    assert message["type"] == "meshagent.agent.tool_call.ended"
+    assert data["type"] == AGENT_EVENT_TOOL_CALL_STARTED
+    ended = _row_data(thread_rows[1])
+    assert ended["type"] == "meshagent.agent.tool_call.ended"
 
     context = AgentSessionContext(system_role=None)
     storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
@@ -697,11 +815,10 @@ async def test_dataset_thread_storage_persists_image_generation_url_result() -> 
     assert ((), "images") not in room.datasets.rows
     thread_rows = room.datasets.rows[(("threads",), "demo")]
     data = _row_data(thread_rows[0])
-    assert data["kind"] == "image_generation"
-    message = data["message"]
-    assert message["images"][0]["uri"] == "https://example.test/generated.png"
-    assert message["images"][0]["width"] == 512
-    assert message["images"][0]["height"] == 512
+    assert data["type"] == AGENT_EVENT_IMAGE_GENERATION_COMPLETED
+    assert data["images"][0]["uri"] == "https://example.test/generated.png"
+    assert data["images"][0]["width"] == 512
+    assert data["images"][0]["height"] == 512
 
 
 @pytest.mark.asyncio
@@ -757,18 +874,17 @@ async def test_dataset_thread_storage_does_not_overwrite_typed_image_generation_
     await storage.stop()
 
     thread_rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(thread_rows) == 1
+    assert len(thread_rows) == 2
     assert thread_rows[0]["item_id"] == "image-tool"
     data = _row_data(thread_rows[0])
-    assert data["kind"] == "image_generation"
-    assert data["status"] == "completed"
-    message = data["message"]
-    assert message["type"] == "meshagent.agent.image_generation.completed"
-    assert message["images"][0]["uri"] == "dataset://images?id=image-1"
+    assert data["type"] == AGENT_EVENT_IMAGE_GENERATION_COMPLETED
+    assert data["images"][0]["uri"] == "dataset://images?id=image-1"
+    ended = _row_data(thread_rows[1])
+    assert ended["type"] == AGENT_EVENT_TURN_ENDED
 
 
 @pytest.mark.asyncio
-async def test_dataset_thread_storage_does_not_persist_nonterminal_image_generation_events() -> (
+async def test_dataset_thread_storage_skips_nonterminal_image_generation_events() -> (
     None
 ):
     room = _FakeRoom()
@@ -792,7 +908,7 @@ async def test_dataset_thread_storage_does_not_persist_nonterminal_image_generat
             type="meshagent.agent.image_generation.completed",
             thread_id="dataset://threads/demo",
             turn_id="turn-1",
-            item_id="image-completed",
+            item_id="image-started",
             call_id="call-image",
             toolkit="openai",
             tool="image_generation",
@@ -804,10 +920,148 @@ async def test_dataset_thread_storage_does_not_persist_nonterminal_image_generat
 
     thread_rows = room.datasets.rows[(("threads",), "demo")]
     assert len(thread_rows) == 1
-    assert thread_rows[0]["item_id"] == "image-completed"
-    data = _row_data(thread_rows[0])
-    assert data["kind"] == "image_generation"
-    assert data["status"] == "completed"
+    assert thread_rows[0]["item_id"] == "image-started"
+    completed = _row_data(thread_rows[0])
+    assert completed["type"] == AGENT_EVENT_IMAGE_GENERATION_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_flushes_latest_image_partial_on_cancellation() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentImageGenerationStarted(
+            type="meshagent.agent.image_generation.started",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+        )
+    )
+    storage.push_message(
+        message=AgentImageGenerationPartial(
+            type="meshagent.agent.image_generation.partial",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            image=AgentGeneratedImage(
+                uri="data:image/png;base64,first",
+                mime_type="image/png",
+                status="in_progress",
+            ),
+            partial_index=0,
+        )
+    )
+    storage.push_message(
+        message=AgentImageGenerationPartial(
+            type="meshagent.agent.image_generation.partial",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            image=AgentGeneratedImage(
+                uri="data:image/png;base64,second",
+                mime_type="image/png",
+                status="in_progress",
+            ),
+            partial_index=1,
+        )
+    )
+    storage.push_message(
+        message=TurnInterrupted(
+            type="meshagent.agent.turn.interrupted",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            source_message_id="interrupt-1",
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(thread_rows) == 2
+    assert thread_rows[0]["item_id"] == "image-started"
+    started = _row_data(thread_rows[0])
+    assert started["type"] == AGENT_EVENT_IMAGE_GENERATION_PARTIAL
+    assert started["partial_index"] == 1
+    assert started["image"]["uri"] == "data:image/png;base64,second"
+    interrupted = _row_data(thread_rows[1])
+    assert interrupted["type"] == AGENT_EVENT_TURN_INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_flushes_image_partial_on_cancelled_tool_end() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentToolCallStarted(
+            type=AGENT_EVENT_TOOL_CALL_STARTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-tool",
+            namespace="openai.responses",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+        )
+    )
+    storage.push_message(
+        message=AgentImageGenerationPartial(
+            type="meshagent.agent.image_generation.partial",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-tool",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            image=AgentGeneratedImage(
+                uri="data:image/png;base64,partial",
+                mime_type="image/png",
+                status="in_progress",
+            ),
+            partial_index=0,
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallEnded(
+            type=AGENT_EVENT_TOOL_CALL_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-tool",
+            namespace="openai.responses",
+            call_id="call-image",
+            result=None,
+            error=AgentError(message="cancelled", code=None),
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(thread_rows) == 2
+    partial = _row_data(thread_rows[0])
+    assert partial["type"] == AGENT_EVENT_IMAGE_GENERATION_PARTIAL
+    assert partial["image"]["uri"] == "data:image/png;base64,partial"
+    failed = _row_data(thread_rows[1])
+    assert failed["type"] == "meshagent.agent.image_generation.failed"
 
 
 @pytest.mark.asyncio
@@ -987,6 +1241,7 @@ async def test_dataset_thread_storage_restores_agent_events_with_llm_reader() ->
     }
     assert [event["type"] for event in context.metadata["agent_events"]] == [
         AGENT_MESSAGE_TURN_START,
+        AGENT_EVENT_TURN_START_ACCEPTED,
         AGENT_EVENT_TEXT_CONTENT_DELTA,
         AGENT_EVENT_TEXT_CONTENT_ENDED,
         AGENT_EVENT_TOOL_CALL_STARTED,

@@ -78,6 +78,11 @@ class AgentThreadMessage(AgentMessage):
     thread_id: str
 
 
+class AgentLLMMessage(AgentThreadMessage):
+    provider: str | None = None
+    model: str | None = None
+
+
 class ToolChoice(BaseModel):
     toolkit_name: str
     tool_name: str
@@ -99,6 +104,7 @@ class StartThread(AgentMessage):
 
 class TurnStart(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_START]
+    turn_id: str | None = None
     content: list[AgentInputContent]
     sender_name: str | None = None
     model: Optional[str] = None
@@ -171,6 +177,7 @@ class ThreadCleared(AgentThreadMessage):
 
 class TurnStartAccepted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_START_ACCEPTED]
+    turn_id: str | None = None
     source_message_id: str
     content: list[AgentInputContent] = Field(default_factory=list)
     sender_name: str | None = None
@@ -233,32 +240,32 @@ class ThreadStarted(AgentMessage):
     thread_id: str
 
 
-class AgentReasoningContentStarted(AgentThreadMessage):
+class AgentReasoningContentStarted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_REASONING_CONTENT_STARTED]
     turn_id: str
     item_id: str
 
 
-class AgentReasoningContentDelta(AgentThreadMessage):
+class AgentReasoningContentDelta(AgentLLMMessage):
     type: Literal[AGENT_EVENT_REASONING_CONTENT_DELTA]
     turn_id: str
     item_id: str
     text: str
 
 
-class AgentReasoningContentEnded(AgentThreadMessage):
+class AgentReasoningContentEnded(AgentLLMMessage):
     type: Literal[AGENT_EVENT_REASONING_CONTENT_ENDED]
     turn_id: str
     item_id: str
 
 
-class AgentTextContentStarted(AgentThreadMessage):
+class AgentTextContentStarted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_STARTED]
     turn_id: str
     item_id: str
 
 
-class AgentTextContentDelta(AgentThreadMessage):
+class AgentTextContentDelta(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_DELTA]
     turn_id: str
     item_id: str
@@ -266,19 +273,19 @@ class AgentTextContentDelta(AgentThreadMessage):
     sender_name: str | None = None
 
 
-class AgentTextContentEnded(AgentThreadMessage):
+class AgentTextContentEnded(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_ENDED]
     turn_id: str
     item_id: str
 
 
-class AgentFileContentStarted(AgentThreadMessage):
+class AgentFileContentStarted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_FILE_CONTENT_STARTED]
     turn_id: str
     item_id: str
 
 
-class AgentFileContentDelta(AgentThreadMessage):
+class AgentFileContentDelta(AgentLLMMessage):
     type: Literal[AGENT_EVENT_FILE_CONTENT_DELTA]
     turn_id: str
     item_id: str
@@ -286,13 +293,13 @@ class AgentFileContentDelta(AgentThreadMessage):
     sender_name: str | None = None
 
 
-class AgentFileContentEnded(AgentThreadMessage):
+class AgentFileContentEnded(AgentLLMMessage):
     type: Literal[AGENT_EVENT_FILE_CONTENT_ENDED]
     turn_id: str
     item_id: str
 
 
-class AgentToolCallPending(AgentThreadMessage):
+class AgentToolCallPending(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_PENDING]
     turn_id: str
     item_id: str
@@ -303,7 +310,7 @@ class AgentToolCallPending(AgentThreadMessage):
     arguments: Optional[dict] = None
 
 
-class AgentToolCallInProgress(AgentThreadMessage):
+class AgentToolCallInProgress(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_IN_PROGRESS]
     turn_id: str
     item_id: str
@@ -314,7 +321,7 @@ class AgentToolCallInProgress(AgentThreadMessage):
     arguments: Optional[dict] = None
 
 
-class AgentToolCallStarted(AgentThreadMessage):
+class AgentToolCallStarted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_STARTED]
     turn_id: str
     item_id: str
@@ -330,7 +337,7 @@ class AgentToolCallLogLine(BaseModel):
     text: str
 
 
-class AgentToolCallLogDelta(AgentThreadMessage):
+class AgentToolCallLogDelta(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_LOG_DELTA]
     turn_id: str
     item_id: str
@@ -339,7 +346,7 @@ class AgentToolCallLogDelta(AgentThreadMessage):
     lines: list[AgentToolCallLogLine]
 
 
-class AgentToolCallEnded(AgentThreadMessage):
+class AgentToolCallEnded(AgentLLMMessage):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     type: Literal[AGENT_EVENT_TOOL_CALL_ENDED]
@@ -358,7 +365,7 @@ class AgentToolCallEnded(AgentThreadMessage):
         return result.to_json()
 
 
-class AgentToolCallApprovalRequested(AgentThreadMessage):
+class AgentToolCallApprovalRequested(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED]
     turn_id: str
     item_id: str
@@ -377,7 +384,7 @@ class AgentThreadStatus(AgentThreadMessage):
     turn_id: str | None = None
 
 
-class AgentThreadEvent(AgentThreadMessage):
+class AgentThreadEvent(AgentLLMMessage):
     type: Literal[AGENT_EVENT_THREAD_EVENT]
     event: dict[str, Any]
 
@@ -393,7 +400,7 @@ class AgentGeneratedImage(BaseModel):
     status_detail: str | None = None
 
 
-class AgentImageGenerationStarted(AgentThreadMessage):
+class AgentImageGenerationStarted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_STARTED]
     turn_id: str
     item_id: str
@@ -404,7 +411,7 @@ class AgentImageGenerationStarted(AgentThreadMessage):
     status_detail: str | None = None
 
 
-class AgentImageGenerationPartial(AgentThreadMessage):
+class AgentImageGenerationPartial(AgentLLMMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_PARTIAL]
     turn_id: str
     item_id: str
@@ -417,7 +424,7 @@ class AgentImageGenerationPartial(AgentThreadMessage):
     status_detail: str | None = None
 
 
-class AgentImageGenerationCompleted(AgentThreadMessage):
+class AgentImageGenerationCompleted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_COMPLETED]
     turn_id: str
     item_id: str
@@ -429,7 +436,7 @@ class AgentImageGenerationCompleted(AgentThreadMessage):
     status_detail: str | None = None
 
 
-class AgentImageGenerationFailed(AgentThreadMessage):
+class AgentImageGenerationFailed(AgentLLMMessage):
     type: Literal[AGENT_EVENT_IMAGE_GENERATION_FAILED]
     turn_id: str
     item_id: str
