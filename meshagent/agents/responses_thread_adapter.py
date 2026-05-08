@@ -780,6 +780,21 @@ def _image_bytes_from_output_item(*, item: dict) -> Optional[bytes]:
     return None
 
 
+def _image_bytes_from_partial_image_event(*, event: dict) -> Optional[bytes]:
+    value = event.get("partial_image_b64")
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str) and value.strip() != "":
+        try:
+            return base64.b64decode(value)
+        except Exception:
+            logger.warning("unable to decode partial image payload")
+            return None
+    return None
+
+
 def response_event_to_agent_event(event: dict) -> Optional[dict]:
     event_type = event.get("type")
     if not isinstance(event_type, str) or not event_type.startswith("response."):
@@ -1716,6 +1731,35 @@ class ResponsesThreadAdapter(ThreadAdapter):
 
         item_id = self._resolve_image_item_id(event=event)
         width, height = _extract_image_dimensions(event=event)
+
+        image_bytes = _image_bytes_from_partial_image_event(event=event)
+        if image_bytes is not None:
+            output_format = event.get("output_format")
+            mime_type = _mime_type_from_output_format(output_format=output_format)
+
+            created_by = self._room.local_participant.get_attribute("name")
+            if not isinstance(created_by, str):
+                created_by = ""
+
+            partial_annotations: dict[str, str] = {}
+            for key in ("partial_image_index", "output_format"):
+                value = event.get(key)
+                if isinstance(value, str) and value.strip() != "":
+                    partial_annotations[key] = value.strip()
+                elif isinstance(value, int):
+                    partial_annotations[key] = str(value)
+
+            await self._persist_generated_image(
+                item_id=item_id,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                created_by=created_by,
+                source=_PARTIAL_IMAGE_SOURCE,
+                annotations=partial_annotations,
+                width=width,
+                height=height,
+            )
+            return
 
         messages = self._messages_element()
         await self._emit_image_status_event(
