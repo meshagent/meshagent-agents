@@ -1035,6 +1035,8 @@ class AgentProcess:
             logger.debug("dropping process message during shutdown")
             return
 
+        message = self._message_with_sender_name(message)
+
         if self._should_mirror_to_thread_storage(message=message):
             thread_storage = self._thread_storage
             if thread_storage is not None:
@@ -1093,6 +1095,37 @@ class AgentProcess:
     @property
     def turn_id(self) -> str | None:
         return None
+
+    @staticmethod
+    def _sender_name(sender: Participant | None) -> str | None:
+        if sender is None:
+            return None
+
+        raw_name = sender.get_attribute("name")
+        if not isinstance(raw_name, str):
+            return None
+
+        name = raw_name.strip()
+        if name == "":
+            return None
+
+        return name
+
+    @classmethod
+    def _message_with_sender_name(cls, message: Message) -> Message:
+        sender_name = cls._sender_name(message.sender)
+        if sender_name is None:
+            return message
+
+        existing_sender_name = message.data.sender_name
+        if existing_sender_name is not None and existing_sender_name.strip() != "":
+            return message
+
+        return Message(
+            data=message.data.model_copy(update={"sender_name": sender_name}),
+            sender=message.sender,
+            source=message.source,
+        )
 
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
         supervisor = self.supervisor
@@ -1270,10 +1303,25 @@ class LLMAgentProcess(AgentProcess):
     def thread_status_publisher(self) -> ThreadStatusPublisher | None:
         return self._thread_status_publisher
 
+    def _agent_message_with_participant_name(
+        self,
+        payload: AgentMessage,
+    ) -> AgentMessage:
+        participant_name = self._sender_name(self._participant)
+        if participant_name is None:
+            return payload
+
+        sender_name = payload.sender_name
+        if sender_name is not None and sender_name.strip() != "":
+            return payload
+
+        return payload.model_copy(update={"sender_name": participant_name})
+
     def register_content_scheme(self, scheme: ContentScheme) -> None:
         self._content_schemes.append(scheme)
 
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
+        payload = self._agent_message_with_participant_name(payload)
         thread_storage = self.thread_storage
         if thread_storage is not None:
             thread_storage.push_message(message=payload, sender=sender)
@@ -1530,12 +1578,15 @@ class LLMAgentProcess(AgentProcess):
             and isinstance(source, Channel)
             and source.send_agent_message_to_participant(
                 participant=sender,
-                payload=usage_update,
+                payload=self._agent_message_with_participant_name(usage_update),
             )
         ):
             return
 
-        super().emit(sender=sender, payload=usage_update)
+        super().emit(
+            sender=sender,
+            payload=self._agent_message_with_participant_name(usage_update),
+        )
 
     async def _compact_context_if_needed(
         self,
@@ -2258,7 +2309,7 @@ class LLMAgentProcess(AgentProcess):
 
         def enrich_llm_message(message: AgentMessage) -> AgentMessage:
             if not isinstance(message, AgentLLMMessage):
-                return message
+                return self._agent_message_with_participant_name(message)
 
             updates: dict[str, str] = {}
             if message.provider is None and llm_provider is not None:
@@ -2266,8 +2317,10 @@ class LLMAgentProcess(AgentProcess):
             if message.model is None:
                 updates["model"] = model
             if len(updates) == 0:
-                return message
-            return message.model_copy(update=updates)
+                return self._agent_message_with_participant_name(message)
+            return self._agent_message_with_participant_name(
+                message.model_copy(update=updates)
+            )
 
         def thread_status_from_agent_message(
             message: AgentMessage,

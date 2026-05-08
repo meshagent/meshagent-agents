@@ -1114,6 +1114,11 @@ class ResponsesThreadAdapter(ThreadAdapter):
             message_elements_by_key[key] = element
             return element
 
+        def apply_message_phase(*, element: Element, event: dict) -> None:
+            phase = event.get("phase")
+            if phase in {"commentary", "final_answer"}:
+                element["phase"] = phase
+
         def queue_text_update(*, key: str, text: str) -> None:
             element = message_elements_by_key.get(key)
             if element is None:
@@ -1150,7 +1155,8 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         key = f"message:{uuid.uuid4()}"
 
                     item_id = _item_id_for_message_event(event=evt)
-                    ensure_message_element(key=key, item_id=item_id)
+                    element = ensure_message_element(key=key, item_id=item_id)
+                    apply_message_phase(element=element, event=evt)
                     latest_message_key = key
 
                     part_text = _message_text_from_content_part(part=part)
@@ -1167,7 +1173,8 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         continue
 
                     item_id = _item_id_for_message_event(event=evt)
-                    ensure_message_element(key=key, item_id=item_id)
+                    element = ensure_message_element(key=key, item_id=item_id)
+                    apply_message_phase(element=element, event=evt)
                     latest_message_key = key
 
                     content_index = _content_index_for_message_event(event=evt)
@@ -1187,7 +1194,8 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         continue
 
                     item_id = _item_id_for_message_event(event=evt)
-                    ensure_message_element(key=key, item_id=item_id)
+                    element = ensure_message_element(key=key, item_id=item_id)
+                    apply_message_phase(element=element, event=evt)
                     latest_message_key = key
 
                     text = evt.get("text")

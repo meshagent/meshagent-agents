@@ -2121,6 +2121,39 @@ async def test_agent_supervisor_route_initializes_thread_storage_before_returnin
 
 
 @pytest.mark.asyncio
+async def test_agent_process_enriches_received_messages_with_sender_name() -> None:
+    thread_storage = _LifecycleThreadStorage(path="thread-1")
+    supervisor = AgentSupervisor()
+    process = _StorageThreadRecordingProcess(
+        thread_id="thread-1",
+        thread_storage=thread_storage,
+    )
+    supervisor.add_process(process)
+
+    await supervisor.start()
+    try:
+        process.send(
+            Message(
+                sender=_ThreadParticipant(
+                    name="Jesse",
+                    participant_id="caller-id",
+                ),
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[],
+                ),
+            )
+        )
+
+        await _wait_for(lambda: len(process.received) == 1)
+    finally:
+        await supervisor.stop()
+
+    assert process.received[0].data.sender_name == "Jesse"
+
+
+@pytest.mark.asyncio
 async def test_agent_supervisor_rejects_turn_start_when_thread_process_creation_fails() -> (
     None
 ):
@@ -2275,6 +2308,7 @@ async def test_agent_supervisor_routes_process_emitted_events_to_channels() -> N
             "thread_id": "thread-1",
             "payload": "ok",
             "message_id": channel.received[0].data.message_id,
+            "sender_name": None,
         }
     ]
 
@@ -2803,6 +2837,75 @@ async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapt
         "gpt-test.output_tokens": 250.0,
     }
     assert adapter.input_token_calls == 0
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_adds_participant_name_to_agent_messages() -> None:
+    class _AgentMessageAdapter(_RecordingLLMAdapter):
+        async def next(self, **kwargs) -> Any:
+            event_handler = kwargs.get("event_handler")
+            if event_handler is not None:
+                event_handler(
+                    AgentTextContentDelta(
+                        type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                        thread_id=str(kwargs["context"].metadata["thread_id"]),
+                        turn_id=str(kwargs["context"].metadata["turn_id"]),
+                        item_id="assistant-1",
+                        text="hello",
+                    )
+                )
+                event_handler(
+                    AgentToolCallPending(
+                        type=AGENT_EVENT_TOOL_CALL_PENDING,
+                        thread_id=str(kwargs["context"].metadata["thread_id"]),
+                        turn_id=str(kwargs["context"].metadata["turn_id"]),
+                        item_id="tool-1",
+                        toolkit="shell",
+                        tool="exec",
+                        arguments={"cmd": "pwd"},
+                    )
+                )
+            return await super().next(**kwargs)
+
+    room = _DownloadRecordingRoom()
+    await room.local_participant.set_attribute("name", "chatbot")
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=_AgentMessageAdapter(),
+    )
+
+    await process.start(supervisor)
+    process.send(
+        Message(
+            sender=_ThreadParticipant(name="caller", participant_id="caller-id"),
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            ),
+        )
+    )
+
+    await _wait_for(
+        lambda: (
+            len(supervisor.payloads(message_type=AGENT_EVENT_TEXT_CONTENT_DELTA)) == 1
+            and len(supervisor.payloads(message_type=AGENT_EVENT_TOOL_CALL_PENDING))
+            == 1
+        )
+    )
+
+    accepted_payload = supervisor.payloads(
+        message_type=AGENT_EVENT_TURN_START_ACCEPTED
+    )[0]
+    text_payload = supervisor.payloads(message_type=AGENT_EVENT_TEXT_CONTENT_DELTA)[0]
+    tool_payload = supervisor.payloads(message_type=AGENT_EVENT_TOOL_CALL_PENDING)[0]
+    assert accepted_payload["sender_name"] == "chatbot"
+    assert text_payload["sender_name"] == "chatbot"
+    assert tool_payload["sender_name"] == "chatbot"
     await process.stop(supervisor)
 
 

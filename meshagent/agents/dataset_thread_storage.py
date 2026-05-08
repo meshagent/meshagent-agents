@@ -229,6 +229,8 @@ class _ActiveContent:
     message_id: str
     provider: str | None = None
     model: str | None = None
+    sender_name: str | None = None
+    phase: Literal["commentary", "final_answer"] | None = None
     parts: list[str] = field(default_factory=list)
 
 
@@ -732,6 +734,14 @@ class DatasetThreadStorage(ThreadStorage):
                 active.provider = message.provider
             if active.model is None:
                 active.model = message.model
+            if active.sender_name is None:
+                active.sender_name = message.sender_name
+            if (
+                active.phase is None
+                and isinstance(message, AgentTextContentDelta)
+                and message.phase is not None
+            ):
+                active.phase = message.phase
             return active
 
         active = _ActiveContent(
@@ -741,6 +751,8 @@ class DatasetThreadStorage(ThreadStorage):
             message_id=message.message_id,
             provider=message.provider,
             model=message.model,
+            sender_name=message.sender_name,
+            phase=message.phase if isinstance(message, AgentTextContentDelta) else None,
         )
         self._active_content_by_item_id[message.item_id] = active
         return active
@@ -868,6 +880,8 @@ class DatasetThreadStorage(ThreadStorage):
                     text=text,
                     provider=active.provider,
                     model=active.model,
+                    sender_name=active.sender_name,
+                    phase=active.phase if active.kind == "text" else None,
                 )
             )
             if ended_message is not None:
@@ -888,6 +902,7 @@ class DatasetThreadStorage(ThreadStorage):
                     url=url,
                     provider=active.provider,
                     model=active.model,
+                    sender_name=active.sender_name,
                 )
             )
         if ended_message is not None:
@@ -1447,6 +1462,8 @@ class DatasetThreadStorage(ThreadStorage):
             if not isinstance(text, str) or text == "":
                 return []
             turn_id = row.turn_id or row.item_id
+            sender_name = data.get("sender_name")
+            phase = data.get("phase")
             return [
                 AgentTextContentDelta(
                     type=AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -1454,12 +1471,15 @@ class DatasetThreadStorage(ThreadStorage):
                     turn_id=turn_id,
                     item_id=row.item_id,
                     text=text,
+                    sender_name=sender_name if isinstance(sender_name, str) else None,
+                    phase=phase if phase in {"commentary", "final_answer"} else None,
                 ),
                 AgentTextContentEnded(
                     type=AGENT_EVENT_TEXT_CONTENT_ENDED,
                     thread_id=self.path,
                     turn_id=turn_id,
                     item_id=row.item_id,
+                    phase=phase if phase in {"commentary", "final_answer"} else None,
                 ),
             ]
 
@@ -1468,6 +1488,7 @@ class DatasetThreadStorage(ThreadStorage):
             if not isinstance(text, str) or text == "":
                 return []
             turn_id = row.turn_id or row.item_id
+            sender_name = data.get("sender_name")
             return [
                 AgentReasoningContentDelta(
                     type=AGENT_EVENT_REASONING_CONTENT_DELTA,
@@ -1475,6 +1496,7 @@ class DatasetThreadStorage(ThreadStorage):
                     turn_id=turn_id,
                     item_id=row.item_id,
                     text=text,
+                    sender_name=sender_name if isinstance(sender_name, str) else None,
                 ),
                 AgentReasoningContentEnded(
                     type=AGENT_EVENT_REASONING_CONTENT_ENDED,
@@ -1490,6 +1512,7 @@ class DatasetThreadStorage(ThreadStorage):
                 return []
             turn_id = row.turn_id or row.item_id
             messages: list[AgentThreadMessage] = []
+            sender_name = data.get("sender_name")
             for url in urls:
                 if not isinstance(url, str) or url.strip() == "":
                     continue
@@ -1500,6 +1523,9 @@ class DatasetThreadStorage(ThreadStorage):
                         turn_id=turn_id,
                         item_id=row.item_id,
                         url=url,
+                        sender_name=sender_name
+                        if isinstance(sender_name, str)
+                        else None,
                     )
                 )
             if len(messages) == 0:

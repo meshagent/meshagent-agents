@@ -1,5 +1,12 @@
 import pytest
 
+from meshagent.agents.event_publisher import make_openai_agent_event_publisher
+from meshagent.agents.messages import (
+    AgentMessage,
+    AgentTextContentDelta,
+    AgentTextContentEnded,
+    AgentTextContentStarted,
+)
 from meshagent.agents.responses_thread_adapter import (
     _headline_for_response_event,
     ResponsesThreadAdapter,
@@ -21,6 +28,77 @@ class _FakeParticipant:
 class _FakeRoom:
     def __init__(self):
         self.local_participant = _FakeParticipant(name="assistant")
+
+
+def test_openai_event_publisher_preserves_commentary_message_phase() -> None:
+    messages: list[AgentMessage] = []
+    publisher = make_openai_agent_event_publisher(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        callback=messages.append,
+    )
+
+    publisher(
+        {
+            "type": "response.output_text.delta",
+            "item_id": "message-1",
+            "delta": "checking",
+            "phase": "commentary",
+        }
+    )
+    publisher(
+        {
+            "type": "response.output_text.done",
+            "item_id": "message-1",
+            "text": "checking",
+            "phase": "commentary",
+        }
+    )
+
+    assert isinstance(messages[0], AgentTextContentStarted)
+    assert messages[0].phase == "commentary"
+    assert isinstance(messages[1], AgentTextContentDelta)
+    assert messages[1].phase == "commentary"
+    assert isinstance(messages[2], AgentTextContentEnded)
+    assert messages[2].phase == "commentary"
+
+
+def test_openai_event_publisher_emits_commentary_from_completed_snapshot() -> None:
+    messages: list[AgentMessage] = []
+    publisher = make_openai_agent_event_publisher(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        callback=messages.append,
+    )
+
+    publisher(
+        {
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "id": "message-1",
+                        "type": "message",
+                        "phase": "commentary",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "checking",
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert isinstance(messages[0], AgentTextContentStarted)
+    assert messages[0].phase == "commentary"
+    assert isinstance(messages[1], AgentTextContentDelta)
+    assert messages[1].text == "checking"
+    assert messages[1].phase == "commentary"
+    assert isinstance(messages[2], AgentTextContentEnded)
+    assert messages[2].phase == "commentary"
 
 
 def test_extract_image_dimensions_prefers_explicit_fields_then_size():

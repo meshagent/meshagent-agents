@@ -72,6 +72,7 @@ AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
 class AgentMessage(BaseModel):
     type: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    sender_name: str | None = None
 
 
 class AgentThreadMessage(AgentMessage):
@@ -263,6 +264,7 @@ class AgentTextContentStarted(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_STARTED]
     turn_id: str
     item_id: str
+    phase: Literal["commentary", "final_answer"] | None = None
 
 
 class AgentTextContentDelta(AgentLLMMessage):
@@ -271,12 +273,14 @@ class AgentTextContentDelta(AgentLLMMessage):
     item_id: str
     text: str
     sender_name: str | None = None
+    phase: Literal["commentary", "final_answer"] | None = None
 
 
 class AgentTextContentEnded(AgentLLMMessage):
     type: Literal[AGENT_EVENT_TEXT_CONTENT_ENDED]
     turn_id: str
     item_id: str
+    phase: Literal["commentary", "final_answer"] | None = None
 
 
 class AgentFileContentStarted(AgentLLMMessage):

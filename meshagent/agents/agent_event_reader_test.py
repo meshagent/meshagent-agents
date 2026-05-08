@@ -153,3 +153,32 @@ def test_default_agent_event_reader_roundtrips_core_agent_messages() -> None:
         AGENT_EVENT_THREAD_EVENT,
         AGENT_EVENT_CONTEXT_COMPACTED,
     ]
+
+
+def test_default_agent_event_reader_preserves_commentary_phase() -> None:
+    context = AgentSessionContext()
+    reader = LLMAdapter().make_agent_event_reader(context=context)
+
+    reader.consume(
+        AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            item_id="text-1",
+            text="checking",
+            phase="commentary",
+        )
+    )
+    reader.consume(
+        AgentTextContentEnded(
+            type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            item_id="text-1",
+            phase="commentary",
+        )
+    )
+
+    assert context.messages == [
+        {"role": "assistant", "content": "checking", "phase": "commentary"}
+    ]

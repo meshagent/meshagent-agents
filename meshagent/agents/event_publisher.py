@@ -59,6 +59,7 @@ from .messages import (
 AgentEventCallback = Callable[[AgentMessage], None]
 FunctionToolNameResolver = Callable[[str], tuple[str, str] | None]
 _ContentKind = Literal["file", "reasoning", "text"]
+_MessagePhase = Literal["commentary", "final_answer"]
 _MESHAGENT_TOOL_NAMESPACE = "meshagent"
 _OPENAI_RESPONSES_TOOL_NAMESPACE = "openai.responses"
 _ANTHROPIC_MESSAGES_TOOL_NAMESPACE = "anthropic.messages"
@@ -226,6 +227,38 @@ def _content_kind_from_part(part: dict[str, Any]) -> _ContentKind | None:
 
     if _file_url_from_payload(payload=part, provider="openai") is not None:
         return "file"
+
+    return None
+
+
+def _message_phase_from_value(value: Any) -> _MessagePhase | None:
+    phase = _as_str(value)
+    if phase is None:
+        return None
+    normalized = phase.strip().lower()
+    if normalized == "commentary":
+        return "commentary"
+    if normalized in {"final_answer", "answer"}:
+        return "final_answer"
+    return None
+
+
+def _message_phase_from_event(*, event: dict[str, Any]) -> _MessagePhase | None:
+    phase = _message_phase_from_value(event.get("phase"))
+    if phase is not None:
+        return phase
+
+    item = _as_dict(event.get("item"))
+    if item is not None:
+        phase = _message_phase_from_value(item.get("phase"))
+        if phase is not None:
+            return phase
+
+    response = _as_dict(event.get("response"))
+    if response is not None:
+        phase = _message_phase_from_value(response.get("phase"))
+        if phase is not None:
+            return phase
 
     return None
 
@@ -658,10 +691,12 @@ class _AgentMessageEmitter:
     def has_content_data(self, *, kind: _ContentKind, item_id: str) -> bool:
         return self._content_key(kind=kind, item_id=item_id) in self._content_with_data
 
-    def emit_text_delta(self, *, item_id: str, text: str) -> None:
+    def emit_text_delta(
+        self, *, item_id: str, text: str, phase: _MessagePhase | None = None
+    ) -> None:
         if text == "":
             return
-        self._ensure_content_started(kind="text", item_id=item_id)
+        self.emit_text_started(item_id=item_id, phase=phase)
         self._mark_content_has_data(kind="text", item_id=item_id)
         self.callback(
             AgentTextContentDelta(
@@ -670,6 +705,7 @@ class _AgentMessageEmitter:
                 turn_id=self.turn_id,
                 item_id=item_id,
                 text=text,
+                phase=phase,
             )
         )
 
@@ -703,8 +739,23 @@ class _AgentMessageEmitter:
             )
         )
 
-    def emit_text_started(self, *, item_id: str) -> None:
-        self._ensure_content_started(kind="text", item_id=item_id)
+    def emit_text_started(
+        self, *, item_id: str, phase: _MessagePhase | None = None
+    ) -> None:
+        key = self._content_key(kind="text", item_id=item_id)
+        if key in self._started_content:
+            return
+
+        self._started_content.add(key)
+        self.callback(
+            AgentTextContentStarted(
+                type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                phase=phase,
+            )
+        )
 
     def emit_reasoning_started(self, *, item_id: str) -> None:
         self._ensure_content_started(kind="reasoning", item_id=item_id)
@@ -712,11 +763,13 @@ class _AgentMessageEmitter:
     def emit_file_started(self, *, item_id: str) -> None:
         self._ensure_content_started(kind="file", item_id=item_id)
 
-    def emit_text_ended(self, *, item_id: str) -> None:
+    def emit_text_ended(
+        self, *, item_id: str, phase: _MessagePhase | None = None
+    ) -> None:
         key = self._content_key(kind="text", item_id=item_id)
         if key in self._ended_content:
             return
-        self._ensure_content_started(kind="text", item_id=item_id)
+        self.emit_text_started(item_id=item_id, phase=phase)
         self._ended_content.add(key)
         self.callback(
             AgentTextContentEnded(
@@ -724,6 +777,7 @@ class _AgentMessageEmitter:
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=item_id,
+                phase=phase,
             )
         )
 
@@ -994,15 +1048,21 @@ class _OpenAIAgentEventPublisher:
             return
         self._mapped_output_item_id(output_index=output_index, item_id=item_id)
 
-    def _finish_part_from_snapshot(self, *, item_id: str, part: dict[str, Any]) -> None:
+    def _finish_part_from_snapshot(
+        self,
+        *,
+        item_id: str,
+        part: dict[str, Any],
+        phase: _MessagePhase | None = None,
+    ) -> None:
         content_kind = _content_kind_from_part(part)
         if content_kind == "text":
             text = _part_text(part)
             if text != "" and not self.emitter.has_content_data(
                 kind="text", item_id=item_id
             ):
-                self.emitter.emit_text_delta(item_id=item_id, text=text)
-            self.emitter.emit_text_ended(item_id=item_id)
+                self.emitter.emit_text_delta(item_id=item_id, text=text, phase=phase)
+            self.emitter.emit_text_ended(item_id=item_id, phase=phase)
             return
 
         if content_kind == "reasoning":
@@ -1056,6 +1116,7 @@ class _OpenAIAgentEventPublisher:
 
         item_type = _as_str(item.get("type"))
         item_id = self._item_id_from_event(event=event)
+        message_phase = _message_phase_from_event(event=event)
         if item_type == "reasoning" and item_id is not None:
             if not completed:
                 self.emitter.emit_reasoning_started(item_id=item_id)
@@ -1138,7 +1199,9 @@ class _OpenAIAgentEventPublisher:
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict):
-                        self._finish_part_from_snapshot(item_id=item_id, part=part)
+                        self._finish_part_from_snapshot(
+                            item_id=item_id, part=part, phase=message_phase
+                        )
 
     def _image_generation_info_from_event(
         self,
@@ -1262,9 +1325,12 @@ class _OpenAIAgentEventPublisher:
             return
 
         content_kind = _content_kind_from_part(part)
+        phase = _message_phase_from_event(event=event)
         if content_kind == "text":
-            self.emitter.emit_text_started(item_id=item_id)
-            self.emitter.emit_text_delta(item_id=item_id, text=_part_text(part))
+            self.emitter.emit_text_started(item_id=item_id, phase=phase)
+            self.emitter.emit_text_delta(
+                item_id=item_id, text=_part_text(part), phase=phase
+            )
             return
 
         if content_kind == "reasoning":
@@ -1285,14 +1351,21 @@ class _OpenAIAgentEventPublisher:
         if part is None or item_id is None:
             return
 
-        self._finish_part_from_snapshot(item_id=item_id, part=part)
+        self._finish_part_from_snapshot(
+            item_id=item_id,
+            part=part,
+            phase=_message_phase_from_event(event=event),
+        )
 
     def _on_text_delta(self, *, event: dict[str, Any]) -> None:
         item_id = self._item_id_from_event(event=event)
         if item_id is None:
             return
+        phase = _message_phase_from_event(event=event)
         self.emitter.emit_text_delta(
-            item_id=item_id, text=_as_text(event.get("delta")) or ""
+            item_id=item_id,
+            text=_as_text(event.get("delta")) or "",
+            phase=phase,
         )
 
     def _on_text_done(self, *, event: dict[str, Any], field_name: str) -> None:
@@ -1300,12 +1373,13 @@ class _OpenAIAgentEventPublisher:
         if item_id is None:
             return
 
+        phase = _message_phase_from_event(event=event)
         final_text = _as_text(event.get(field_name)) or ""
         if final_text != "" and not self.emitter.has_content_data(
             kind="text", item_id=item_id
         ):
-            self.emitter.emit_text_delta(item_id=item_id, text=final_text)
-        self.emitter.emit_text_ended(item_id=item_id)
+            self.emitter.emit_text_delta(item_id=item_id, text=final_text, phase=phase)
+        self.emitter.emit_text_ended(item_id=item_id, phase=phase)
 
     def _on_reasoning_delta(self, *, event: dict[str, Any], field_name: str) -> None:
         item_id = self._item_id_from_event(event=event)
@@ -1364,7 +1438,9 @@ class _OpenAIAgentEventPublisher:
             if not isinstance(outputs, list):
                 return
             for output_index, item in enumerate(outputs):
-                if not isinstance(item, dict) or item.get("type") != "compaction":
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") not in {"compaction", "message"}:
                     continue
                 self._on_output_item(
                     event={**event, "item": item, "output_index": output_index},

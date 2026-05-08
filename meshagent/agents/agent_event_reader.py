@@ -45,6 +45,7 @@ class AgentEventReader(Protocol):
 class _BufferedTextItem:
     role: str
     kind: str
+    phase: str | None = None
     text: str = ""
 
 
@@ -105,6 +106,7 @@ class DefaultAgentEventReader:
                 role="assistant",
                 kind="text",
                 text=message.text,
+                phase=message.phase,
             )
             return
 
@@ -270,11 +272,14 @@ class DefaultAgentEventReader:
         role: str,
         kind: str,
         text: str,
+        phase: str | None = None,
     ) -> None:
         item = self._text_by_item_id.get(item_id)
         if item is None:
-            item = _BufferedTextItem(role=role, kind=kind)
+            item = _BufferedTextItem(role=role, kind=kind, phase=phase)
             self._text_by_item_id[item_id] = item
+        elif item.phase is None and phase is not None:
+            item.phase = phase
         item.text += text
 
     def _flush_text_item(self, *, item_id: str) -> None:
@@ -282,7 +287,10 @@ class DefaultAgentEventReader:
         if item is None or item.text == "":
             return
         if item.kind == "text":
-            self._context.messages.append({"role": item.role, "content": item.text})
+            message: dict[str, Any] = {"role": item.role, "content": item.text}
+            if item.phase is not None:
+                message["phase"] = item.phase
+            self._context.messages.append(message)
             return
         self._append_context_item(
             role=item.role,

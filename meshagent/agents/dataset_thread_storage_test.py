@@ -534,6 +534,104 @@ async def test_dataset_thread_storage_flushes_partial_text_on_interrupt() -> Non
 
 
 @pytest.mark.asyncio
+async def test_dataset_thread_storage_restores_text_sender_name() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            text="answer",
+            sender_name="chatbot",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentEnded(
+            type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+        )
+    )
+    await storage.stop()
+
+    for row in room.datasets.rows[(("threads",), "demo")]:
+        timestamp = row.get("timestamp")
+        if isinstance(timestamp, str):
+            row["timestamp"] = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        data = row.get("data")
+        if isinstance(data, dict):
+            row["data"] = json.dumps(data)
+
+    restored = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await restored.start()
+    try:
+        text_delta = next(
+            message
+            for message in restored.agent_messages()
+            if isinstance(message, AgentTextContentDelta)
+        )
+    finally:
+        await restored.stop()
+
+    assert text_delta.sender_name == "chatbot"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_restores_text_phase() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            text="checking",
+            phase="commentary",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentEnded(
+            type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            phase="commentary",
+        )
+    )
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "demo")]
+    data = _row_data(rows[0])
+    assert data["phase"] == "commentary"
+
+    for row in rows:
+        timestamp = row.get("timestamp")
+        if isinstance(timestamp, str):
+            row["timestamp"] = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        data = row.get("data")
+        if isinstance(data, dict):
+            row["data"] = json.dumps(data)
+
+    restored = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await restored.start()
+    try:
+        context = AgentSessionContext(system_role=None)
+        restored.restore_session_context(context=context, llm_adapter=LLMAdapter())
+    finally:
+        await restored.stop()
+
+    assert context.messages == [
+        {"role": "assistant", "content": "checking", "phase": "commentary"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dataset_thread_storage_flushes_unended_text_on_successful_turn_end() -> (
     None
 ):
