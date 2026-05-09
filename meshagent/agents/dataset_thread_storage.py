@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 import pyarrow as pa
+from pydantic_core import from_json as pydantic_core_from_json
 
 from meshagent.api import DatasetJson, DatasetOptimizeConfig, Participant, RoomClient
 from meshagent.api.messaging import TextContent
@@ -135,6 +136,61 @@ def _parse_image_dimensions_from_size(value: Any) -> tuple[int | None, int | Non
     return (None, None)
 
 
+def _merge_tool_arguments(
+    *,
+    current: dict[str, Any] | None,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(current) if current is not None else {}
+    for key, value in update.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_tool_arguments(current=existing, update=value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _partial_json_tool_arguments(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped == "" or stripped[0] not in "{[":
+        return None
+
+    try:
+        parsed = pydantic_core_from_json(
+            stripped.encode("utf-8"),
+            allow_partial=True,
+        )
+    except ValueError:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _tool_arguments_from_delta_text(
+    *,
+    tool: str | None,
+    current: dict[str, Any] | None,
+    text: str,
+) -> dict[str, Any] | None:
+    partial_arguments = _partial_json_tool_arguments(text)
+    if partial_arguments is not None:
+        return _merge_tool_arguments(current=current, update=partial_arguments)
+
+    if tool is None:
+        return None
+
+    normalized_tool = tool.strip().lower()
+    if normalized_tool == "apply_patch":
+        patch = text.strip()
+        if patch != "":
+            return _merge_tool_arguments(current=current, update={"patch": patch})
+
+    return None
+
+
 def _mime_type_from_output_format(output_format: Any) -> str:
     if not isinstance(output_format, str):
         return "image/png"
@@ -248,6 +304,7 @@ class _ActiveToolCall:
     tool: str | None = None
     arguments: dict[str, Any] | None = None
     stage: Literal["pending", "in_progress", "started"] | None = None
+    argument_delta_text: str = ""
     logs: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -270,6 +327,7 @@ class DatasetThreadStorage(ThreadStorage):
         path: str,
         max_append_message_count: int = 25,
         optimize_after_append_count: int = 25,
+        persist_deltas: bool = False,
     ) -> None:
         self._room = room
         normalized_path = _normalize_dataset_thread_storage_path(path=path)
@@ -280,6 +338,7 @@ class DatasetThreadStorage(ThreadStorage):
         self._namespace = namespace if len(namespace) > 0 else None
         self._max_append_message_count = max_append_message_count
         self._optimize_after_append_count = optimize_after_append_count
+        self._persist_deltas = persist_deltas
         self._appends_since_optimize = 0
         self._optimize_requested = False
         self._optimize_task: asyncio.Task[None] | None = None
@@ -307,6 +366,10 @@ class DatasetThreadStorage(ThreadStorage):
     @property
     def namespace(self) -> list[str] | None:
         return None if self._namespace is None else list(self._namespace)
+
+    @property
+    def persist_deltas(self) -> bool:
+        return self._persist_deltas
 
     def _schema(self) -> pa.Schema:
         return pa.schema(
@@ -578,6 +641,7 @@ class DatasetThreadStorage(ThreadStorage):
         if isinstance(message, AgentTextContentDelta):
             active = self._ensure_active_content(message=message, kind="text")
             active.parts.append(message.text)
+            await self._append_verbose_delta_row(message=message)
             return
 
         if isinstance(message, AgentTextContentEnded):
@@ -602,6 +666,7 @@ class DatasetThreadStorage(ThreadStorage):
         if isinstance(message, AgentReasoningContentDelta):
             active = self._ensure_active_content(message=message, kind="reasoning")
             active.parts.append(message.text)
+            await self._append_verbose_delta_row(message=message)
             return
 
         if isinstance(message, AgentReasoningContentEnded):
@@ -626,6 +691,7 @@ class DatasetThreadStorage(ThreadStorage):
         if isinstance(message, AgentFileContentDelta):
             active = self._ensure_active_content(message=message, kind="file")
             active.parts.append(message.url)
+            await self._append_verbose_delta_row(message=message)
             return
 
         if isinstance(message, AgentFileContentEnded):
@@ -658,9 +724,21 @@ class DatasetThreadStorage(ThreadStorage):
                 )
                 self._active_tool_calls_by_item_id[message.item_id] = active
             active.logs.extend([line.model_dump(mode="json") for line in message.lines])
+            await self._append_verbose_delta_row(message=message)
             return
 
         if isinstance(message, AgentToolCallArgumentsDelta):
+            active = self._active_tool_calls_by_item_id.get(message.item_id)
+            if active is not None and message.delta != "":
+                active.argument_delta_text += message.delta
+                updated_arguments = _tool_arguments_from_delta_text(
+                    tool=active.tool,
+                    current=active.arguments,
+                    text=active.argument_delta_text,
+                )
+                if updated_arguments is not None:
+                    active.arguments = updated_arguments
+            await self._append_verbose_delta_row(message=message)
             return
 
         if isinstance(message, AgentToolCallEnded):
@@ -723,6 +801,10 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         await self._append_message_row(message=message)
+
+    async def _append_verbose_delta_row(self, *, message: AgentThreadMessage) -> None:
+        if self._persist_deltas:
+            await self._append_message_row(message=message)
 
     def _ensure_active_content(
         self,
@@ -1169,6 +1251,7 @@ class DatasetThreadStorage(ThreadStorage):
                 AgentToolCallPending,
                 AgentToolCallInProgress,
                 AgentToolCallStarted,
+                AgentToolCallArgumentsDelta,
                 AgentToolCallLogDelta,
                 AgentToolCallEnded,
                 AgentToolCallApprovalRequested,

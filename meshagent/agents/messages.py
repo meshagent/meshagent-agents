@@ -371,6 +371,8 @@ class AgentToolCallEnded(AgentLLMMessage):
     item_id: str
     namespace: str = "meshagent"
     call_id: str | None = None
+    toolkit: str | None = None
+    tool: str | None = None
     result: Content | None = None
     error: AgentError | None = None
 
@@ -401,6 +403,8 @@ class AgentThreadStatus(AgentThreadMessage):
     turn_id: str | None = None
     pending_item_id: str | None = None
     total_bytes: int | None = None
+    lines_added: int | None = None
+    lines_removed: int | None = None
 
 
 class AgentThreadEvent(AgentLLMMessage):

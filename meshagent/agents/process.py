@@ -34,6 +34,7 @@ from pydantic_core import from_json as pydantic_core_from_json
 from .thread_adapter import default_format_message
 from .thread_storage import ThreadStorage
 from .thread_status_publisher import ThreadStatusPublisher
+from .tool_call_accumulator import ToolCallAccumulator
 from .version import __version__ as agents_version
 from .messages import (
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
@@ -293,6 +294,12 @@ def _extract_apply_patch_text(*, arguments: dict[str, Any] | None) -> str:
     return _first_nested_text(value=arguments, keys=("patch", "input", "diff"))
 
 
+def _extract_apply_patch_path(*, arguments: dict[str, Any] | None) -> str:
+    if arguments is None:
+        return ""
+    return _first_nested_text(value=arguments, keys=("path",))
+
+
 def _apply_patch_path(*, patch: str) -> str:
     for pattern in _APPLY_PATCH_PATH_RES:
         match = pattern.search(patch)
@@ -306,6 +313,29 @@ def _apply_patch_path(*, patch: str) -> str:
 
 def _status_total_bytes(total_bytes: int) -> int | None:
     return total_bytes if total_bytes > 100 else None
+
+
+def _patch_line_counts(*, patch: str) -> tuple[int | None, int | None]:
+    added = 0
+    removed = 0
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    if added == 0 and removed == 0:
+        return None, None
+    return added, removed
+
+
+def _tool_patch_line_counts(
+    *,
+    tool: str,
+    arguments: dict[str, Any] | None,
+) -> tuple[int | None, int | None]:
+    if tool.strip().lower() != "apply_patch":
+        return None, None
+    return _patch_line_counts(patch=_extract_apply_patch_text(arguments=arguments))
 
 
 def _tool_argument_snapshot_bytes(arguments: dict[str, Any] | None) -> int:
@@ -384,6 +414,11 @@ def _tool_arguments_from_delta_text(
         return _merge_tool_arguments(current=current, update=partial_arguments)
 
     normalized_tool = tool.strip().lower()
+    if normalized_tool == "apply_patch":
+        patch = text.strip()
+        if patch != "":
+            return _merge_tool_arguments(current=current, update={"patch": patch})
+
     if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
         command = text.strip()
         if command != "":
@@ -504,10 +539,12 @@ def _tool_status_text(
 
     if normalized_tool == "apply_patch":
         patch = _extract_apply_patch_text(arguments=arguments)
-        path = _apply_patch_path(patch=patch)
+        path = _extract_apply_patch_path(arguments=arguments) or _apply_patch_path(
+            patch=patch
+        )
         if path != "":
             if state == "pending":
-                return f"Preparing to edit {path}"
+                return f"Editing {path}"
             if state == "failed":
                 return f"Attempted to patch {path}"
             if state == "cancelled":
@@ -516,8 +553,6 @@ def _tool_status_text(
                 return f"Editing {path}"
             return f"Edited {path}"
         if state == "pending":
-            if patch == "":
-                return "Preparing"
             return "Preparing patch"
         if state == "failed":
             return "Attempted to patch"
@@ -1393,9 +1428,7 @@ class LLMAgentProcess(AgentProcess):
         self._interrupt_source_message_id: str | None = None
         self._active_turn_toolkit_client_options: dict[str, dict[str, Any]] = {}
         self._active_turn_tool_choice: ToolChoice | None = None
-        self._status_tool_calls_by_item_id: dict[str, _StatusToolCall] = {}
-        self._status_tool_argument_delta_bytes_by_item_id: dict[str, int] = {}
-        self._status_tool_argument_delta_text_by_item_id: dict[str, str] = {}
+        self._status_tool_call_accumulator = ToolCallAccumulator()
         self._status_text_by_item_id: dict[str, str] = {}
         self._latest_status_text: str | None = None
         self._session_initializer = session_initializer
@@ -2446,7 +2479,7 @@ class LLMAgentProcess(AgentProcess):
 
         def thread_status_from_agent_message(
             message: AgentMessage,
-        ) -> tuple[str, str | None, int | None] | None:
+        ) -> tuple[str, str | None, int | None, int | None, int | None] | None:
             if isinstance(message, AgentThreadEvent):
                 event = message.event
                 event_type = event.get("type")
@@ -2488,14 +2521,9 @@ class LLMAgentProcess(AgentProcess):
                 if state in _THREAD_STATUS_TERMINAL_STATES:
                     if status_item_id.strip() != "":
                         self._status_text_by_item_id.pop(status_item_id, None)
-                        self._status_tool_argument_delta_bytes_by_item_id.pop(
-                            status_item_id, None
-                        )
-                        self._status_tool_argument_delta_text_by_item_id.pop(
-                            status_item_id, None
-                        )
+                        self._status_tool_call_accumulator.remove(status_item_id)
                     self._latest_status_text = None
-                    return "Thinking", None, None
+                    return "Thinking", None, None, None, None
                 if status_text is None:
                     return None
                 self._latest_status_text = status_text
@@ -2505,10 +2533,10 @@ class LLMAgentProcess(AgentProcess):
                     status_text,
                     status_item_id if status_item_id.strip() != "" else None,
                     _status_total_bytes(
-                        self._status_tool_argument_delta_bytes_by_item_id.get(
-                            status_item_id, 0
-                        )
+                        self._status_tool_call_accumulator.total_bytes(status_item_id)
                     ),
+                    None,
+                    None,
                 )
 
             if isinstance(
@@ -2520,58 +2548,28 @@ class LLMAgentProcess(AgentProcess):
                     if isinstance(message, AgentToolCallPending)
                     else "in_progress"
                 )
-                argument_total_bytes = max(
-                    self._status_tool_argument_delta_bytes_by_item_id.get(
-                        message.item_id, 0
-                    ),
-                    _tool_argument_snapshot_bytes(message.arguments),
-                    message.argument_bytes or 0,
-                )
-                self._status_tool_calls_by_item_id[message.item_id] = _StatusToolCall(
+                snapshot = self._status_tool_call_accumulator.upsert_lifecycle(
+                    item_id=message.item_id,
                     toolkit=message.toolkit,
                     tool=message.tool,
                     arguments=message.arguments,
                     state=state,
-                    argument_delta_bytes=argument_total_bytes,
+                    argument_bytes=message.argument_bytes,
                 )
-                if message.argument_bytes is not None:
-                    self._status_tool_argument_delta_bytes_by_item_id[
-                        message.item_id
-                    ] = argument_total_bytes
                 return (
-                    _tool_status_text(
-                        state=state,
-                        toolkit=message.toolkit,
-                        tool=message.tool,
-                        arguments=message.arguments,
-                    ),
-                    message.item_id,
-                    _status_total_bytes(argument_total_bytes),
+                    snapshot.text,
+                    snapshot.item_id,
+                    snapshot.total_bytes,
+                    snapshot.lines_added,
+                    snapshot.lines_removed,
                 )
 
             if isinstance(message, AgentToolCallArgumentsDelta):
-                tool_call = self._status_tool_calls_by_item_id.get(message.item_id)
-                previous_argument_bytes = (
-                    self._status_tool_argument_delta_bytes_by_item_id.get(
-                        message.item_id, 0
-                    )
+                snapshot = self._status_tool_call_accumulator.append_delta(
+                    item_id=message.item_id,
+                    delta=message.delta,
                 )
-                argument_delta_bytes = previous_argument_bytes + len(
-                    message.delta.encode("utf-8")
-                )
-                self._status_tool_argument_delta_bytes_by_item_id[message.item_id] = (
-                    argument_delta_bytes
-                )
-                delta_text = (
-                    self._status_tool_argument_delta_text_by_item_id.get(
-                        message.item_id, ""
-                    )
-                    + message.delta
-                )
-                self._status_tool_argument_delta_text_by_item_id[message.item_id] = (
-                    delta_text
-                )
-                if tool_call is None:
+                if snapshot is None:
                     status_text = self._status_text_by_item_id.get(message.item_id)
                     if status_text is None:
                         status_text = self._latest_status_text
@@ -2581,39 +2579,27 @@ class LLMAgentProcess(AgentProcess):
                     return (
                         status_text,
                         message.item_id,
-                        _status_total_bytes(argument_delta_bytes),
+                        _status_total_bytes(
+                            self._status_tool_call_accumulator.total_bytes(
+                                message.item_id
+                            )
+                        ),
+                        None,
+                        None,
                     )
-                updated_arguments = _tool_arguments_from_delta_text(
-                    tool=tool_call.tool,
-                    current=tool_call.arguments,
-                    text=delta_text,
-                )
-                updated_tool_call = _StatusToolCall(
-                    toolkit=tool_call.toolkit,
-                    tool=tool_call.tool,
-                    arguments=updated_arguments
-                    if updated_arguments is not None
-                    else tool_call.arguments,
-                    state=tool_call.state,
-                    argument_delta_bytes=argument_delta_bytes,
-                )
-                self._status_tool_calls_by_item_id[message.item_id] = updated_tool_call
                 return (
-                    _tool_status_text(
-                        state=updated_tool_call.state,
-                        toolkit=updated_tool_call.toolkit,
-                        tool=updated_tool_call.tool,
-                        arguments=updated_tool_call.arguments,
-                    ),
-                    message.item_id,
-                    _status_total_bytes(updated_tool_call.argument_delta_bytes),
+                    snapshot.text,
+                    snapshot.item_id,
+                    snapshot.total_bytes,
+                    snapshot.lines_added,
+                    snapshot.lines_removed,
                 )
 
             if isinstance(message, AgentToolCallApprovalRequested):
-                return "Waiting for approval", message.item_id, None
+                return "Waiting for approval", message.item_id, None, None, None
 
             if isinstance(message, AgentToolCallEnded):
-                tool_call = self._status_tool_calls_by_item_id.get(message.item_id)
+                tool_call = self._status_tool_call_accumulator.get(message.item_id)
                 event_status_text = self._status_text_by_item_id.pop(
                     message.item_id, None
                 )
@@ -2623,19 +2609,9 @@ class LLMAgentProcess(AgentProcess):
                 ):
                     self._latest_status_text = None
                 if tool_call is None:
-                    self._status_tool_argument_delta_bytes_by_item_id.pop(
-                        message.item_id, None
-                    )
-                    self._status_tool_argument_delta_text_by_item_id.pop(
-                        message.item_id, None
-                    )
-                    return "Thinking", None, None
-                self._status_tool_argument_delta_bytes_by_item_id.pop(
-                    message.item_id, None
-                )
-                self._status_tool_argument_delta_text_by_item_id.pop(
-                    message.item_id, None
-                )
+                    self._status_tool_call_accumulator.remove(message.item_id)
+                    return "Thinking", None, None, None, None
+                self._status_tool_call_accumulator.remove(message.item_id)
                 state = (
                     "completed"
                     if message.error is None
@@ -2650,23 +2626,23 @@ class LLMAgentProcess(AgentProcess):
                     arguments=tool_call.arguments,
                 )
                 if state == "completed":
-                    return "Thinking", None, None
-                return status, message.item_id, None
+                    return "Thinking", None, None, None, None
+                return status, message.item_id, None, None, None
 
             if isinstance(
                 message,
                 (AgentImageGenerationStarted, AgentImageGenerationPartial),
             ):
-                return "Generating image", message.item_id, None
+                return "Generating image", message.item_id, None, None, None
 
             if isinstance(message, AgentImageGenerationCompleted):
-                return "Thinking", None, None
+                return "Thinking", None, None, None, None
 
             if isinstance(message, AgentImageGenerationFailed):
-                return "Attempted to generate image", message.item_id, None
+                return "Attempted to generate image", message.item_id, None, None, None
 
             if isinstance(message, TurnInterrupted):
-                return "Turn interrupted", None, None
+                return "Turn interrupted", None, None, None, None
 
             return None
 
@@ -2688,7 +2664,9 @@ class LLMAgentProcess(AgentProcess):
             status = thread_status_from_agent_message(message)
             if status is None:
                 return
-            status_text, pending_item_id, total_bytes = status
+            status_text, pending_item_id, total_bytes, lines_added, lines_removed = (
+                status
+            )
             previous_publish = thread_status_publish_tail
 
             async def publish_status_in_order() -> None:
@@ -2699,6 +2677,8 @@ class LLMAgentProcess(AgentProcess):
                     status=status_text,
                     pending_item_id=pending_item_id,
                     total_bytes=total_bytes,
+                    lines_added=lines_added,
+                    lines_removed=lines_removed,
                 )
 
             thread_status_publish_tail = asyncio.create_task(publish_status_in_order())
@@ -2892,9 +2872,7 @@ class LLMAgentProcess(AgentProcess):
             turn_span_context.__exit__(type(exc), exc, exc.__traceback__)
             raise
         self._turn_id = turn_id
-        self._status_tool_calls_by_item_id.clear()
-        self._status_tool_argument_delta_bytes_by_item_id.clear()
-        self._status_tool_argument_delta_text_by_item_id.clear()
+        self._status_tool_call_accumulator.clear()
         self._status_text_by_item_id.clear()
         self._latest_status_text = None
         thread_status_publisher = self.thread_status_publisher
@@ -3074,9 +3052,7 @@ class LLMAgentProcess(AgentProcess):
                 self._active_turn_queue_updated = None
                 self._active_turn_toolkit_client_options = {}
                 self._active_turn_tool_choice = None
-                self._status_tool_calls_by_item_id.clear()
-                self._status_tool_argument_delta_bytes_by_item_id.clear()
-                self._status_tool_argument_delta_text_by_item_id.clear()
+                self._status_tool_call_accumulator.clear()
                 self._status_text_by_item_id.clear()
                 self._latest_status_text = None
                 remaining_queued_messages = self._drain_queued_turn_messages(

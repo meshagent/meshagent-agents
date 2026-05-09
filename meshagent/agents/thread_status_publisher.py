@@ -38,6 +38,8 @@ class ThreadStatusPublisher(Protocol):
         mode: ThreadStatusMode | None = None,
         pending_item_id: str | None = None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None: ...
 
     async def clear_thread_status(self) -> None: ...
@@ -65,6 +67,8 @@ class ParticipantAttributeThreadStatusPublisher:
         self._pending_messages_value: list[dict[str, Any]] = []
         self._pending_item_id_value: str | None = None
         self._total_bytes_value: int | None = None
+        self._lines_added_value: int | None = None
+        self._lines_removed_value: int | None = None
 
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._lock:
@@ -93,6 +97,8 @@ class ParticipantAttributeThreadStatusPublisher:
         mode: ThreadStatusMode | None = None,
         pending_item_id: str | None = None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         async with self._lock:
             if status is None or status.strip() == "":
@@ -101,6 +107,8 @@ class ParticipantAttributeThreadStatusPublisher:
                 self._started_at_value = None
                 self._pending_item_id_value = None
                 self._total_bytes_value = None
+                self._lines_added_value = None
+                self._lines_removed_value = None
                 return
 
             normalized_status = status.strip()
@@ -113,6 +121,16 @@ class ParticipantAttributeThreadStatusPublisher:
             normalized_total_bytes = (
                 total_bytes
                 if isinstance(total_bytes, int) and total_bytes > 0
+                else None
+            )
+            normalized_lines_added = (
+                lines_added
+                if isinstance(lines_added, int) and lines_added >= 0
+                else None
+            )
+            normalized_lines_removed = (
+                lines_removed
+                if isinstance(lines_removed, int) and lines_removed >= 0
                 else None
             )
             started_at = self._started_at_value
@@ -136,6 +154,8 @@ class ParticipantAttributeThreadStatusPublisher:
                 and self._started_at_value == started_at
                 and self._pending_item_id_value == normalized_pending_item_id
                 and self._total_bytes_value == normalized_total_bytes
+                and self._lines_added_value == normalized_lines_added
+                and self._lines_removed_value == normalized_lines_removed
             ):
                 return
 
@@ -144,6 +164,8 @@ class ParticipantAttributeThreadStatusPublisher:
             self._started_at_value = started_at
             self._pending_item_id_value = normalized_pending_item_id
             self._total_bytes_value = normalized_total_bytes
+            self._lines_added_value = normalized_lines_added
+            self._lines_removed_value = normalized_lines_removed
 
     def _next_generation(self) -> int:
         self._generation += 1
@@ -199,6 +221,8 @@ class AgentMessageThreadStatusPublisher:
         self._turn_id_value: str | None = None
         self._pending_item_id_value: str | None = None
         self._total_bytes_value: int | None = None
+        self._lines_added_value: int | None = None
+        self._lines_removed_value: int | None = None
 
     def _publish_current_status(self) -> None:
         try:
@@ -212,6 +236,8 @@ class AgentMessageThreadStatusPublisher:
                     turn_id=self._turn_id_value,
                     pending_item_id=self._pending_item_id_value,
                     total_bytes=self._total_bytes_value,
+                    lines_added=self._lines_added_value,
+                    lines_removed=self._lines_removed_value,
                 )
             )
         except Exception:
@@ -239,6 +265,8 @@ class AgentMessageThreadStatusPublisher:
         mode: ThreadStatusMode | None = None,
         pending_item_id: str | None = None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         async with self._lock:
             if status is None or status.strip() == "":
@@ -248,6 +276,8 @@ class AgentMessageThreadStatusPublisher:
                     and self._started_at_value is None
                     and self._pending_item_id_value is None
                     and self._total_bytes_value is None
+                    and self._lines_added_value is None
+                    and self._lines_removed_value is None
                 ):
                     return
 
@@ -256,6 +286,8 @@ class AgentMessageThreadStatusPublisher:
                 self._started_at_value = None
                 self._pending_item_id_value = None
                 self._total_bytes_value = None
+                self._lines_added_value = None
+                self._lines_removed_value = None
                 self._publish_current_status()
                 return
 
@@ -269,6 +301,16 @@ class AgentMessageThreadStatusPublisher:
             normalized_total_bytes = (
                 total_bytes
                 if isinstance(total_bytes, int) and total_bytes > 0
+                else None
+            )
+            normalized_lines_added = (
+                lines_added
+                if isinstance(lines_added, int) and lines_added >= 0
+                else None
+            )
+            normalized_lines_removed = (
+                lines_removed
+                if isinstance(lines_removed, int) and lines_removed >= 0
                 else None
             )
             started_at = self._started_at_value
@@ -287,6 +329,8 @@ class AgentMessageThreadStatusPublisher:
                 and self._started_at_value == started_at
                 and self._pending_item_id_value == normalized_pending_item_id
                 and self._total_bytes_value == normalized_total_bytes
+                and self._lines_added_value == normalized_lines_added
+                and self._lines_removed_value == normalized_lines_removed
             ):
                 return
 
@@ -295,6 +339,8 @@ class AgentMessageThreadStatusPublisher:
             self._started_at_value = started_at
             self._pending_item_id_value = normalized_pending_item_id
             self._total_bytes_value = normalized_total_bytes
+            self._lines_added_value = normalized_lines_added
+            self._lines_removed_value = normalized_lines_removed
             self._publish_current_status()
 
     def _next_generation(self) -> int:

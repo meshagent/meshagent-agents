@@ -8,6 +8,7 @@ import logging
 import re
 import shlex
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ from meshagent.api.messaging import (
     TextContent,
 )
 from meshagent.tools import Toolkit, tool
+from pydantic_core import from_json as pydantic_core_from_json
 
 from .context import AgentSessionContext
 from .images_dataset import ImagesDataset
@@ -80,6 +82,8 @@ from .thread_adapter import (
 )
 from .thread_schema import thread_schema
 from .thread_storage import ThreadStorage
+from .stream_content_accumulator import FileContentAccumulator, TextContentAccumulator
+from .tool_call_accumulator import ToolCallAccumulator
 
 logger = logging.getLogger("agent.process_thread_adapter")
 
@@ -100,6 +104,95 @@ def _status_total_bytes(total_bytes: int) -> int | None:
     return total_bytes if total_bytes > 100 else None
 
 
+def _merge_tool_arguments(
+    *,
+    current: dict[str, Any] | None,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(current) if current is not None else {}
+    for key, value in update.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_tool_arguments(current=existing, update=value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _partial_json_tool_arguments(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped == "" or stripped[0] not in "{[":
+        return None
+
+    try:
+        parsed = pydantic_core_from_json(
+            stripped.encode("utf-8"),
+            allow_partial=True,
+        )
+    except ValueError:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _shell_delta_arguments(
+    *,
+    current: dict[str, Any] | None,
+    command: str,
+) -> dict[str, Any]:
+    merged = deepcopy(current) if current is not None else {}
+    action = merged.get("action")
+    if isinstance(action, dict):
+        existing_commands = action.get("commands")
+        if isinstance(existing_commands, list):
+            action["commands"] = [command]
+        else:
+            action["command"] = command
+        return merged
+
+    merged["command"] = command
+    return merged
+
+
+def _tool_arguments_from_delta_text(
+    *,
+    tool: str,
+    current: dict[str, Any] | None,
+    text: str,
+) -> dict[str, Any] | None:
+    partial_arguments = _partial_json_tool_arguments(text)
+    if partial_arguments is not None:
+        return _merge_tool_arguments(current=current, update=partial_arguments)
+
+    normalized_tool = tool.strip().lower()
+    if normalized_tool == "apply_patch":
+        patch = text.strip()
+        if patch != "":
+            return _merge_tool_arguments(current=current, update={"patch": patch})
+
+    if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
+        command = text.strip()
+        if command != "":
+            return _shell_delta_arguments(current=current, command=command)
+
+    return None
+
+
+def _patch_line_counts(*, patch: str) -> tuple[int | None, int | None]:
+    added = 0
+    removed = 0
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    if added == 0 and removed == 0:
+        return None, None
+    return added, removed
+
+
 @dataclass(frozen=True, slots=True)
 class _ActiveToolCall:
     namespace: str
@@ -107,6 +200,7 @@ class _ActiveToolCall:
     toolkit: str
     tool: str
     arguments: dict[str, Any] | None
+    state: Literal["pending", "in_progress"]
 
 
 @dataclass(slots=True)
@@ -418,7 +512,12 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._active_event_elements_by_key: dict[str, Element] = {}
         self._active_event_elements_by_item_id: dict[str, Element] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
+        self._text_content_accumulator = TextContentAccumulator()
+        self._reasoning_content_accumulator = TextContentAccumulator()
+        self._file_content_accumulator = FileContentAccumulator()
+        self._tool_call_accumulator = ToolCallAccumulator()
         self._tool_argument_delta_bytes_by_item_id: dict[str, int] = {}
+        self._tool_argument_delta_text_by_item_id: dict[str, str] = {}
         self._saved_image_ids_by_item_id: dict[str, str] = {}
         self._thread_status_lock = asyncio.Lock()
         self._thread_status_generation = 0
@@ -430,6 +529,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._thread_status_pending_messages_value: list[dict[str, Any]] = []
         self._thread_status_pending_item_id_value: str | None = None
         self._thread_status_total_bytes_value: int | None = None
+        self._thread_status_lines_added_value: int | None = None
+        self._thread_status_lines_removed_value: int | None = None
         self._restore_message_count: int | None = None
 
     async def start(self) -> None:
@@ -532,6 +633,10 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._active_event_elements_by_key.clear()
         self._active_event_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
+        self._text_content_accumulator.clear()
+        self._reasoning_content_accumulator.clear()
+        self._file_content_accumulator.clear()
+        self._tool_call_accumulator.clear()
         self._saved_image_ids_by_item_id.clear()
         self._restore_message_count = None
 
@@ -891,31 +996,54 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 turn_id=message.turn_id if isinstance(message, TurnSteer) else None,
             )
         elif isinstance(message, AgentTextContentStarted):
+            self._text_content_accumulator.upsert(
+                item_id=message.item_id,
+                turn_id=message.turn_id,
+                phase=message.phase,
+            )
             self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="text", item_id=message.item_id),
                 turn_id=message.turn_id,
             )
         elif isinstance(message, AgentTextContentDelta):
+            accumulated = self._text_content_accumulator.append_delta(
+                item_id=message.item_id,
+                delta=message.text,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
+                phase=message.phase,
+            )
             assistant_message = self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="text", item_id=message.item_id),
                 turn_id=message.turn_id,
             )
-            current_text = self._attribute_as_str(assistant_message, "text")
-            assistant_message.set_attribute("text", current_text + message.text)
+            assistant_message.set_attribute("text", accumulated.text)
         elif isinstance(message, AgentTextContentEnded):
             self._active_message_elements_by_key.pop(
                 self._content_message_key(kind="text", item_id=message.item_id),
                 None,
             )
+            self._text_content_accumulator.complete(item_id=message.item_id)
+            self._text_content_accumulator.remove(message.item_id)
         elif isinstance(message, AgentFileContentStarted):
+            self._file_content_accumulator.upsert(
+                item_id=message.item_id,
+                turn_id=message.turn_id,
+            )
             self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="file", item_id=message.item_id),
                 turn_id=message.turn_id,
             )
         elif isinstance(message, AgentFileContentDelta):
+            accumulated = self._file_content_accumulator.append_url(
+                item_id=message.item_id,
+                url=message.url,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
+            )
             assistant_message = self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="file", item_id=message.item_id),
@@ -924,29 +1052,41 @@ class MeshDocumentThreadStorage(ThreadStorage):
             file_element = self._ensure_file_element(message=assistant_message)
             file_element.set_attribute(
                 "path",
-                self._thread_attachment_path(url=message.url),
+                self._thread_attachment_path(url=accumulated.latest_url or message.url),
             )
         elif isinstance(message, AgentFileContentEnded):
             self._active_message_elements_by_key.pop(
                 self._content_message_key(kind="file", item_id=message.item_id),
                 None,
             )
+            self._file_content_accumulator.complete(item_id=message.item_id)
+            self._file_content_accumulator.remove(message.item_id)
         elif isinstance(message, AgentReasoningContentStarted):
+            self._reasoning_content_accumulator.upsert(
+                item_id=message.item_id,
+                turn_id=message.turn_id,
+            )
             self._ensure_reasoning_element(
                 messages=messages,
                 item_id=message.item_id,
                 turn_id=message.turn_id,
             )
         elif isinstance(message, AgentReasoningContentDelta):
+            accumulated = self._reasoning_content_accumulator.append_delta(
+                item_id=message.item_id,
+                delta=message.text,
+                turn_id=message.turn_id,
+            )
             reasoning = self._ensure_reasoning_element(
                 messages=messages,
                 item_id=message.item_id,
                 turn_id=message.turn_id,
             )
-            current_summary = self._attribute_as_str(reasoning, "summary")
-            reasoning.set_attribute("summary", current_summary + message.text)
+            reasoning.set_attribute("summary", accumulated.text)
         elif isinstance(message, AgentReasoningContentEnded):
             self._active_reasoning_elements_by_item_id.pop(message.item_id, None)
+            self._reasoning_content_accumulator.complete(item_id=message.item_id)
+            self._reasoning_content_accumulator.remove(message.item_id)
         elif isinstance(message, AgentToolCallLogDelta):
             self._append_event_logs(
                 messages=messages,
@@ -955,6 +1095,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
             )
         elif isinstance(message, AgentToolCallArgumentsDelta):
             delta_bytes = len(message.delta.encode("utf-8"))
+            normalized_event = None
             if delta_bytes > 0:
                 total_delta_bytes = (
                     self._tool_argument_delta_bytes_by_item_id.get(message.item_id, 0)
@@ -963,14 +1104,49 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 self._tool_argument_delta_bytes_by_item_id[message.item_id] = (
                     total_delta_bytes
                 )
-                if (
-                    self._thread_status_pending_item_id_value == message.item_id
-                    and self._thread_status_value is not None
-                ):
-                    await self.set_thread_status(
-                        status=self._thread_status_value,
-                        total_bytes=_status_total_bytes(total_delta_bytes),
+                delta_text = (
+                    self._tool_argument_delta_text_by_item_id.get(message.item_id, "")
+                    + message.delta
+                )
+                self._tool_argument_delta_text_by_item_id[message.item_id] = delta_text
+                active_tool_call = self._active_tool_calls_by_item_id.get(
+                    message.item_id
+                )
+                self._tool_call_accumulator.append_delta(
+                    item_id=message.item_id,
+                    delta=message.delta,
+                )
+                if active_tool_call is not None:
+                    updated_arguments = _tool_arguments_from_delta_text(
+                        tool=active_tool_call.tool,
+                        current=active_tool_call.arguments,
+                        text=delta_text,
                     )
+                    if updated_arguments is not None:
+                        active_tool_call = _ActiveToolCall(
+                            namespace=active_tool_call.namespace,
+                            call_id=active_tool_call.call_id,
+                            toolkit=active_tool_call.toolkit,
+                            tool=active_tool_call.tool,
+                            arguments=updated_arguments,
+                            state=active_tool_call.state,
+                        )
+                        self._active_tool_calls_by_item_id[message.item_id] = (
+                            active_tool_call
+                        )
+                    normalized_event = self._tool_event(
+                        turn_id=message.turn_id,
+                        message_type=message.type,
+                        item_id=message.item_id,
+                        toolkit=active_tool_call.toolkit,
+                        tool=active_tool_call.tool,
+                        arguments=active_tool_call.arguments,
+                        state=active_tool_call.state,
+                        result=None,
+                        error=None,
+                        data=self._message_event_data(message=message),
+                    )
+                    self._upsert_event(messages=messages, event=normalized_event)
         else:
             if isinstance(message, AgentToolCallEnded):
                 await self._persist_generated_image_result(message=message)
@@ -992,7 +1168,13 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 await self._update_thread_status_from_event(event=normalized_event)
             if isinstance(message, AgentToolCallEnded):
                 self._active_tool_calls_by_item_id.pop(message.item_id, None)
+                self._tool_call_accumulator.complete(
+                    item_id=message.item_id,
+                    state=_terminal_state_from_error(message.error),
+                )
+                self._tool_call_accumulator.remove(message.item_id)
                 self._tool_argument_delta_bytes_by_item_id.pop(message.item_id, None)
+                self._tool_argument_delta_text_by_item_id.pop(message.item_id, None)
 
     def _write_turn_message(
         self,
@@ -1397,7 +1579,12 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._active_message_elements_by_key.clear()
         self._active_reasoning_elements_by_item_id.clear()
         self._active_tool_calls_by_item_id.clear()
+        self._text_content_accumulator.clear()
+        self._reasoning_content_accumulator.clear()
+        self._file_content_accumulator.clear()
+        self._tool_call_accumulator.clear()
         self._tool_argument_delta_bytes_by_item_id.clear()
+        self._tool_argument_delta_text_by_item_id.clear()
 
     async def _clear_thread_contents(self, *, messages: Element) -> None:
         self._clear_active_turn_state()
@@ -1834,6 +2021,27 @@ class MeshDocumentThreadStorage(ThreadStorage):
             keys=("patch", "input", "diff"),
         )
 
+    def _extract_apply_patch_path(
+        self,
+        *,
+        arguments: dict[str, Any] | None,
+    ) -> str:
+        if arguments is None:
+            return ""
+        return self._first_nested_text(value=arguments, keys=("path",))
+
+    def _tool_patch_line_counts(
+        self,
+        *,
+        tool: str,
+        arguments: dict[str, Any] | None,
+    ) -> tuple[int | None, int | None]:
+        if tool.strip().lower() != "apply_patch":
+            return None, None
+        return _patch_line_counts(
+            patch=self._extract_apply_patch_text(arguments=arguments)
+        )
+
     def _is_active_state(self, *, state: str) -> bool:
         return state in _ACTIVE_STATES
 
@@ -1928,7 +2136,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
     ) -> str:
         if path != "":
             if self._is_pending_state(state=status):
-                return f"Preparing to edit {path}"
+                return f"Editing {path}"
             if status == "failed":
                 return f"Attempted to patch {path}"
             if status == "cancelled":
@@ -2297,7 +2505,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if kind == "diff":
             patch = self._extract_apply_patch_text(arguments=arguments)
-            path = self._apply_patch_path(patch=patch)
+            path = self._extract_apply_patch_path(
+                arguments=arguments
+            ) or self._apply_patch_path(patch=patch)
             headline = self._apply_patch_headline(status=state, path=path)
             preview = (
                 _truncate_text(text=patch, limit=DIFF_PREVIEW_LIMIT)
@@ -2437,6 +2647,10 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if isinstance(message, TurnInterrupted):
             self._active_tool_calls_by_item_id.clear()
+            self._text_content_accumulator.clear()
+            self._reasoning_content_accumulator.clear()
+            self._file_content_accumulator.clear()
+            self._tool_call_accumulator.clear()
             return _NormalizedThreadEvent(
                 source="agent",
                 name=message.type,
@@ -2525,12 +2739,21 @@ class MeshDocumentThreadStorage(ThreadStorage):
             )
 
         if isinstance(message, AgentToolCallPending):
+            self._tool_call_accumulator.upsert_lifecycle(
+                item_id=message.item_id,
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+                state="pending",
+                argument_bytes=message.argument_bytes,
+            )
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
                 namespace=message.namespace,
                 call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
+                state="pending",
             )
             return self._tool_event(
                 turn_id=message.turn_id,
@@ -2546,12 +2769,21 @@ class MeshDocumentThreadStorage(ThreadStorage):
             )
 
         if isinstance(message, AgentToolCallInProgress):
+            self._tool_call_accumulator.upsert_lifecycle(
+                item_id=message.item_id,
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+                state="in_progress",
+                argument_bytes=message.argument_bytes,
+            )
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
                 namespace=message.namespace,
                 call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
+                state="in_progress",
             )
             return self._tool_event(
                 turn_id=message.turn_id,
@@ -2567,12 +2799,21 @@ class MeshDocumentThreadStorage(ThreadStorage):
             )
 
         if isinstance(message, AgentToolCallStarted):
+            self._tool_call_accumulator.upsert_lifecycle(
+                item_id=message.item_id,
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+                state="in_progress",
+                argument_bytes=message.argument_bytes,
+            )
             self._active_tool_calls_by_item_id[message.item_id] = _ActiveToolCall(
                 namespace=message.namespace,
                 call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
+                state="in_progress",
             )
             return self._tool_event(
                 turn_id=message.turn_id,
@@ -2589,13 +2830,21 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if isinstance(message, AgentToolCallEnded):
             active_tool_call = self._active_tool_calls_by_item_id.get(message.item_id)
+            accumulated_tool_call = self._tool_call_accumulator.get(message.item_id)
             if active_tool_call is None:
                 active_tool_call = _ActiveToolCall(
                     namespace=message.namespace,
                     call_id=message.call_id,
-                    toolkit="tool",
-                    tool="tool",
-                    arguments=None,
+                    toolkit=accumulated_tool_call.toolkit
+                    if accumulated_tool_call is not None
+                    else "tool",
+                    tool=accumulated_tool_call.tool
+                    if accumulated_tool_call is not None
+                    else "tool",
+                    arguments=accumulated_tool_call.arguments
+                    if accumulated_tool_call is not None
+                    else None,
+                    state="in_progress",
                 )
             data = self._tool_call_event_data(
                 message=message,
@@ -2817,6 +3066,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
         status: str | None,
         mode: ThreadStatusMode | None = None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         if status is None or status.strip() == "":
             self._thread_status_value = None
@@ -2824,6 +3075,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
             self._thread_status_started_at_value = None
             self._thread_status_pending_item_id_value = None
             self._thread_status_total_bytes_value = None
+            self._thread_status_lines_added_value = None
+            self._thread_status_lines_removed_value = None
             return
 
         normalized_status = status.strip()
@@ -2832,6 +3085,12 @@ class MeshDocumentThreadStorage(ThreadStorage):
         )
         normalized_total_bytes = (
             total_bytes if total_bytes is not None and total_bytes > 0 else None
+        )
+        normalized_lines_added = (
+            lines_added if lines_added is not None and lines_added >= 0 else None
+        )
+        normalized_lines_removed = (
+            lines_removed if lines_removed is not None and lines_removed >= 0 else None
         )
         started_at = self._thread_status_started_at_value
         if (
@@ -2846,6 +3105,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
             and self._thread_status_mode_value == normalized_mode
             and self._thread_status_started_at_value == started_at
             and self._thread_status_total_bytes_value == normalized_total_bytes
+            and self._thread_status_lines_added_value == normalized_lines_added
+            and self._thread_status_lines_removed_value == normalized_lines_removed
         ):
             return
 
@@ -2853,6 +3114,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._thread_status_mode_value = normalized_mode
         self._thread_status_started_at_value = started_at
         self._thread_status_total_bytes_value = normalized_total_bytes
+        self._thread_status_lines_added_value = normalized_lines_added
+        self._thread_status_lines_removed_value = normalized_lines_removed
 
     def _next_thread_status_generation(self) -> int:
         self._thread_status_generation += 1
@@ -2863,19 +3126,28 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         status: str | None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
         generation: int | None = None,
     ) -> None:
         async with self._thread_status_lock:
             if generation is not None and generation != self._thread_status_generation:
                 return
 
-            await self.set_thread_status(status=status, total_bytes=total_bytes)
+            await self.set_thread_status(
+                status=status,
+                total_bytes=total_bytes,
+                lines_added=lines_added,
+                lines_removed=lines_removed,
+            )
 
     def _set_thread_status_nowait(
         self,
         *,
         status: str | None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         generation = self._next_thread_status_generation()
 
@@ -2884,6 +3156,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 await self._apply_thread_status(
                     status=status,
                     total_bytes=total_bytes,
+                    lines_added=lines_added,
+                    lines_removed=lines_removed,
                     generation=generation,
                 )
             except Exception:
@@ -2918,14 +3192,41 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 event.item_id.strip() if event.item_id.strip() != "" else None
             )
             total_bytes = None
+            lines_added = None
+            lines_removed = None
             if self._thread_status_pending_item_id_value is not None:
                 total_bytes = _status_total_bytes(
-                    self._tool_argument_delta_bytes_by_item_id.get(
-                        self._thread_status_pending_item_id_value,
-                        0,
+                    self._tool_call_accumulator.total_bytes(
+                        self._thread_status_pending_item_id_value
                     )
                 )
-            await self.set_thread_status(status=text, total_bytes=total_bytes)
+                status_snapshot = None
+                if (
+                    self._tool_call_accumulator.get(
+                        self._thread_status_pending_item_id_value
+                    )
+                    is not None
+                ):
+                    status_snapshot = self._tool_call_accumulator.status_for(
+                        self._thread_status_pending_item_id_value
+                    )
+                active_tool_call = self._active_tool_calls_by_item_id.get(
+                    self._thread_status_pending_item_id_value
+                )
+                if status_snapshot is not None:
+                    lines_added = status_snapshot.lines_added
+                    lines_removed = status_snapshot.lines_removed
+                elif active_tool_call is not None:
+                    lines_added, lines_removed = self._tool_patch_line_counts(
+                        tool=active_tool_call.tool,
+                        arguments=active_tool_call.arguments,
+                    )
+            await self.set_thread_status(
+                status=text,
+                total_bytes=total_bytes,
+                lines_added=lines_added,
+                lines_removed=lines_removed,
+            )
             return
 
         fallback_status = "Thinking"

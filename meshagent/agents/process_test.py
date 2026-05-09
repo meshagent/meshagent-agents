@@ -467,6 +467,8 @@ class _RecordingThreadStatusPublisher:
         mode=None,
         pending_item_id: str | None = None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         self.statuses.append(
             {
@@ -474,6 +476,8 @@ class _RecordingThreadStatusPublisher:
                 "mode": mode,
                 "pending_item_id": pending_item_id,
                 "total_bytes": total_bytes,
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
             }
         )
 
@@ -495,6 +499,8 @@ class _DelayedPreparingThreadStatusPublisher(_RecordingThreadStatusPublisher):
         mode=None,
         pending_item_id: str | None = None,
         total_bytes: int | None = None,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         if (
             not self._delayed_first_preparing
@@ -511,6 +517,8 @@ class _DelayedPreparingThreadStatusPublisher(_RecordingThreadStatusPublisher):
             mode=mode,
             pending_item_id=pending_item_id,
             total_bytes=total_bytes,
+            lines_added=lines_added,
+            lines_removed=lines_removed,
         )
 
 
@@ -5098,6 +5106,105 @@ async def test_llm_agent_process_uses_partial_json_argument_delta_for_status() -
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_uses_apply_patch_delta_for_status_counts() -> None:
+    adapter = _PartialToolArgumentDeltaStatusLLMAdapter(
+        toolkit="openai",
+        tool="apply_patch",
+        arguments={},
+        deltas=[
+            "*** Begin Patch\n*** Update File: app.ts\n",
+            "@@\n-old\n+new\n+extra\n*** End Patch\n",
+        ],
+    )
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "edit the app"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Editing app.ts"
+                and status["pending_item_id"] == "partial-tool"
+                and status["lines_added"] == 2
+                and status["lines_removed"] == 1
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_joins_apply_patch_operation_args_with_delta_counts() -> (
+    None
+):
+    adapter = _PartialToolArgumentDeltaStatusLLMAdapter(
+        toolkit="openai",
+        tool="apply_patch",
+        arguments={
+            "operation": {
+                "type": "update_file",
+                "path": "report.py",
+                "diff": "@@\n-old\n+new\n+extra\n",
+            }
+        },
+        deltas=["@@\n-old\n+new\n+extra\n"],
+    )
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "edit the report"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Editing report.py"
+                and status["pending_item_id"] == "partial-tool"
+                and status["lines_added"] == 2
+                and status["lines_removed"] == 1
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_uses_shell_command_delta_for_status() -> None:
     adapter = _ShellStatusLLMAdapter(
         command="",
@@ -7233,6 +7340,8 @@ async def test_agent_message_thread_status_publisher_publishes_status_messages()
         status=" Generating image ",
         pending_item_id=" image-1 ",
         total_bytes=240,
+        lines_added=3,
+        lines_removed=2,
     )
     active_status = published[-1]
     assert active_status.status == "Generating image"
@@ -7240,11 +7349,15 @@ async def test_agent_message_thread_status_publisher_publishes_status_messages()
     assert active_status.started_at is not None
     assert active_status.pending_item_id == "image-1"
     assert active_status.total_bytes == 240
+    assert active_status.lines_added == 3
+    assert active_status.lines_removed == 2
 
     await publisher.set_thread_status(
         status="Generating image",
         pending_item_id="image-1",
         total_bytes=240,
+        lines_added=3,
+        lines_removed=2,
     )
     assert published[-1] == active_status
 
@@ -7252,6 +7365,8 @@ async def test_agent_message_thread_status_publisher_publishes_status_messages()
         status="Generating image",
         pending_item_id="image-2",
         total_bytes=240,
+        lines_added=3,
+        lines_removed=2,
     )
     assert published[-1].pending_item_id == "image-2"
 
@@ -7262,6 +7377,8 @@ async def test_agent_message_thread_status_publisher_publishes_status_messages()
     assert published[-1].turn_id == "turn-1"
     assert published[-1].pending_item_id is None
     assert published[-1].total_bytes is None
+    assert published[-1].lines_added is None
+    assert published[-1].lines_removed is None
 
 
 @pytest.mark.asyncio
@@ -8061,7 +8178,17 @@ async def test_agent_process_thread_adapter_renders_failed_apply_patch_as_attemp
             for event in room.sync.document.event_elements
             if event.get_attribute("item_id") == "patch-1"
         )
+        assert patch_event.get_attribute("kind") == "diff"
+        assert patch_event.get_attribute("path") == "src/app.py"
         assert patch_event.get_attribute("headline") == "Editing src/app.py"
+        assert patch_event.get_attribute("preview") == (
+            "*** Begin Patch\n"
+            "*** Update File: src/app.py\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** End Patch"
+        )
 
         adapter.push_message(
             message=AgentToolCallEnded(
@@ -8080,6 +8207,94 @@ async def test_agent_process_thread_adapter_renders_failed_apply_patch_as_attemp
         await _wait_for(lambda: patch_event.get_attribute("state") == "failed")
         assert patch_event.get_attribute("headline") == "Attempted to patch src/app.py"
         assert patch_event.get_attribute("details") == "patch rejected"
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_updates_apply_patch_from_argument_deltas(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        adapter.push_message(
+            message=AgentToolCallPending(
+                type=AGENT_EVENT_TOOL_CALL_PENDING,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="patch-1",
+                toolkit="openai",
+                tool="apply_patch",
+                arguments={},
+            )
+        )
+        await real_sleep(0)
+
+        adapter.push_message(
+            message=AgentToolCallArgumentsDelta(
+                type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="patch-1",
+                delta=("*** Begin Patch\n*** Update File: src/app.ts\n@@\n-old line\n"),
+            )
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Editing src/app.ts")
+        await _wait_for(lambda: adapter._thread_status_lines_removed_value == 1)
+
+        adapter.push_message(
+            message=AgentToolCallArgumentsDelta(
+                type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="patch-1",
+                delta=(
+                    "+new line with enough content to pass the byte display threshold\n"
+                    "+another new line\n"
+                    "*** End Patch\n"
+                ),
+            )
+        )
+
+        await _wait_for(lambda: adapter._thread_status_lines_added_value == 2)
+        await _wait_for(lambda: adapter._thread_status_total_bytes_value is not None)
+
+        patch_event = next(
+            event
+            for event in room.sync.document.event_elements
+            if event.get_attribute("item_id") == "patch-1"
+        )
+        assert patch_event.get_attribute("kind") == "diff"
+        assert patch_event.get_attribute("path") == "src/app.ts"
+        assert patch_event.get_attribute("headline") == "Editing src/app.ts"
+        assert patch_event.get_attribute("preview") == (
+            "*** Begin Patch\n"
+            "*** Update File: src/app.ts\n"
+            "@@\n"
+            "-old line\n"
+            "+new line with enough content to pass the byte display threshold\n"
+            "+another new line\n"
+            "*** End Patch"
+        )
     finally:
         await adapter.stop()
 

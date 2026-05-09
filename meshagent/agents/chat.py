@@ -430,11 +430,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self._thread_list_background_tasks: set[asyncio.Task[None]] = set()
 
         self._skill_dirs = skill_dirs
-        self._thread_status_values: dict[str, str] = {}
-        self._thread_status_mode_values: dict[str, ThreadStatusMode] = {}
-        self._thread_status_started_at_values: dict[str, str] = {}
         self._thread_status_keys: dict[str, str] = {}
-        self._thread_status_locks: dict[str, asyncio.Lock] = {}
         self._thread_status_generations: dict[str, int] = {}
         self._threading_mode = (
             threading_mode.strip()
@@ -961,31 +957,10 @@ class ChatBotBase(SingleRoomAgent, ABC):
         path = await self._next_available_thread_path(base_path=path)
         return path
 
-    def _status_lock(self, *, path: str) -> asyncio.Lock:
-        lock = self._thread_status_locks.get(path)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._thread_status_locks[path] = lock
-        return lock
-
     def _next_thread_status_generation(self, *, path: str) -> int:
         generation = self._thread_status_generations.get(path, 0) + 1
         self._thread_status_generations[path] = generation
         return generation
-
-    def _normalize_thread_status_mode(
-        self, *, mode: Optional[str]
-    ) -> Optional[ThreadStatusMode]:
-        if mode is None:
-            return None
-        normalized = mode.strip().lower()
-        if normalized == "":
-            return None
-        if normalized not in ("busy", "steerable"):
-            raise RoomException(f"unsupported thread status mode '{mode}'")
-        if normalized == "busy":
-            return "busy"
-        return "steerable"
 
     def processing_thread_status_mode(
         self, *, path: str, thread_context: Optional["ChatThreadContext"]
@@ -1001,37 +976,9 @@ class ChatBotBase(SingleRoomAgent, ABC):
         status: Optional[str],
         mode: Optional[str] = None,
     ) -> None:
-        if status is None:
-            self._thread_status_values.pop(path, None)
-            self._thread_status_mode_values.pop(path, None)
-            self._thread_status_started_at_values.pop(path, None)
-            return
-
-        normalized = status.strip()
-        if normalized == "":
-            self._thread_status_values.pop(path, None)
-            self._thread_status_mode_values.pop(path, None)
-            self._thread_status_started_at_values.pop(path, None)
-            return
-
-        normalized_mode = self._normalize_thread_status_mode(mode=mode)
-        if normalized_mode is None:
-            normalized_mode = self._thread_status_mode_values.get(path, "busy")
-
-        started_at = self._thread_status_started_at_values.get(path)
-        if started_at is None:
-            started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-        if (
-            self._thread_status_values.get(path) == normalized
-            and self._thread_status_mode_values.get(path) == normalized_mode
-            and self._thread_status_started_at_values.get(path) == started_at
-        ):
-            return
-
-        self._thread_status_values[path] = normalized
-        self._thread_status_mode_values[path] = normalized_mode
-        self._thread_status_started_at_values[path] = started_at
+        del path
+        del status
+        del mode
 
     async def _apply_thread_status(
         self,
@@ -1040,13 +987,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
         status: Optional[str],
         generation: Optional[int] = None,
     ) -> None:
-        lock = self._status_lock(path=path)
-        async with lock:
-            if generation is not None:
-                current_generation = self._thread_status_generations.get(path, 0)
-                if generation != current_generation:
-                    return
-            await self.set_thread_status(path=path, status=status)
+        if generation is not None:
+            current_generation = self._thread_status_generations.get(path, 0)
+            if generation != current_generation:
+                return
+        await self.set_thread_status(path=path, status=status)
 
     def _set_thread_status_nowait(self, *, path: str, status: Optional[str]) -> None:
         generation = self._next_thread_status_generation(path=path)
@@ -1084,18 +1029,10 @@ class ChatBotBase(SingleRoomAgent, ABC):
         del event
 
     async def _clear_all_thread_statuses(self) -> None:
-        paths = {
-            *self._thread_status_values.keys(),
-            *self._thread_status_mode_values.keys(),
-            *self._thread_status_keys.keys(),
-        }
+        paths = set(self._thread_status_keys.keys())
         for path in paths:
             await self.set_thread_status(path=path, status=None)
         self._thread_status_keys.clear()
-        self._thread_status_values.clear()
-        self._thread_status_mode_values.clear()
-        self._thread_status_started_at_values.clear()
-        self._thread_status_locks.clear()
         self._thread_status_generations.clear()
 
     async def _send_and_save_chat(

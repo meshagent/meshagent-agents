@@ -74,6 +74,13 @@ _DEFERRED_HANDLER_RESULT_TOOL_TYPES = {
 _HANDLER_RESULT_TOOL_TYPES = _DEFERRED_HANDLER_RESULT_TOOL_TYPES | {"function_call"}
 
 
+def _is_openai_apply_patch_delta_event_type(event_type: str) -> bool:
+    return event_type.endswith(".delta") and (
+        event_type.startswith("response.apply_patch_call.")
+        or event_type.startswith("response.apply_patch_call_")
+    )
+
+
 def _as_dict(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return value
@@ -497,6 +504,36 @@ def _filtered_tool_arguments(
     return arguments or None
 
 
+def _apply_patch_delta_from_arguments(arguments: dict[str, Any] | None) -> str | None:
+    if arguments is None:
+        return None
+
+    operation = _as_dict(arguments.get("operation"))
+    if operation is not None:
+        diff = _as_text(operation.get("diff"))
+        if diff is not None and diff != "":
+            return diff
+        patch = _as_text(operation.get("patch"))
+        if patch is not None and patch != "":
+            return patch
+
+    diff = _as_text(arguments.get("diff"))
+    if diff is not None and diff != "":
+        return diff
+    patch = _as_text(arguments.get("patch"))
+    if patch is not None and patch != "":
+        return patch
+    return None
+
+
+def _fallback_arguments_delta_from_tool_call(info: _ToolCallInfo) -> str | None:
+    if info.arguments is None:
+        return None
+    if info.item_type == "apply_patch_call":
+        return _apply_patch_delta_from_arguments(info.arguments)
+    return _tool_arguments_delta_text(info.arguments)
+
+
 def _openai_tool_call_info(
     item: dict[str, Any],
     *,
@@ -843,6 +880,14 @@ class _AgentMessageEmitter:
             )
         )
 
+    def tool_call_info(self, *, item_id: str) -> _ToolCallInfo | None:
+        return (
+            self._pending_tool_calls.get(item_id)
+            or self._in_progress_tool_calls.get(item_id)
+            or self._started_tool_calls.get(item_id)
+            or self._ended_tool_calls.get(item_id)
+        )
+
     def emit_tool_pending(self, *, info: _ToolCallInfo) -> None:
         existing = self._pending_tool_calls.get(info.item_id)
         if (
@@ -1004,6 +1049,8 @@ class _AgentMessageEmitter:
                 item_id=info.item_id,
                 namespace=info.namespace,
                 call_id=info.call_id,
+                toolkit=info.toolkit,
+                tool=info.tool,
                 result=info.result,
                 error=info.error,
             )
@@ -1022,6 +1069,7 @@ class _OpenAIAgentEventPublisher:
     _finished_handler_tool_call_ids: set[str] = field(default_factory=set)
     _started_image_generation_ids: set[str] = field(default_factory=set)
     _emitted_compaction_ids: set[str] = field(default_factory=set)
+    _emitted_tool_argument_delta_ids: set[str] = field(default_factory=set)
     _synthetic_item_counter: int = 0
 
     def set_function_tool_name_resolver(
@@ -1112,6 +1160,59 @@ class _OpenAIAgentEventPublisher:
             return
         self._mapped_output_item_id(output_index=output_index, item_id=item_id)
 
+    def _apply_patch_tool_call_info_from_event(
+        self,
+        *,
+        event: dict[str, Any],
+    ) -> _ToolCallInfo | None:
+        item_id = self._item_id_from_event(event=event)
+        if item_id is None:
+            return None
+
+        existing = self.emitter.tool_call_info(item_id=item_id)
+        if existing is not None:
+            return existing
+
+        return _ToolCallInfo(
+            item_id=item_id,
+            namespace=self.provider_tool_namespace,
+            toolkit="openai",
+            tool="apply_patch",
+            item_type="apply_patch_call",
+            call_id=_as_str(event.get("call_id")),
+        )
+
+    def _ensure_apply_patch_tool_call_pending(
+        self,
+        *,
+        event: dict[str, Any],
+    ) -> _ToolCallInfo | None:
+        info = self._apply_patch_tool_call_info_from_event(event=event)
+        if info is None:
+            return None
+
+        if self.emitter.tool_call_info(item_id=info.item_id) is None:
+            self._pending_handler_tool_calls[info.item_id] = info
+            self.emitter.emit_tool_pending(info=info)
+        return info
+
+    def _emit_fallback_arguments_delta_if_needed(
+        self,
+        *,
+        info: _ToolCallInfo,
+    ) -> None:
+        if info.item_id in self._emitted_tool_argument_delta_ids:
+            return
+        delta = _fallback_arguments_delta_from_tool_call(info)
+        if delta is None:
+            return
+        self.emitter.emit_tool_arguments_delta(
+            item_id=info.item_id,
+            delta=delta,
+            info=info,
+        )
+        self._emitted_tool_argument_delta_ids.add(info.item_id)
+
     def _finish_part_from_snapshot(
         self,
         *,
@@ -1173,9 +1274,10 @@ class _OpenAIAgentEventPublisher:
                 return
 
             if completed:
+                self._emit_fallback_arguments_delta_if_needed(info=tool_info)
                 self.emitter.emit_tool_ended(info=tool_info)
             else:
-                self.emitter.emit_tool_started(info=tool_info)
+                self.emitter.emit_tool_pending(info=tool_info)
             return
 
         item_type = _as_str(item.get("type"))
@@ -1543,16 +1645,29 @@ class _OpenAIAgentEventPublisher:
 
         if event_type in {
             "response.function_call_arguments.delta",
+            "response.mcp_call_arguments.delta",
             "response.mcp_call.arguments.delta",
+            "response.code_interpreter_call_code.delta",
             "response.shell_call_command.delta",
-        }:
+            "response.custom_tool_call_input.delta",
+        } or _is_openai_apply_patch_delta_event_type(event_type):
             item_id = self._item_id_from_event(event=event)
             if item_id is None:
                 return
+            if _is_openai_apply_patch_delta_event_type(event_type):
+                self._ensure_apply_patch_tool_call_pending(event=event)
             self.emitter.emit_tool_arguments_delta(
                 item_id=item_id,
                 delta=_tool_arguments_delta_text(event.get("delta")),
             )
+            self._emitted_tool_argument_delta_ids.add(item_id)
+            return
+
+        if event_type == "response.apply_patch_call.in_progress":
+            info = self._ensure_apply_patch_tool_call_pending(event=event)
+            if info is not None:
+                self._pending_handler_tool_calls[info.item_id] = info
+                self.emitter.emit_tool_in_progress(info=info)
             return
 
         if event_type == "response.output_text.done":
@@ -1603,6 +1718,7 @@ class _OpenAIAgentEventPublisher:
             if tool_info is None:
                 return
             self._pending_handler_tool_calls[tool_info.item_id] = tool_info
+            self._emit_fallback_arguments_delta_if_needed(info=tool_info)
             self.emitter.emit_tool_started(info=tool_info)
             return
 
@@ -1735,6 +1851,29 @@ class _AnthropicAgentEventPublisher:
             self._openai_publisher(event)
             return
 
+        if event_type == "meshagent.handler.added":
+            item = _as_dict(event.get("item"))
+            item_id = _as_str(item.get("id")) if item is not None else None
+            item_type = _as_str(item.get("type")) if item is not None else None
+            if (
+                item is not None
+                and item_id is not None
+                and item_type is not None
+                and item_type != "tool_use"
+                and item_type.endswith("_tool_use")
+            ):
+                tool_info = _anthropic_tool_call_info(
+                    block=item,
+                    item_id=item_id,
+                    function_tool_name_resolver=self.function_tool_name_resolver,
+                )
+                if tool_info is not None:
+                    self._openai_publisher._pending_handler_tool_calls[
+                        tool_info.item_id
+                    ] = tool_info
+                    self.emitter.emit_tool_started(info=tool_info)
+                    return
+
         if event_type.startswith("meshagent.handler."):
             self._openai_publisher(event)
             return
@@ -1803,6 +1942,9 @@ class _AnthropicAgentEventPublisher:
                     item_id=tool_info.item_id,
                     block=block,
                 )
+                self._openai_publisher._pending_handler_tool_calls[
+                    tool_info.item_id
+                ] = tool_info
                 self.emitter.emit_tool_pending(info=tool_info)
                 return
 
@@ -1906,9 +2048,11 @@ class _AnthropicAgentEventPublisher:
                 updated_arguments = parsed_arguments
                 if updated_arguments is None:
                     updated_arguments = tool_info.arguments
-                self.emitter.emit_tool_pending(
-                    info=replace(tool_info, arguments=updated_arguments)
-                )
+                updated_tool_info = replace(tool_info, arguments=updated_arguments)
+                self._openai_publisher._pending_handler_tool_calls[
+                    updated_tool_info.item_id
+                ] = updated_tool_info
+                self.emitter.emit_tool_pending(info=updated_tool_info)
 
 
 def make_openai_agent_event_publisher(

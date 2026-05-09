@@ -875,6 +875,128 @@ async def test_dataset_thread_storage_does_not_write_tool_argument_deltas() -> N
 
 
 @pytest.mark.asyncio
+async def test_dataset_thread_storage_can_persist_verbose_tool_argument_deltas() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/demo",
+        persist_deltas=True,
+    )
+    await storage.start()
+
+    storage.push_message(
+        message=AgentToolCallStarted(
+            type=AGENT_EVENT_TOOL_CALL_STARTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="started-tool",
+            namespace="openai.responses",
+            call_id="call-started",
+            toolkit="storage",
+            tool="write_file",
+            arguments={"path": "src/app.py"},
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallArgumentsDelta(
+            type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="started-tool",
+            delta='{"content":"partial',
+        )
+    )
+    storage.push_message(
+        message=TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            error=AgentError(message="cancelled", code=None),
+        )
+    )
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "demo")]
+    row_types = [row["type"] for row in rows]
+    assert AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA in row_types
+    delta_row = next(
+        row for row in rows if row["type"] == AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA
+    )
+    assert delta_row["turn_id"] == "turn-1"
+    assert AGENT_EVENT_TOOL_CALL_STARTED in row_types
+    assert row_types[-1] == AGENT_EVENT_TURN_ENDED
+    delta = _row_data(
+        next(
+            row for row in rows if row["type"] == AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA
+        )
+    )
+    assert delta["delta"] == '{"content":"partial'
+    assert "tool" not in delta
+    assert "toolkit" not in delta
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_coalesces_apply_patch_argument_deltas() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentToolCallPending(
+            type=AGENT_EVENT_TOOL_CALL_PENDING,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="patch-1",
+            namespace="openai.responses",
+            toolkit="openai",
+            tool="apply_patch",
+            arguments={},
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallArgumentsDelta(
+            type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="patch-1",
+            delta="*** Begin Patch\n*** Update File: app.ts\n@@\n-old\n",
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallArgumentsDelta(
+            type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="patch-1",
+            delta="+new\n*** End Patch\n",
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallEnded(
+            type=AGENT_EVENT_TOOL_CALL_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="patch-1",
+        )
+    )
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "demo")]
+    assert [row["type"] for row in rows] == [
+        AGENT_EVENT_TOOL_CALL_STARTED,
+        AGENT_EVENT_TOOL_CALL_ENDED,
+    ]
+    data = _row_data(rows[0])
+    assert data["arguments"] == {
+        "patch": (
+            "*** Begin Patch\n*** Update File: app.ts\n@@\n-old\n+new\n*** End Patch"
+        )
+    }
+
+
+@pytest.mark.asyncio
 async def test_dataset_thread_storage_does_not_persist_binary_image_generation_result() -> (
     None
 ):
