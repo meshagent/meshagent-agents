@@ -1130,12 +1130,20 @@ class _ImageGenerationStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
 class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(
-        self, *, command: str | list[str] = "sed -n '1,20p' src/app.py"
+        self,
+        *,
+        command: str | list[str] = "sed -n '1,20p' src/app.py",
+        argument_bytes: int | None = None,
+        pending: bool = False,
+        command_deltas: list[str] | None = None,
     ) -> None:
         self.session = _LifecycleSession()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.command = command
+        self.argument_bytes = argument_bytes
+        self.pending = pending
+        self.command_deltas = command_deltas or []
 
     def default_model(self) -> str:
         return "default-model"
@@ -1154,17 +1162,33 @@ class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         def publish(event: dict[str, Any]) -> None:
             del event
+            message_cls = AgentToolCallPending if self.pending else AgentToolCallStarted
             callback(
-                AgentToolCallStarted(
-                    type=AGENT_EVENT_TOOL_CALL_STARTED,
+                message_cls(
+                    type=(
+                        AGENT_EVENT_TOOL_CALL_PENDING
+                        if self.pending
+                        else AGENT_EVENT_TOOL_CALL_STARTED
+                    ),
                     thread_id=thread_id,
                     turn_id=turn_id,
                     item_id="shell-tool",
                     toolkit="openai",
                     tool="shell",
                     arguments={"action": {"command": self.command}},
+                    argument_bytes=self.argument_bytes,
                 )
             )
+            for delta in self.command_deltas:
+                callback(
+                    AgentToolCallArgumentsDelta(
+                        type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="shell-tool",
+                        delta=delta,
+                    )
+                )
 
         return publish
 
@@ -1274,6 +1298,94 @@ class _ToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
         return {"ok": True}
 
 
+class _PartialToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(
+        self,
+        *,
+        toolkit: str,
+        tool: str,
+        arguments: dict[str, Any],
+        deltas: list[str],
+    ) -> None:
+        self.session = _LifecycleSession()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.toolkit = toolkit
+        self.tool = tool
+        self.arguments = arguments
+        self.deltas = deltas
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            del event
+            callback(
+                AgentToolCallPending(
+                    type=AGENT_EVENT_TOOL_CALL_PENDING,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="partial-tool",
+                    toolkit=self.toolkit,
+                    tool=self.tool,
+                    arguments=self.arguments,
+                )
+            )
+            for delta in self.deltas:
+                callback(
+                    AgentToolCallArgumentsDelta(
+                        type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="partial-tool",
+                        delta=delta,
+                    )
+                )
+
+        return publish
+
+    async def next(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del caller
+        del toolkits
+        del output_schema
+        if event_handler is not None:
+            event_handler({"type": "partial_delta_started"})
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
+        self.started.set()
+        await self.release.wait()
+        return {"ok": True}
+
+
 class _ToolEventArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(self) -> None:
         self.session = _LifecycleSession()
@@ -1306,7 +1418,7 @@ class _ToolEventArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
                     event={
                         "type": "agent.event",
                         "state": "pending",
-                        "headline": "Preparing Command",
+                        "headline": "Preparing",
                     },
                 )
             )
@@ -3695,15 +3807,6 @@ async def test_llm_agent_process_publishes_custom_retry_status_events(
 
         await asyncio.wait_for(llm_adapter.retry_event_sent.wait(), timeout=1)
         await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Reconnecting to the LLM (retry 1/10)",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-        await _wait_for(
             lambda: any(
                 event.get_attribute("name") == "openai.retry"
                 and event.get_attribute("headline")
@@ -3714,13 +3817,9 @@ async def test_llm_agent_process_publishes_custom_retry_status_events(
 
         llm_adapter.release_completion.set()
         await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
-        await _wait_for(
-            lambda: (
-                room.local_participant.get_attribute(
-                    "thread.status./threads/test.thread"
-                )
-                == "Thinking"
-            )
+        assert not any(
+            name.startswith("thread.status")
+            for name, _value in room.local_participant.set_attribute_calls
         )
     finally:
         await process.stop(supervisor)
@@ -4824,6 +4923,101 @@ async def test_llm_agent_process_publishes_tool_argument_snapshot_size() -> None
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_publishes_preparing_command_argument_size() -> None:
+    adapter = _ShellStatusLLMAdapter(command="", argument_bytes=150, pending=True)
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "run a command"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Preparing"
+                and status["pending_item_id"] == "shell-tool"
+                and status["total_bytes"] == 150
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_increments_preparing_command_argument_size() -> None:
+    adapter = _ShellStatusLLMAdapter(
+        command="",
+        pending=True,
+        command_deltas=["x" * 120, "y" * 80],
+    )
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "run a command"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: (
+                len(
+                    [
+                        status
+                        for status in publisher.statuses
+                        if status["status"] == "Preparing"
+                        and status["pending_item_id"] == "shell-tool"
+                        and isinstance(status["total_bytes"], int)
+                        and status["total_bytes"] >= 120
+                    ]
+                )
+                >= 2
+            )
+        )
+        preparing_totals = [
+            status["total_bytes"]
+            for status in publisher.statuses
+            if status["status"] == "Preparing"
+            and status["pending_item_id"] == "shell-tool"
+            and isinstance(status["total_bytes"], int)
+        ]
+        assert preparing_totals[-2:] == [120, 200]
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_publishes_tool_argument_delta_size() -> None:
     adapter = _ToolArgumentDeltaStatusLLMAdapter()
     publisher = _RecordingThreadStatusPublisher()
@@ -4851,6 +5045,89 @@ async def test_llm_agent_process_publishes_tool_argument_delta_size() -> None:
                 status["status"] == "Preparing to write src/app.py"
                 and status["pending_item_id"] == "write-tool"
                 and status["total_bytes"] == 120
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_uses_partial_json_argument_delta_for_status() -> None:
+    adapter = _PartialToolArgumentDeltaStatusLLMAdapter(
+        toolkit="storage",
+        tool="write_file",
+        arguments={},
+        deltas=['{"path":"src/app.py","content":"'],
+    )
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write the file"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Preparing to write src/app.py"
+                and status["pending_item_id"] == "partial-tool"
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_uses_shell_command_delta_for_status() -> None:
+    adapter = _ShellStatusLLMAdapter(
+        command="",
+        pending=True,
+        command_deltas=["cat > /tmp/app.py <<'EOF'\n"],
+    )
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write the file"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Preparing to write /tmp/app.py"
+                and status["pending_item_id"] == "shell-tool"
                 for status in publisher.statuses
             )
         )
@@ -4991,7 +5268,7 @@ async def test_llm_agent_process_publishes_tool_event_argument_delta_size() -> N
         )
         await _wait_for(
             lambda: any(
-                status["status"] == "Preparing Command"
+                status["status"] == "Preparing"
                 and status["pending_item_id"] == "shell-tool"
                 and status["total_bytes"] == 140
                 for status in publisher.statuses
@@ -5136,28 +5413,10 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
 
         await asyncio.wait_for(llm_adapter.call_event.wait(), timeout=1)
         await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-        await _wait_for(
             lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
         )
         await _wait_for(lambda: len(room.sync.document.message_elements) == 2)
         await _wait_for(lambda: len(room.sync.document.event_elements) >= 2)
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    None,
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
 
         user_message = room.sync.document.message_elements[0]
         assert user_message.get_attribute("author_name") == "caller"
@@ -5198,6 +5457,7 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
             == supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0]["turn_id"]
         )
         assert turn_event.get_attribute("kind") == "turn"
+        await _wait_for(lambda: turn_event.get_attribute("state") == "completed")
         assert turn_event.get_attribute("state") == "completed"
 
         turn_id = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0][
@@ -5209,10 +5469,10 @@ async def test_llm_agent_process_thread_adapter_persists_events_messages_and_sta
         assert turn_event.get_attribute("turn_id") == turn_id
 
         assert room.sync.document.member_names == ["assistant", "caller"]
-        assert (
-            "thread.status.mode./threads/test.thread",
-            "steerable",
-        ) in room.local_participant.set_attribute_calls
+        assert not any(
+            name.startswith("thread.status")
+            for name, _value in room.local_participant.set_attribute_calls
+        )
     finally:
         await process.stop(supervisor)
 
@@ -5586,15 +5846,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
             )
         )
         await real_sleep(0)
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
 
         adapter.push_message(
             message=AgentToolCallStarted(
@@ -5609,15 +5861,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         )
         await real_sleep(0)
 
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Reading src/app.py",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Reading src/app.py")
         await _wait_for(
             lambda: (
                 len(
@@ -5653,15 +5897,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         await real_sleep(0)
 
         await _wait_for(lambda: exec_event.get_attribute("state") == "completed")
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
 
         adapter.push_message(
             message=AgentToolCallStarted(
@@ -5733,15 +5969,7 @@ async def test_agent_process_thread_adapter_coalesces_shell_exploration_events_a
         )
         await real_sleep(0)
 
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    None,
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
+        await _wait_for(lambda: adapter._thread_status_value is None)
     finally:
         await adapter.stop()
 
@@ -5917,7 +6145,7 @@ async def test_agent_process_thread_adapter_writes_preview_for_pending_and_start
         await _wait_for(
             lambda: (
                 exec_event.get_attribute("state") == "pending"
-                and exec_event.get_attribute("headline") == "Preparing Command"
+                and exec_event.get_attribute("headline") == "Preparing"
             )
         )
 
@@ -5941,7 +6169,7 @@ async def test_agent_process_thread_adapter_writes_preview_for_pending_and_start
         await _wait_for(
             lambda: (
                 exec_event.get_attribute("state") == "in_progress"
-                and exec_event.get_attribute("headline") == "Running Command"
+                and exec_event.get_attribute("headline") == "Running command"
             )
         )
 
@@ -6136,15 +6364,7 @@ async def test_agent_process_thread_adapter_coalesces_cd_prefixed_shell_explorat
         )
         await real_sleep(0)
 
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Exploring /website",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Exploring /website")
 
         exec_event = next(
             event
@@ -6256,7 +6476,7 @@ async def test_agent_process_thread_adapter_refines_shell_event_by_item_id_witho
         await _wait_for(
             lambda: (
                 exec_event.get_attribute("state") == "in_progress"
-                and exec_event.get_attribute("headline") == "Running Command"
+                and exec_event.get_attribute("headline") == "Running command"
             )
         )
 
@@ -6767,15 +6987,7 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
             )
         )
         await real_sleep(0)
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
 
         adapter.push_message(
             message=AgentToolCallStarted(
@@ -6793,21 +7005,8 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
             )
         )
         await real_sleep(0)
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Writing src/app.py",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.pending_item_id./threads/test.thread"
-            )
-            == "write-1"
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Writing src/app.py")
+        assert adapter._thread_status_pending_item_id_value == "write-1"
 
         write_event = next(
             event
@@ -6848,21 +7047,8 @@ async def test_agent_process_thread_adapter_marks_failed_storage_write_and_resto
             )
             == 1
         )
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.pending_item_id./threads/test.thread"
-            )
-            is None
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
+        assert adapter._thread_status_pending_item_id_value is None
     finally:
         await adapter.stop()
 
@@ -6905,21 +7091,8 @@ async def test_agent_process_thread_adapter_restores_thinking_status_on_turn_int
             )
         )
         await real_sleep(0)
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Reading src/app.py",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.pending_item_id./threads/test.thread"
-            )
-            == "read-1"
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Reading src/app.py")
+        assert adapter._thread_status_pending_item_id_value == "read-1"
 
         adapter.push_message(
             message=TurnInterrupted(
@@ -6931,21 +7104,8 @@ async def test_agent_process_thread_adapter_restores_thinking_status_on_turn_int
         )
         await real_sleep(0)
 
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.pending_item_id./threads/test.thread"
-            )
-            is None
-        )
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
+        assert adapter._thread_status_pending_item_id_value is None
     finally:
         await adapter.stop()
 
@@ -6985,11 +7145,8 @@ async def test_agent_process_thread_adapter_uses_computer_startup_details_for_st
 
         await _wait_for(
             lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Waiting for Playwright container to become ready.",
-                )
-                in room.local_participant.set_attribute_calls
+                adapter._thread_status_value
+                == "Waiting for Playwright container to become ready."
             )
         )
 
@@ -7031,17 +7188,8 @@ async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_
             )
         )
         await real_sleep(0)
-        await _wait_for(
-            lambda: (
-                (
-                    "thread.status./threads/test.thread",
-                    "Thinking",
-                )
-                in room.local_participant.set_attribute_calls
-            )
-        )
-
-        previous_calls = list(room.local_participant.set_attribute_calls)
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
+        previous_status = adapter._thread_status_value
         adapter.push_message(
             message=TurnSteerAccepted(
                 type=AGENT_EVENT_TURN_STEER_ACCEPTED,
@@ -7052,11 +7200,11 @@ async def test_agent_process_thread_adapter_does_not_replace_thread_status_with_
         )
         await real_sleep(0)
 
-        assert (
-            "thread.status./threads/test.thread",
-            "Queued turn steering",
-        ) not in room.local_participant.set_attribute_calls
-        assert room.local_participant.set_attribute_calls == previous_calls
+        assert adapter._thread_status_value == previous_status
+        assert not any(
+            name.startswith("thread.status")
+            for name, _value in room.local_participant.set_attribute_calls
+        )
     finally:
         await adapter.stop()
 
@@ -7139,28 +7287,13 @@ async def test_agent_process_thread_adapter_resets_started_at_when_status_change
     await adapter.start()
     try:
         await adapter.set_thread_status(status="Reading src/app.py")
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.started_at./threads/test.thread"
-            )
-            == "2026-03-14T01:00:00Z"
-        )
+        assert adapter._thread_status_started_at_value == "2026-03-14T01:00:00Z"
 
         await adapter.set_thread_status(status="Reading src/app.py")
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.started_at./threads/test.thread"
-            )
-            == "2026-03-14T01:00:00Z"
-        )
+        assert adapter._thread_status_started_at_value == "2026-03-14T01:00:00Z"
 
         await adapter.set_thread_status(status="Thinking")
-        assert (
-            room.local_participant.get_attribute(
-                "thread.status.started_at./threads/test.thread"
-            )
-            == "2026-03-14T01:00:05Z"
-        )
+        assert adapter._thread_status_started_at_value == "2026-03-14T01:00:05Z"
     finally:
         await adapter.stop()
 
@@ -7221,7 +7354,7 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
             for event in room.sync.document.event_elements
             if event.get_attribute("item_id") == "read-1"
         )
-        assert read_event.get_attribute("headline") == "Calling Read File"
+        assert read_event.get_attribute("headline") == "Calling read file"
 
         adapter.push_message(
             message=AgentToolCallStarted(
@@ -7312,7 +7445,7 @@ async def test_agent_process_thread_adapter_replaces_generic_storage_read_and_gr
             for event in room.sync.document.event_elements
             if event.get_attribute("item_id") == "grep-1"
         )
-        assert grep_event.get_attribute("headline") == "Calling Grep File"
+        assert grep_event.get_attribute("headline") == "Calling grep file"
 
         adapter.push_message(
             message=AgentToolCallStarted(

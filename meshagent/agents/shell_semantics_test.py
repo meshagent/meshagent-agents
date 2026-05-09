@@ -384,11 +384,9 @@ def test_analyze_shell_command_falls_back_to_run_display() -> None:
     assert [op.kind for op in analysis.operations] == ["run"]
     assert analysis.display.event_kind == "exec"
     assert analysis.display.path == ""
-    assert analysis.display.phase_for_state(state="pending").headline == (
-        "Preparing Command"
-    )
+    assert analysis.display.phase_for_state(state="pending").headline == ("Preparing")
     assert analysis.display.phase_for_state(state="in_progress").headline == (
-        "Running Command"
+        "Running command"
     )
     assert analysis.display.phase_for_state(state="failed").headline == (
         "Attempted to run command"

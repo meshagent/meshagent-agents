@@ -723,12 +723,11 @@ class ThreadedChannel(Channel):
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _new_thread_path(self) -> str:
-        base_path = self._thread_path_for_name(
+        storage_path = self._thread_path_for_name(
             thread_name=str(uuid.uuid4()),
             thread_dir=self._get_thread_dir(),
             extension=self._thread_path_extension,
         )
-        storage_path = await self._next_available_thread_path(base_path=base_path)
         if self._thread_url_scheme is not None:
             return self._thread_url_for_path(path=storage_path)
         return storage_path

@@ -294,6 +294,19 @@ class ChatChannel(ThreadedChannel):
         )
         return True
 
+    def _publish_thread_status_to_open_participants(
+        self,
+        *,
+        thread_id: str,
+        status: AgentThreadStatus,
+    ) -> None:
+        payload = status.model_dump(mode="json")
+        self._thread_status_by_thread[thread_id] = payload
+        for participant in self._open_participants(thread_id=thread_id):
+            if participant.id == self.room.local_participant.id:
+                continue
+            self._send_agent_payload_nowait(participant=participant, payload=payload)
+
     def _buffer_agent_event(self, *, payload: dict[str, Any]) -> None:
         raw_thread_id = payload.get("thread_id")
         if not isinstance(raw_thread_id, str) or raw_thread_id.strip() == "":
@@ -562,6 +575,7 @@ class ChatChannel(ThreadedChannel):
             type=AGENT_MESSAGE_TURN_START,
             message_id=start_thread.message_id,
             thread_id=path,
+            turn_id=str(uuid.uuid4()),
             content=start_thread.content,
             sender_name=start_thread.sender_name,
             model=start_thread.model,
@@ -582,6 +596,17 @@ class ChatChannel(ThreadedChannel):
                 source_message_id=start_thread.message_id,
                 thread_id=path,
             ).model_dump(mode="json"),
+        )
+        self._publish_thread_status_to_open_participants(
+            thread_id=path,
+            status=AgentThreadStatus(
+                type=AGENT_EVENT_THREAD_STATUS,
+                thread_id=path,
+                turn_id=turn_start.turn_id,
+                status="Starting a thread",
+                mode="steerable",
+                started_at=self._utc_now_iso(),
+            ),
         )
         await self.supervisor.route(
             Message(sender=sender, source=self, data=turn_start)

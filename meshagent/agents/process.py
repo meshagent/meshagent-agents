@@ -30,6 +30,7 @@ from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.tools import ToolContext, Toolkit
 from opentelemetry import trace
+from pydantic_core import from_json as pydantic_core_from_json
 from .thread_adapter import default_format_message
 from .thread_storage import ThreadStorage
 from .thread_status_publisher import ThreadStatusPublisher
@@ -174,7 +175,7 @@ def _humanize_tool_name(name: str) -> str:
     normalized = name.strip().replace("_", " ").replace("-", " ")
     if normalized == "":
         return ""
-    return " ".join(part.capitalize() for part in normalized.split())
+    return " ".join(part.lower() for part in normalized.split())
 
 
 def _command_text(*, value: Any, multiline: bool = False) -> str:
@@ -320,6 +321,92 @@ def _tool_argument_snapshot_bytes(arguments: dict[str, Any] | None) -> int:
     )
 
 
+def _merge_tool_arguments(
+    *,
+    current: dict[str, Any] | None,
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(current) if current is not None else {}
+    for key, value in update.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_tool_arguments(current=existing, update=value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _partial_json_tool_arguments(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped == "" or stripped[0] not in "{[":
+        return None
+
+    try:
+        parsed = pydantic_core_from_json(
+            stripped.encode("utf-8"),
+            allow_partial=True,
+        )
+    except ValueError:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _shell_delta_arguments(
+    *,
+    current: dict[str, Any] | None,
+    command: str,
+) -> dict[str, Any]:
+    merged = deepcopy(current) if current is not None else {}
+    action = merged.get("action")
+    if isinstance(action, dict):
+        existing_commands = action.get("commands")
+        if isinstance(existing_commands, list):
+            action["commands"] = [command]
+        else:
+            action["command"] = command
+        return merged
+
+    merged["command"] = command
+    return merged
+
+
+def _tool_arguments_from_delta_text(
+    *,
+    tool: str,
+    current: dict[str, Any] | None,
+    text: str,
+) -> dict[str, Any] | None:
+    partial_arguments = _partial_json_tool_arguments(text)
+    if partial_arguments is not None:
+        return _merge_tool_arguments(current=current, update=partial_arguments)
+
+    normalized_tool = tool.strip().lower()
+    if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
+        command = text.strip()
+        if command != "":
+            return _shell_delta_arguments(current=current, command=command)
+
+    return None
+
+
+_STATUS_TEXT_REPLACEMENTS = {
+    "Preparing Command": "Preparing",
+    "Running Command": "Running command",
+    "Ran Command": "Ran command",
+    "Command Cancelled": "Command cancelled",
+    "Web Search Cancelled": "Web search cancelled",
+    "Patch Cancelled": "Patch cancelled",
+    "Image Generation Cancelled": "Image generation cancelled",
+}
+
+
+def _normalize_status_text(text: str) -> str:
+    return _STATUS_TEXT_REPLACEMENTS.get(text, text)
+
+
 def _storage_status_text(
     *,
     state: str,
@@ -334,6 +421,8 @@ def _storage_status_text(
     if normalized_tool == "grep_file":
         path = arguments.get("path")
         if not isinstance(path, str) or path.strip() == "":
+            if state == "pending":
+                return "Preparing"
             return None
         normalized_path = path.strip()
         if state == "pending":
@@ -351,6 +440,8 @@ def _storage_status_text(
 
     path = arguments.get("path")
     if not isinstance(path, str) or path.strip() == "":
+        if state == "pending":
+            return "Preparing"
         return None
     normalized_path = path.strip()
     operation = "read" if normalized_tool == "read_file" else "write"
@@ -387,6 +478,8 @@ def _tool_status_text(
     normalized_tool = tool.strip().lower()
     if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
         command = _extract_tool_command(tool=normalized_tool, arguments=arguments)
+        if state == "pending" and command == "":
+            return "Preparing"
         return (
             analyze_shell_command(command=command)
             .display.phase_for_state(state=state)
@@ -396,13 +489,15 @@ def _tool_status_text(
     if normalized_tool == "web_search":
         query = _extract_web_query(arguments=arguments)
         if state == "pending":
+            if query == "":
+                return "Preparing"
             return "Preparing web search"
         if state in _THREAD_STATUS_ACTIVE_STATES:
             return "Searching the web"
         if state == "failed":
             return "Attempted to search the web"
         if state == "cancelled":
-            return "Web Search Cancelled"
+            return "Web search cancelled"
         if query != "":
             return f"Searched for {query}"
         return "Searched the web"
@@ -416,19 +511,21 @@ def _tool_status_text(
             if state == "failed":
                 return f"Attempted to patch {path}"
             if state == "cancelled":
-                return f"Patch Cancelled: {path}"
+                return f"Patch cancelled: {path}"
             if state in _THREAD_STATUS_ACTIVE_STATES:
                 return f"Editing {path}"
             return f"Edited {path}"
         if state == "pending":
-            return "Preparing Patch"
+            if patch == "":
+                return "Preparing"
+            return "Preparing patch"
         if state == "failed":
             return "Attempted to patch"
         if state == "cancelled":
-            return "Patch Cancelled"
+            return "Patch cancelled"
         if state in _THREAD_STATUS_ACTIVE_STATES:
-            return "Applying Patch"
-        return "Applied Patch"
+            return "Applying patch"
+        return "Applied patch"
 
     if normalized_tool == "image_generation":
         if state == "pending":
@@ -438,7 +535,7 @@ def _tool_status_text(
         if state == "failed":
             return "Attempted to generate image"
         if state == "cancelled":
-            return "Image Generation Cancelled"
+            return "Image generation cancelled"
         return "Generated image"
 
     humanized = _humanize_tool_name(tool)
@@ -453,7 +550,7 @@ def _tool_status_text(
             else "Attempted to call tool"
         )
     if state == "cancelled":
-        return f"{humanized} Cancelled" if humanized != "" else "Tool call cancelled"
+        return f"{humanized} cancelled" if humanized != "" else "Tool call cancelled"
     return f"Called {humanized}" if humanized != "" else "Called tool"
 
 
@@ -1298,6 +1395,7 @@ class LLMAgentProcess(AgentProcess):
         self._active_turn_tool_choice: ToolChoice | None = None
         self._status_tool_calls_by_item_id: dict[str, _StatusToolCall] = {}
         self._status_tool_argument_delta_bytes_by_item_id: dict[str, int] = {}
+        self._status_tool_argument_delta_text_by_item_id: dict[str, str] = {}
         self._status_text_by_item_id: dict[str, str] = {}
         self._latest_status_text: str | None = None
         self._session_initializer = session_initializer
@@ -2378,9 +2476,9 @@ class LLMAgentProcess(AgentProcess):
                         status_text = detail_texts[0]
                 if status_text is None:
                     if isinstance(headline, str) and headline.strip() != "":
-                        status_text = headline.strip()
+                        status_text = _normalize_status_text(headline.strip())
                     elif isinstance(summary, str) and summary.strip() != "":
-                        status_text = summary.strip()
+                        status_text = _normalize_status_text(summary.strip())
                 item_id = event.get("item_id")
                 status_item_id = (
                     item_id.strip()
@@ -2391,6 +2489,9 @@ class LLMAgentProcess(AgentProcess):
                     if status_item_id.strip() != "":
                         self._status_text_by_item_id.pop(status_item_id, None)
                         self._status_tool_argument_delta_bytes_by_item_id.pop(
+                            status_item_id, None
+                        )
+                        self._status_tool_argument_delta_text_by_item_id.pop(
                             status_item_id, None
                         )
                     self._latest_status_text = None
@@ -2424,6 +2525,7 @@ class LLMAgentProcess(AgentProcess):
                         message.item_id, 0
                     ),
                     _tool_argument_snapshot_bytes(message.arguments),
+                    message.argument_bytes or 0,
                 )
                 self._status_tool_calls_by_item_id[message.item_id] = _StatusToolCall(
                     toolkit=message.toolkit,
@@ -2432,6 +2534,10 @@ class LLMAgentProcess(AgentProcess):
                     state=state,
                     argument_delta_bytes=argument_total_bytes,
                 )
+                if message.argument_bytes is not None:
+                    self._status_tool_argument_delta_bytes_by_item_id[
+                        message.item_id
+                    ] = argument_total_bytes
                 return (
                     _tool_status_text(
                         state=state,
@@ -2444,16 +2550,27 @@ class LLMAgentProcess(AgentProcess):
                 )
 
             if isinstance(message, AgentToolCallArgumentsDelta):
-                argument_delta_bytes = (
+                tool_call = self._status_tool_calls_by_item_id.get(message.item_id)
+                previous_argument_bytes = (
                     self._status_tool_argument_delta_bytes_by_item_id.get(
                         message.item_id, 0
                     )
-                    + len(message.delta.encode("utf-8"))
+                )
+                argument_delta_bytes = previous_argument_bytes + len(
+                    message.delta.encode("utf-8")
                 )
                 self._status_tool_argument_delta_bytes_by_item_id[message.item_id] = (
                     argument_delta_bytes
                 )
-                tool_call = self._status_tool_calls_by_item_id.get(message.item_id)
+                delta_text = (
+                    self._status_tool_argument_delta_text_by_item_id.get(
+                        message.item_id, ""
+                    )
+                    + message.delta
+                )
+                self._status_tool_argument_delta_text_by_item_id[message.item_id] = (
+                    delta_text
+                )
                 if tool_call is None:
                     status_text = self._status_text_by_item_id.get(message.item_id)
                     if status_text is None:
@@ -2466,10 +2583,17 @@ class LLMAgentProcess(AgentProcess):
                         message.item_id,
                         _status_total_bytes(argument_delta_bytes),
                     )
+                updated_arguments = _tool_arguments_from_delta_text(
+                    tool=tool_call.tool,
+                    current=tool_call.arguments,
+                    text=delta_text,
+                )
                 updated_tool_call = _StatusToolCall(
                     toolkit=tool_call.toolkit,
                     tool=tool_call.tool,
-                    arguments=tool_call.arguments,
+                    arguments=updated_arguments
+                    if updated_arguments is not None
+                    else tool_call.arguments,
                     state=tool_call.state,
                     argument_delta_bytes=argument_delta_bytes,
                 )
@@ -2502,8 +2626,14 @@ class LLMAgentProcess(AgentProcess):
                     self._status_tool_argument_delta_bytes_by_item_id.pop(
                         message.item_id, None
                     )
+                    self._status_tool_argument_delta_text_by_item_id.pop(
+                        message.item_id, None
+                    )
                     return "Thinking", None, None
                 self._status_tool_argument_delta_bytes_by_item_id.pop(
+                    message.item_id, None
+                )
+                self._status_tool_argument_delta_text_by_item_id.pop(
                     message.item_id, None
                 )
                 state = (
@@ -2764,6 +2894,7 @@ class LLMAgentProcess(AgentProcess):
         self._turn_id = turn_id
         self._status_tool_calls_by_item_id.clear()
         self._status_tool_argument_delta_bytes_by_item_id.clear()
+        self._status_tool_argument_delta_text_by_item_id.clear()
         self._status_text_by_item_id.clear()
         self._latest_status_text = None
         thread_status_publisher = self.thread_status_publisher
@@ -2945,6 +3076,7 @@ class LLMAgentProcess(AgentProcess):
                 self._active_turn_tool_choice = None
                 self._status_tool_calls_by_item_id.clear()
                 self._status_tool_argument_delta_bytes_by_item_id.clear()
+                self._status_tool_argument_delta_text_by_item_id.clear()
                 self._status_text_by_item_id.clear()
                 self._latest_status_text = None
                 remaining_queued_messages = self._drain_queued_turn_messages(

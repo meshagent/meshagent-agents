@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Protocol
 
 from meshagent.api import Participant
-from meshagent.api.chan import ChanClosed
 from meshagent.agents.messages import (
     AGENT_EVENT_THREAD_STATUS,
     AgentThreadMessage,
@@ -45,6 +44,8 @@ class ThreadStatusPublisher(Protocol):
 
 
 class ParticipantAttributeThreadStatusPublisher:
+    """Compatibility no-op for the removed participant-attribute status path."""
+
     def __init__(
         self,
         *,
@@ -52,9 +53,8 @@ class ParticipantAttributeThreadStatusPublisher:
         path: str,
         mode: ThreadStatusMode = "steerable",
     ) -> None:
-        self._participant = participant
+        del participant
         self._path = path
-        self._attribute_path_suffix = thread_status_attribute_path_suffix(path=path)
         self._mode = mode
         self._lock = asyncio.Lock()
         self._generation = 0
@@ -66,82 +66,12 @@ class ParticipantAttributeThreadStatusPublisher:
         self._pending_item_id_value: str | None = None
         self._total_bytes_value: int | None = None
 
-    def _attribute_name(self, suffix: str) -> str:
-        return f"thread.status{suffix}.{self._attribute_path_suffix}"
-
-    def _status_attribute_name(self) -> str:
-        return f"thread.status.{self._attribute_path_suffix}"
-
-    def _status_text_attribute_name(self) -> str:
-        return self._attribute_name(".text")
-
-    def _status_mode_attribute_name(self) -> str:
-        return self._attribute_name(".mode")
-
-    def _status_started_at_attribute_name(self) -> str:
-        return self._attribute_name(".started_at")
-
-    def _pending_messages_attribute_name(self) -> str:
-        return self._attribute_name(".pending_messages")
-
-    def _pending_item_id_attribute_name(self) -> str:
-        return self._attribute_name(".pending_item_id")
-
-    def _total_bytes_attribute_name(self) -> str:
-        return self._attribute_name(".total_bytes")
-
-    async def _set_attribute(self, name: str, value: str | None) -> None:
-        try:
-            await self._participant.set_attribute(name, value)
-        except ChanClosed:
-            logger.debug("room channel closed while setting thread status '%s'", name)
-
-    def _pending_messages_payload(self) -> dict[str, Any] | None:
-        payload: dict[str, Any] = {}
-        if self._turn_id_value is not None:
-            payload["turn_id"] = self._turn_id_value
-        if len(self._pending_messages_value) > 0:
-            payload["messages"] = self._pending_messages_value
-        if len(payload) == 0:
-            return None
-        return payload
-
-    async def _write_pending_messages_attribute(self) -> None:
-        serialized: str | None = None
-        payload = self._pending_messages_payload()
-        if payload is not None:
-            serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-        await self._set_attribute(self._pending_messages_attribute_name(), serialized)
-
-    async def _write_status_attributes(self) -> None:
-        await self._set_attribute(self._status_attribute_name(), self._status_value)
-        await self._set_attribute(
-            self._status_text_attribute_name(), self._status_value
-        )
-        await self._set_attribute(self._status_mode_attribute_name(), self._mode_value)
-        await self._set_attribute(
-            self._status_started_at_attribute_name(),
-            self._started_at_value,
-        )
-        await self._set_attribute(
-            self._pending_item_id_attribute_name(),
-            self._pending_item_id_value,
-        )
-        await self._set_attribute(
-            self._total_bytes_attribute_name(),
-            str(self._total_bytes_value)
-            if self._total_bytes_value is not None
-            else None,
-        )
-
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._lock:
             if self._turn_id_value == turn_id:
                 return
 
             self._turn_id_value = turn_id
-            await self._write_pending_messages_attribute()
 
     async def set_pending_messages(
         self,
@@ -155,7 +85,6 @@ class ParticipantAttributeThreadStatusPublisher:
                 return
 
             self._pending_messages_value = normalized
-            await self._write_pending_messages_attribute()
 
     async def set_thread_status(
         self,
@@ -172,7 +101,6 @@ class ParticipantAttributeThreadStatusPublisher:
                 self._started_at_value = None
                 self._pending_item_id_value = None
                 self._total_bytes_value = None
-                await self._write_status_attributes()
                 return
 
             normalized_status = status.strip()
@@ -216,7 +144,6 @@ class ParticipantAttributeThreadStatusPublisher:
             self._started_at_value = started_at
             self._pending_item_id_value = normalized_pending_item_id
             self._total_bytes_value = normalized_total_bytes
-            await self._write_status_attributes()
 
     def _next_generation(self) -> int:
         self._generation += 1

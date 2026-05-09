@@ -2400,11 +2400,11 @@ def _run_display(*, command: str, cwd: str | None) -> ShellDisplay:
         return ShellDisplay(
             event_kind="exec",
             path=cwd or "",
-            pending=_phase(headline="Preparing Command"),
-            active=_phase(headline="Running Command"),
-            completed=_phase(headline="Ran Command"),
+            pending=_phase(headline="Preparing"),
+            active=_phase(headline="Running command"),
+            completed=_phase(headline="Ran command"),
             failed=_phase(headline="Attempted to run command"),
-            cancelled=_phase(headline="Command Cancelled"),
+            cancelled=_phase(headline="Command cancelled"),
         )
 
     return ShellDisplay(
@@ -2412,14 +2412,14 @@ def _run_display(*, command: str, cwd: str | None) -> ShellDisplay:
         path=cwd or "",
         preview=preview,
         pending=_phase(
-            headline="Preparing Command",
+            headline="Preparing",
             summary=f"Prepare {normalized_command}",
         ),
-        active=_phase(headline="Running Command", summary=f"Run {normalized_command}"),
-        completed=_phase(headline="Ran Command", summary=normalized_command),
+        active=_phase(headline="Running command", summary=f"Run {normalized_command}"),
+        completed=_phase(headline="Ran command", summary=normalized_command),
         failed=_phase(
             headline="Attempted to run command",
             summary="Attempted to run command",
         ),
-        cancelled=_phase(headline="Command Cancelled", summary="Command Cancelled"),
+        cancelled=_phase(headline="Command cancelled", summary="Command cancelled"),
     )

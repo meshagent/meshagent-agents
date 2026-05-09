@@ -519,81 +519,81 @@ def _headline_for_response_event(*, event: dict, kind: str, state: str) -> str:
         if state in _ACTIVE_STATES:
             return "Thinking"
         if state == "completed":
-            return "Response Ready"
+            return "Response ready"
         if state == "failed":
-            return "Response Failed"
+            return "Response failed"
         if state == "cancelled":
-            return "Response Cancelled"
-        return "Response Update"
+            return "Response cancelled"
+        return "Response update"
 
     if kind == "web":
         if state in _ACTIVE_STATES:
-            return "Searching Web"
+            return "Searching web"
         if state == "completed":
-            return "Searched Web"
+            return "Searched web"
         if state == "failed":
-            return "Web Search Failed"
+            return "Web search failed"
         if state == "cancelled":
-            return "Web Search Cancelled"
-        return "Web Search"
+            return "Web search cancelled"
+        return "Web search"
 
     if kind == "search":
         if state in _ACTIVE_STATES:
-            return "Searching Files"
+            return "Searching files"
         if state == "completed":
-            return "Searched Files"
+            return "Searched files"
         if state == "failed":
-            return "File Search Failed"
+            return "File search failed"
         if state == "cancelled":
-            return "File Search Cancelled"
-        return "File Search"
+            return "File search cancelled"
+        return "File search"
 
     if kind == "tool":
         if _is_computer_call_event(event=event):
             return _computer_headline_for_state(event=event, state=state)
 
         if state in _ACTIVE_STATES:
-            return "Calling Tool"
+            return "Calling tool"
         if state == "completed":
-            return "Called Tool"
+            return "Called tool"
         if state == "failed":
-            return "Tool Failed"
+            return "Tool failed"
         if state == "cancelled":
-            return "Tool Cancelled"
+            return "Tool cancelled"
         return "Tool"
 
     if kind == "diff":
         if state in _ACTIVE_STATES:
-            return "Applying Patch"
+            return "Applying patch"
         if state == "completed":
-            return "Applied Patch"
+            return "Applied patch"
         if state == "failed":
-            return "Patch Failed"
+            return "Patch failed"
         if state == "cancelled":
-            return "Patch Cancelled"
+            return "Patch cancelled"
         return "Patch"
 
     if kind == "exec":
         if state in _ACTIVE_STATES:
-            return "Running Command"
+            return "Running command"
         if state == "completed":
-            return "Ran Command"
+            return "Ran command"
         if state == "failed":
-            return "Command Failed"
+            return "Command failed"
         if state == "cancelled":
-            return "Command Cancelled"
+            return "Command cancelled"
         return "Command"
 
     if kind == "image":
         if state in _ACTIVE_STATES:
-            return "Generating Image"
+            return "Generating image"
         if state == "completed":
-            return "Generated Image"
+            return "Generated image"
         if state == "failed":
-            return "Image Generation Failed"
-        return "Image Generation"
+            return "Image generation failed"
+        return "Image generation"
 
-    return "Event Update"
+    return "Event update"
 
 
 def _details_for_response_event(*, event: dict, kind: str) -> list[str]:

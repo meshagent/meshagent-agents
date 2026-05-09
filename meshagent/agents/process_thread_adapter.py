@@ -22,7 +22,6 @@ from meshagent.api import (
     RoomClient,
     RoomException,
 )
-from meshagent.api.chan import ChanClosed
 from meshagent.api.messaging import (
     BinaryContent,
     Content,
@@ -279,7 +278,7 @@ def _now_iso() -> str:
 
 
 def _humanize_name(name: str) -> str:
-    return name.replace("_", " ").strip().title()
+    return name.replace("_", " ").strip().lower()
 
 
 def _normalize_positive_dimension(value: Any) -> int | None:
@@ -1860,15 +1859,15 @@ class MeshDocumentThreadStorage(ThreadStorage):
         )
         if status == "failed":
             text = (
-                f"Search Failed for {target}"
+                f"Search failed for {target}"
                 if uses_query_as_target
-                else f"Search Failed: {target}"
+                else f"Search failed: {target}"
             )
         elif status == "cancelled":
             text = (
-                f"Search Cancelled for {target}"
+                f"Search cancelled for {target}"
                 if uses_query_as_target
-                else f"Search Cancelled: {target}"
+                else f"Search cancelled: {target}"
             )
         elif self._is_active_state(state=status):
             text = (
@@ -1933,20 +1932,20 @@ class MeshDocumentThreadStorage(ThreadStorage):
             if status == "failed":
                 return f"Attempted to patch {path}"
             if status == "cancelled":
-                return f"Patch Cancelled: {path}"
+                return f"Patch cancelled: {path}"
             if self._is_active_state(state=status):
                 return f"Editing {path}"
             return f"Edited {path}"
 
         if self._is_pending_state(state=status):
-            return "Preparing Patch"
+            return "Preparing patch"
         if status == "failed":
             return "Attempted to patch"
         if status == "cancelled":
-            return "Patch Cancelled"
+            return "Patch cancelled"
         if self._is_active_state(state=status):
-            return "Applying Patch"
-        return "Applied Patch"
+            return "Applying patch"
+        return "Applied patch"
 
     def _tool_result_preview(self, *, result: Content | None) -> str:
         del result
@@ -2264,7 +2263,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
             elif state == "failed":
                 headline = "Attempted to search the web"
             elif state == "cancelled":
-                headline = "Web Search Cancelled"
+                headline = "Web search cancelled"
             else:
                 headline = "Searched the web"
             details = _combine_detail_groups(
@@ -2337,7 +2336,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
             elif state == "failed":
                 headline = "Attempted to generate image"
             elif state == "cancelled":
-                headline = "Image Generation Cancelled"
+                headline = "Image generation cancelled"
             else:
                 headline = "Generated image"
         else:
@@ -2353,7 +2352,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
                     headline = "Attempted to call tool"
             elif state == "cancelled":
                 if humanized != "":
-                    headline = f"{humanized} Cancelled"
+                    headline = f"{humanized} cancelled"
                 else:
                     headline = "Tool call cancelled"
             else:
@@ -2784,97 +2783,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
             return error.message
         return f"{error.code}: {error.message}"
 
-    def _thread_status_attribute_name(self) -> str:
-        return f"thread.status.{self.path}"
-
-    def _thread_status_text_attribute_name(self) -> str:
-        return f"thread.status.text.{self.path}"
-
-    def _thread_status_mode_attribute_name(self) -> str:
-        return f"thread.status.mode.{self.path}"
-
-    def _thread_status_started_at_attribute_name(self) -> str:
-        return f"thread.status.started_at.{self.path}"
-
-    def _thread_status_pending_messages_attribute_name(self) -> str:
-        return f"thread.status.pending_messages.{self.path}"
-
-    def _thread_status_pending_item_id_attribute_name(self) -> str:
-        return f"thread.status.pending_item_id.{self.path}"
-
-    def _thread_status_total_bytes_attribute_name(self) -> str:
-        return f"thread.status.total_bytes.{self.path}"
-
     def processing_thread_status_mode(self) -> ThreadStatusMode:
         return "steerable"
-
-    async def _set_local_participant_attribute(
-        self,
-        attribute_name: str,
-        value: str | None,
-    ) -> None:
-        try:
-            await self._room.local_participant.set_attribute(attribute_name, value)
-        except ChanClosed:
-            logger.debug(
-                "room channel closed while setting thread status '%s'",
-                attribute_name,
-            )
-
-    def _pending_messages_payload(self) -> dict[str, Any] | None:
-        payload: dict[str, Any] = {}
-        if self._thread_status_turn_id_value is not None:
-            payload["turn_id"] = self._thread_status_turn_id_value
-        if len(self._thread_status_pending_messages_value) > 0:
-            payload["messages"] = self._thread_status_pending_messages_value
-        if len(payload) == 0:
-            return None
-        return payload
-
-    async def _write_pending_messages_attribute(self) -> None:
-        serialized_pending_messages: str | None = None
-        pending_messages_payload = self._pending_messages_payload()
-        if pending_messages_payload is not None:
-            serialized_pending_messages = json.dumps(
-                pending_messages_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-
-        await self._set_local_participant_attribute(
-            self._thread_status_pending_messages_attribute_name(),
-            serialized_pending_messages,
-        )
-
-    async def _write_thread_status_attributes(self) -> None:
-        await self._set_local_participant_attribute(
-            self._thread_status_attribute_name(),
-            self._thread_status_value,
-        )
-        await self._set_local_participant_attribute(
-            self._thread_status_text_attribute_name(),
-            self._thread_status_value,
-        )
-        await self._set_local_participant_attribute(
-            self._thread_status_mode_attribute_name(),
-            self._thread_status_mode_value,
-        )
-        await self._set_local_participant_attribute(
-            self._thread_status_started_at_attribute_name(),
-            self._thread_status_started_at_value,
-        )
-        await self._set_local_participant_attribute(
-            self._thread_status_pending_item_id_attribute_name(),
-            self._thread_status_pending_item_id_value,
-        )
-        await self._set_local_participant_attribute(
-            self._thread_status_total_bytes_attribute_name(),
-            (
-                str(self._thread_status_total_bytes_value)
-                if self._thread_status_total_bytes_value is not None
-                else None
-            ),
-        )
 
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._thread_status_lock:
@@ -2882,7 +2792,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 return
 
             self._thread_status_turn_id_value = turn_id
-            await self._write_pending_messages_attribute()
 
     async def set_pending_messages(
         self,
@@ -2901,7 +2810,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 return
 
             self._thread_status_pending_messages_value = normalized_pending_messages
-            await self._write_pending_messages_attribute()
 
     async def set_thread_status(
         self,
@@ -2916,7 +2824,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
             self._thread_status_started_at_value = None
             self._thread_status_pending_item_id_value = None
             self._thread_status_total_bytes_value = None
-            await self._write_thread_status_attributes()
             return
 
         normalized_status = status.strip()
@@ -2946,7 +2853,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._thread_status_mode_value = normalized_mode
         self._thread_status_started_at_value = started_at
         self._thread_status_total_bytes_value = normalized_total_bytes
-        await self._write_thread_status_attributes()
 
     def _next_thread_status_generation(self) -> int:
         self._thread_status_generation += 1

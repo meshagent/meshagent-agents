@@ -313,6 +313,7 @@ class AgentToolCallPending(AgentLLMMessage):
     toolkit: str
     tool: str
     arguments: Optional[dict] = None
+    argument_bytes: int | None = None
 
 
 class AgentToolCallInProgress(AgentLLMMessage):
@@ -324,6 +325,7 @@ class AgentToolCallInProgress(AgentLLMMessage):
     toolkit: str
     tool: str
     arguments: Optional[dict] = None
+    argument_bytes: int | None = None
 
 
 class AgentToolCallStarted(AgentLLMMessage):
@@ -335,6 +337,7 @@ class AgentToolCallStarted(AgentLLMMessage):
     toolkit: str
     tool: str
     arguments: Optional[dict] = None
+    argument_bytes: int | None = None
 
 
 class AgentToolCallArgumentsDelta(AgentLLMMessage):

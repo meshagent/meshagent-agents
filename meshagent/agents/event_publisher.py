@@ -132,6 +132,19 @@ def _tool_arguments_delta_text(value: Any) -> str:
         return str(value)
 
 
+def _json_snapshot_bytes(value: Any) -> int:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    except TypeError:
+        encoded = str(value).encode("utf-8")
+    return len(encoded)
+
+
 def _parse_tool_log_lines(value: Any) -> list[AgentToolCallLogLine]:
     if not isinstance(value, list):
         return []
@@ -466,6 +479,7 @@ class _ToolCallInfo:
     item_type: str | None = None
     call_id: str | None = None
     arguments: dict[str, Any] | None = None
+    argument_bytes: int | None = None
     error: AgentError | None = None
     result: Content | None = None
 
@@ -516,6 +530,7 @@ def _openai_tool_call_info(
             item_type=item_type,
             call_id=_as_str(item.get("call_id")),
             arguments=_parse_tool_arguments(item.get("arguments")),
+            argument_bytes=_json_snapshot_bytes(item),
             error=error,
             result=_content_from_tool_item(item),
         )
@@ -529,6 +544,7 @@ def _openai_tool_call_info(
             item_type=item_type,
             call_id=_as_str(item.get("call_id")),
             arguments=_parse_tool_arguments(item.get("arguments")),
+            argument_bytes=_json_snapshot_bytes(item),
             error=error,
             result=_content_from_tool_item(item),
         )
@@ -545,6 +561,7 @@ def _openai_tool_call_info(
                 item=item,
                 excluded_keys={"error", "id", "output", "status", "type"},
             ),
+            argument_bytes=_json_snapshot_bytes(item),
             error=error,
             result=_content_from_tool_item(item),
         )
@@ -572,6 +589,7 @@ def _openai_tool_call_info(
                 "type",
             },
         ),
+        argument_bytes=_json_snapshot_bytes(item),
         error=error,
         result=_content_from_tool_item(item),
     )
@@ -603,6 +621,7 @@ def _anthropic_tool_call_info(
             item_type=block_type,
             call_id=_as_str(block.get("id")),
             arguments=_parse_tool_arguments(block.get("input")),
+            argument_bytes=_json_snapshot_bytes(block),
         )
 
     if block_type == "mcp_tool_use":
@@ -622,6 +641,7 @@ def _anthropic_tool_call_info(
                 if block.get("input") is not None
                 else block.get("arguments")
             ),
+            argument_bytes=_json_snapshot_bytes(block),
         )
 
     if block_type.endswith("_tool_use"):
@@ -636,6 +656,7 @@ def _anthropic_tool_call_info(
                 item=block,
                 excluded_keys={"id", "name", "type"},
             ),
+            argument_bytes=_json_snapshot_bytes(block),
         )
 
     return None
@@ -845,6 +866,7 @@ class _AgentMessageEmitter:
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments,
+                argument_bytes=info.argument_bytes,
             )
         )
 
@@ -872,6 +894,7 @@ class _AgentMessageEmitter:
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments,
+                argument_bytes=info.argument_bytes,
             )
         )
 
@@ -900,6 +923,7 @@ class _AgentMessageEmitter:
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments,
+                argument_bytes=info.argument_bytes,
             )
         )
 
@@ -1520,6 +1544,7 @@ class _OpenAIAgentEventPublisher:
         if event_type in {
             "response.function_call_arguments.delta",
             "response.mcp_call.arguments.delta",
+            "response.shell_call_command.delta",
         }:
             item_id = self._item_id_from_event(event=event)
             if item_id is None:

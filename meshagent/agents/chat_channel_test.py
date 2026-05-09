@@ -424,13 +424,18 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         await channel._wait_for_thread_list_background_tasks()
         await _drain_background_tasks()
 
-        assert len(room.messaging.sent_messages) == 1
+        assert len(room.messaging.sent_messages) == 2
         response_payload = room.messaging.sent_messages[0]["message"]["payload"]
         assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
         assert response_payload["source_message_id"] == "start-thread-1"
         result_path = response_payload["thread_id"]
         assert isinstance(result_path, str)
         _assert_uuid_thread_path(path=result_path, prefix="/threads/chat/")
+        status_payload = room.messaging.sent_messages[1]["message"]["payload"]
+        assert status_payload["type"] == AGENT_EVENT_THREAD_STATUS
+        assert status_payload["thread_id"] == result_path
+        assert status_payload["status"] == "Starting a thread"
+        assert status_payload["turn_id"] is not None
 
         assert len(supervisor.sent) == 1
         sent = supervisor.sent[0]
@@ -440,6 +445,7 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert isinstance(turn, TurnStart)
         assert turn.message_id == "start-thread-1"
         assert turn.thread_id == result_path
+        assert turn.turn_id == status_payload["turn_id"]
         assert turn.content == [
             AgentTextContent(type="text", text="Plan this friendly thread"),
             AgentFileContent(type="file", url="room:///uploads/plan.md"),
@@ -496,14 +502,18 @@ async def test_chat_channel_start_thread_message_responds_when_storage_exists_st
         await channel._wait_for_thread_list_background_tasks()
         await _drain_background_tasks()
 
-        assert len(room.messaging.sent_messages) == 1
+        assert len(room.messaging.sent_messages) == 2
         response_payload = room.messaging.sent_messages[0]["message"]["payload"]
         assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
         assert response_payload["source_message_id"] == "start-thread-1"
         result_path = response_payload["thread_id"]
         assert isinstance(result_path, str)
         _assert_uuid_thread_path(path=result_path, prefix="agents/assistant/threads/")
-        assert storage.exists_calls == [result_path]
+        status_payload = room.messaging.sent_messages[1]["message"]["payload"]
+        assert status_payload["type"] == AGENT_EVENT_THREAD_STATUS
+        assert status_payload["thread_id"] == result_path
+        assert status_payload["status"] == "Starting a thread"
+        assert storage.exists_calls == []
         assert len(supervisor.sent) == 1
         assert supervisor.sent[0].data.thread_id == result_path
     finally:
@@ -555,8 +565,7 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
             prefix="dataset://agents/dataset/threads/",
         )
         assert "dataset:///" not in result_path
-        assert all(not path.startswith("dataset://") for path in storage.exists_calls)
-        assert storage.exists_calls[0].startswith("/agents/dataset/threads/")
+        assert storage.exists_calls == []
 
         await channel._wait_for_thread_list_background_tasks()
         await _drain_background_tasks()
@@ -645,8 +654,7 @@ async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
             prefix="tmp://agents/tmp/threads/",
         )
         assert "tmp:///" not in result_path
-        assert all(not path.startswith("tmp://") for path in storage.exists_calls)
-        assert storage.exists_calls[0].startswith("/agents/tmp/threads/")
+        assert storage.exists_calls == []
 
         await channel._wait_for_thread_list_background_tasks()
         await _drain_background_tasks()
@@ -1589,7 +1597,7 @@ async def test_chat_channel_agent_open_replays_coalesced_tool_argument_delta() -
                 data=AgentThreadStatus(
                     type=AGENT_EVENT_THREAD_STATUS,
                     thread_id="/threads/test.thread",
-                    status="Preparing Command",
+                    status="Preparing",
                     mode="busy",
                     started_at="2026-05-07T16:00:00Z",
                     turn_id="turn-1",
@@ -1617,7 +1625,7 @@ async def test_chat_channel_agent_open_replays_coalesced_tool_argument_delta() -
             AGENT_EVENT_THREAD_STATUS,
             AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
         ]
-        assert payloads[1]["status"] == "Preparing Command"
+        assert payloads[1]["status"] == "Preparing"
         assert payloads[1]["pending_item_id"] == "tool-1"
         assert payloads[2]["item_id"] == "tool-1"
         assert payloads[2]["delta"] == "abcdef"
