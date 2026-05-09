@@ -481,6 +481,39 @@ class _RecordingThreadStatusPublisher:
         self.clear_count += 1
 
 
+class _DelayedPreparingThreadStatusPublisher(_RecordingThreadStatusPublisher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_preparing_started = asyncio.Event()
+        self.release_first_preparing = asyncio.Event()
+        self._delayed_first_preparing = False
+
+    async def set_thread_status(
+        self,
+        *,
+        status: str | None,
+        mode=None,
+        pending_item_id: str | None = None,
+        total_bytes: int | None = None,
+    ) -> None:
+        if (
+            not self._delayed_first_preparing
+            and status == "Preparing to write src/app.py"
+            and pending_item_id == "write-tool"
+            and total_bytes is None
+        ):
+            self._delayed_first_preparing = True
+            self.first_preparing_started.set()
+            await self.release_first_preparing.wait()
+
+        await super().set_thread_status(
+            status=status,
+            mode=mode,
+            pending_item_id=pending_item_id,
+            total_bytes=total_bytes,
+        )
+
+
 class _LifecycleSession(AgentSessionContext):
     def __init__(self) -> None:
         super().__init__(system_role=None)
@@ -1096,10 +1129,13 @@ class _ImageGenerationStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
 
 class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
-    def __init__(self) -> None:
+    def __init__(
+        self, *, command: str | list[str] = "sed -n '1,20p' src/app.py"
+    ) -> None:
         self.session = _LifecycleSession()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.command = command
 
     def default_model(self) -> str:
         return "default-model"
@@ -1126,7 +1162,7 @@ class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
                     item_id="shell-tool",
                     toolkit="openai",
                     tool="shell",
-                    arguments={"action": {"command": "sed -n '1,20p' src/app.py"}},
+                    arguments={"action": {"command": self.command}},
                 )
             )
 
@@ -4742,6 +4778,52 @@ async def test_llm_agent_process_publishes_tool_status_from_agent_messages() -> 
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_publishes_tool_argument_snapshot_size() -> None:
+    adapter = _ShellStatusLLMAdapter(
+        command=[
+            "python",
+            "-c",
+            "from pathlib import Path; "
+            "Path('/tmp/meshagent_counter_probe.txt').write_text('x' * 256)",
+        ]
+    )
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write the file"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(status["status"], str)
+                and status["pending_item_id"] == "shell-tool"
+                and isinstance(status["total_bytes"], int)
+                and status["total_bytes"] > 100
+                for status in publisher.statuses
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_publishes_tool_argument_delta_size() -> None:
     adapter = _ToolArgumentDeltaStatusLLMAdapter()
     publisher = _RecordingThreadStatusPublisher()
@@ -4775,6 +4857,111 @@ async def test_llm_agent_process_publishes_tool_argument_delta_size() -> None:
 
         adapter.release.set()
         await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_keeps_tool_argument_delta_status_publish_order() -> (
+    None
+):
+    adapter = _ToolArgumentDeltaStatusLLMAdapter()
+    publisher = _DelayedPreparingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write the file"}],
+                )
+            )
+        )
+        await asyncio.wait_for(publisher.first_preparing_started.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+        assert not any(
+            status["status"] == "Preparing to write src/app.py"
+            and status["pending_item_id"] == "write-tool"
+            and status["total_bytes"] == 120
+            for status in publisher.statuses
+        )
+
+        publisher.release_first_preparing.set()
+        await _wait_for(
+            lambda: (
+                len(publisher.statuses) >= 2
+                and publisher.statuses[-1]["status"] == "Preparing to write src/app.py"
+                and publisher.statuses[-1]["pending_item_id"] == "write-tool"
+                and publisher.statuses[-1]["total_bytes"] == 120
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_tool_argument_delta_size_as_agent_message() -> (
+    None
+):
+    adapter = _ToolArgumentDeltaStatusLLMAdapter()
+    supervisor = _RecordingSupervisor()
+
+    def publish_thread_status(message: AgentMessage) -> None:
+        process.emit(sender=None, payload=message)
+
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=AgentMessageThreadStatusPublisher(
+            thread_id="thread-1",
+            publish=publish_thread_status,
+        ),
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write the file"}],
+                )
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                status["status"] == "Preparing to write src/app.py"
+                and status["pending_item_id"] == "write-tool"
+                and status["total_bytes"] == 120
+                for status in supervisor.payloads(
+                    message_type=AGENT_EVENT_THREAD_STATUS
+                )
+            )
+        )
+
+        adapter.release.set()
+        await _wait_for(
+            lambda: any(
+                status["status"] is None and status["total_bytes"] is None
+                for status in supervisor.payloads(
+                    message_type=AGENT_EVENT_THREAD_STATUS
+                )
+            )
+        )
     finally:
         await process.stop(supervisor)
 

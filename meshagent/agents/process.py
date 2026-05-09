@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import mimetypes
@@ -304,6 +305,19 @@ def _apply_patch_path(*, patch: str) -> str:
 
 def _status_total_bytes(total_bytes: int) -> int | None:
     return total_bytes if total_bytes > 100 else None
+
+
+def _tool_argument_snapshot_bytes(arguments: dict[str, Any] | None) -> int:
+    if arguments is None or len(arguments) == 0:
+        return 0
+    return len(
+        json.dumps(
+            arguments,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
 
 
 def _storage_status_text(
@@ -2405,19 +2419,18 @@ class LLMAgentProcess(AgentProcess):
                     if isinstance(message, AgentToolCallPending)
                     else "in_progress"
                 )
+                argument_total_bytes = max(
+                    self._status_tool_argument_delta_bytes_by_item_id.get(
+                        message.item_id, 0
+                    ),
+                    _tool_argument_snapshot_bytes(message.arguments),
+                )
                 self._status_tool_calls_by_item_id[message.item_id] = _StatusToolCall(
                     toolkit=message.toolkit,
                     tool=message.tool,
                     arguments=message.arguments,
                     state=state,
-                    argument_delta_bytes=self._status_tool_argument_delta_bytes_by_item_id.get(
-                        message.item_id, 0
-                    ),
-                )
-                argument_delta_bytes = (
-                    self._status_tool_argument_delta_bytes_by_item_id.get(
-                        message.item_id, 0
-                    )
+                    argument_delta_bytes=argument_total_bytes,
                 )
                 return (
                     _tool_status_text(
@@ -2427,7 +2440,7 @@ class LLMAgentProcess(AgentProcess):
                         arguments=message.arguments,
                     ),
                     message.item_id,
-                    _status_total_bytes(argument_delta_bytes),
+                    _status_total_bytes(argument_total_bytes),
                 )
 
             if isinstance(message, AgentToolCallArgumentsDelta):
@@ -2535,8 +2548,10 @@ class LLMAgentProcess(AgentProcess):
             self.emit(sender=sender, payload=message)
 
         thread_status_publisher = self.thread_status_publisher
+        thread_status_publish_tail: asyncio.Task[None] | None = None
 
         def publish_agent_message_status(message: AgentMessage) -> None:
+            nonlocal thread_status_publish_tail
             if thread_status_publisher is None:
                 return
 
@@ -2544,13 +2559,19 @@ class LLMAgentProcess(AgentProcess):
             if status is None:
                 return
             status_text, pending_item_id, total_bytes = status
-            asyncio.create_task(
-                thread_status_publisher.set_thread_status(
+            previous_publish = thread_status_publish_tail
+
+            async def publish_status_in_order() -> None:
+                if previous_publish is not None:
+                    with contextlib.suppress(Exception):
+                        await previous_publish
+                await thread_status_publisher.set_thread_status(
                     status=status_text,
                     pending_item_id=pending_item_id,
                     total_bytes=total_bytes,
                 )
-            )
+
+            thread_status_publish_tail = asyncio.create_task(publish_status_in_order())
 
         def publish_custom_event(event: dict[str, Any]) -> None:
             if self._interrupt_requested_turn_id == turn_id:

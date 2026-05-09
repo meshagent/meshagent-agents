@@ -1626,6 +1626,84 @@ async def test_chat_channel_agent_open_replays_coalesced_tool_argument_delta() -
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_agent_open_replays_status_total_bytes_with_coalesced_delta() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        await channel.on_message(
+            Message(
+                data=AgentToolCallPending(
+                    type=AGENT_EVENT_TOOL_CALL_PENDING,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="tool-1",
+                    toolkit="storage",
+                    tool="write_file",
+                    arguments={"path": "src/app.py"},
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentToolCallArgumentsDelta(
+                    type=AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="tool-1",
+                    delta="x" * 120,
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentThreadStatus(
+                    type=AGENT_EVENT_THREAD_STATUS,
+                    thread_id="/threads/test.thread",
+                    status="Preparing to write src/app.py",
+                    mode="busy",
+                    started_at="2026-05-07T16:00:00Z",
+                    turn_id="turn-1",
+                    pending_item_id="tool-1",
+                    total_bytes=120,
+                )
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        payloads = [sent["message"]["payload"] for sent in room.messaging.sent_messages]
+        assert [payload["type"] for payload in payloads] == [
+            AGENT_EVENT_TOOL_CALL_PENDING,
+            AGENT_EVENT_THREAD_STATUS,
+            AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+        ]
+        assert payloads[1]["status"] == "Preparing to write src/app.py"
+        assert payloads[1]["pending_item_id"] == "tool-1"
+        assert payloads[1]["total_bytes"] == 120
+        assert payloads[2]["item_id"] == "tool-1"
+        assert payloads[2]["delta"] == "x" * 120
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_agent_open_replays_current_thread_status() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
