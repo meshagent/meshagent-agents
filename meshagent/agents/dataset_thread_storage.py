@@ -40,8 +40,14 @@ from .messages import (
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AgentAudioGenerationDelta,
+    AgentAudioTranscriptionCompleted,
+    AgentAudioTranscriptionDelta,
+    AgentAudioTranscriptionFailed,
+    AgentAudioTranscriptionStarted,
     AgentContextCompacted,
     AgentError,
     AgentFileContentDelta,
@@ -53,6 +59,7 @@ from .messages import (
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
     AgentRealtimeAudioChunk,
+    AgentRealtimeAudioCommit,
     AgentThreadMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -295,6 +302,11 @@ class _StopQueue:
 
 
 @dataclass(slots=True)
+class _FlushQueue:
+    future: asyncio.Future[None]
+
+
+@dataclass(slots=True)
 class _ActiveContent:
     kind: Literal["text", "reasoning", "file"]
     turn_id: str
@@ -305,6 +317,23 @@ class _ActiveContent:
     sender_name: str | None = None
     phase: Literal["commentary", "final_answer"] | None = None
     parts: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _ActiveAudioTranscription:
+    turn_id: str
+    item_id: str
+    message_id: str
+    role: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    response_id: str | None = None
+    content_index: int | None = None
+    sender_name: str | None = None
+    status: Literal["in_progress", "completed", "cancelled", "failed"] = "in_progress"
+    status_detail: str | None = None
+    parts: list[str] = field(default_factory=list)
+    error: AgentError | None = None
 
 
 @dataclass(slots=True)
@@ -344,6 +373,7 @@ class DatasetThreadStorage(ThreadStorage):
         max_append_message_count: int = 25,
         optimize_after_append_count: int = 25,
         persist_deltas: bool = False,
+        persist_audio_input: bool = False,
     ) -> None:
         self._room = room
         normalized_path = _normalize_dataset_thread_storage_path(path=path)
@@ -355,21 +385,30 @@ class DatasetThreadStorage(ThreadStorage):
         self._max_append_message_count = max_append_message_count
         self._optimize_after_append_count = optimize_after_append_count
         self._persist_deltas = persist_deltas
+        self._persist_audio_input = persist_audio_input
         self._appends_since_optimize = 0
         self._optimize_requested = False
         self._optimize_task: asyncio.Task[None] | None = None
         self._ready = False
-        self._queue: asyncio.Queue[_QueuedThreadMessage | _StopQueue] = asyncio.Queue()
+        self._ready_task: asyncio.Task[None] | None = None
+        self._queue: asyncio.Queue[_QueuedThreadMessage | _StopQueue | _FlushQueue] = (
+            asyncio.Queue()
+        )
         self._processor_task: asyncio.Task[None] | None = None
         self._rows: list[_StoredThreadRow] = []
         self._next_sequence = 0
         self._pending_user_turns: dict[str, _QueuedThreadMessage] = {}
         self._pending_user_turn_rows: dict[str, _StoredThreadRow] = {}
+        self._pending_audio_commit_rows_by_turn_id: dict[str, _StoredThreadRow] = {}
         self._active_content_by_item_id: dict[str, _ActiveContent] = {}
+        self._active_audio_transcriptions_by_item_id: dict[
+            str, _ActiveAudioTranscription
+        ] = {}
         self._active_tool_calls_by_item_id: dict[str, _ActiveToolCall] = {}
         self._active_image_generations_by_item_id: dict[
             str, _ActiveImageGeneration
         ] = {}
+        self._pending_insert_rows: list[_StoredThreadRow] = []
 
     @property
     def path(self) -> str:
@@ -386,6 +425,10 @@ class DatasetThreadStorage(ThreadStorage):
     @property
     def persist_deltas(self) -> bool:
         return self._persist_deltas
+
+    @property
+    def persist_audio_input(self) -> bool:
+        return self._persist_audio_input
 
     def _schema(self) -> pa.Schema:
         return pa.schema(
@@ -410,13 +453,46 @@ class DatasetThreadStorage(ThreadStorage):
         )
 
     async def start(self) -> None:
-        await self._ensure_ready()
+        self._schedule_ready()
+        processor_task = self._processor_task
+        if processor_task is not None and not processor_task.done():
+            return
         self._processor_task = asyncio.create_task(self._process_queue())
+
+    async def wait_until_ready(self) -> None:
+        await self._ensure_ready()
+
+    async def flush(self) -> None:
+        processor_task = self._processor_task
+        if processor_task is None or processor_task.done():
+            await self._ensure_ready()
+            await self._flush_pending_insert_rows()
+            return
+
+        flush_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._queue.put_nowait(_FlushQueue(future=flush_future))
+        await flush_future
+
+    def unflushed_agent_messages(self) -> list[AgentThreadMessage]:
+        messages: list[AgentThreadMessage] = []
+        rows = [
+            *self._pending_insert_rows,
+            *self._pending_user_turn_rows.values(),
+            *self._pending_audio_commit_rows_by_turn_id.values(),
+        ]
+        seen_sequences: set[int] = set()
+        for row in sorted(rows, key=lambda stored: stored.sequence):
+            if row.sequence in seen_sequences:
+                continue
+            seen_sequences.add(row.sequence)
+            messages.extend(self._messages_from_row(row=row))
+        return messages
 
     async def stop(self) -> None:
         processor_task = self._processor_task
         if processor_task is None:
             await self._flush_all_active(reason="cancelled")
+            await self._flush_pending_insert_rows()
             await self._wait_for_optimize_task()
             return
 
@@ -443,6 +519,29 @@ class DatasetThreadStorage(ThreadStorage):
         await self.stop()
 
     async def _ensure_ready(self) -> None:
+        if self._ready:
+            return
+
+        self._schedule_ready()
+        ready_task = self._ready_task
+        if ready_task is None:
+            raise RuntimeError("dataset thread storage failed to schedule readiness")
+        try:
+            await ready_task
+        except Exception:
+            if self._ready_task is ready_task:
+                self._ready_task = None
+            raise
+
+    def _schedule_ready(self) -> None:
+        if self._ready:
+            return
+        ready_task = self._ready_task
+        if ready_task is not None and not ready_task.done():
+            return
+        self._ready_task = asyncio.create_task(self._load_ready())
+
+    async def _load_ready(self) -> None:
         if self._ready:
             return
 
@@ -574,20 +673,52 @@ class DatasetThreadStorage(ThreadStorage):
             logger.debug("dropping dataset thread message after queue shutdown")
 
     async def _process_queue(self) -> None:
+        await self._ensure_ready()
         while True:
             queued = await self._queue.get()
-            if isinstance(queued, _StopQueue):
-                try:
-                    await self._flush_all_active(reason="cancelled")
-                except Exception as exc:
-                    if not queued.future.done():
-                        queued.future.set_exception(exc)
-                else:
-                    if not queued.future.done():
-                        queued.future.set_result(None)
+            should_stop = await self._process_queued_item(queued=queued)
+            if should_stop:
                 return
 
-            await self._handle_message(message=queued.message, sender=queued.sender)
+            while True:
+                try:
+                    queued = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                should_stop = await self._process_queued_item(queued=queued)
+                if should_stop:
+                    return
+
+            await self._flush_pending_insert_rows()
+
+    async def _process_queued_item(
+        self, *, queued: _QueuedThreadMessage | _StopQueue | _FlushQueue
+    ) -> bool:
+        if isinstance(queued, _FlushQueue):
+            try:
+                await self._flush_pending_insert_rows()
+            except Exception as exc:
+                if not queued.future.done():
+                    queued.future.set_exception(exc)
+            else:
+                if not queued.future.done():
+                    queued.future.set_result(None)
+            return False
+
+        if isinstance(queued, _StopQueue):
+            try:
+                await self._flush_all_active(reason="cancelled")
+                await self._flush_pending_insert_rows()
+            except Exception as exc:
+                if not queued.future.done():
+                    queued.future.set_exception(exc)
+            else:
+                if not queued.future.done():
+                    queued.future.set_result(None)
+            return True
+
+        await self._handle_message(message=queued.message, sender=queued.sender)
+        return False
 
     async def _handle_message(
         self,
@@ -598,7 +729,9 @@ class DatasetThreadStorage(ThreadStorage):
         if isinstance(message, ThreadCleared):
             self._pending_user_turns.clear()
             self._pending_user_turn_rows.clear()
+            self._pending_audio_commit_rows_by_turn_id.clear()
             self._active_content_by_item_id.clear()
+            self._active_audio_transcriptions_by_item_id.clear()
             self._active_tool_calls_by_item_id.clear()
             await self._append_message_row(message=message)
             return
@@ -633,7 +766,10 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         if isinstance(message, TurnStartAccepted):
-            await self._flush_all_active(reason="completed")
+            await self._flush_all_active(
+                reason="completed",
+                flush_pending_audio_commits=False,
+            )
             await self._commit_pending_user_turn(
                 source_message_id=message.source_message_id,
                 turn_id=message.turn_id,
@@ -663,6 +799,30 @@ class DatasetThreadStorage(ThreadStorage):
             self._pending_user_turns.pop(message.source_message_id, None)
             self._pending_user_turn_rows.pop(message.source_message_id, None)
             await self._append_message_row(message=message)
+            return
+
+        if isinstance(message, AgentRealtimeAudioChunk):
+            if self._persist_audio_input:
+                await self._append_message_row(message=message)
+            return
+
+        if isinstance(message, AgentRealtimeAudioCommit):
+            queued = _QueuedThreadMessage(message=message, sender=sender)
+            self._pending_user_turns[message.message_id] = queued
+            row = await self._reserve_message_row(message=message)
+            self._pending_user_turn_rows[message.message_id] = row
+            return
+
+        if isinstance(
+            message,
+            (
+                AgentAudioTranscriptionStarted,
+                AgentAudioTranscriptionDelta,
+                AgentAudioTranscriptionCompleted,
+                AgentAudioTranscriptionFailed,
+            ),
+        ):
+            self._record_audio_transcription(message=message)
             return
 
         if isinstance(message, AgentTextContentStarted):
@@ -959,8 +1119,18 @@ class DatasetThreadStorage(ThreadStorage):
         accepted_message: TurnStartAccepted | TurnSteerAccepted,
     ) -> None:
         queued = self._pending_user_turns.pop(source_message_id, None)
-        del queued
         pending_row = self._pending_user_turn_rows.pop(source_message_id, None)
+        if (
+            queued is not None
+            and isinstance(queued.message, AgentRealtimeAudioCommit)
+            and pending_row is not None
+        ):
+            if turn_id is not None:
+                self._set_reserved_row_turn_id(row=pending_row, turn_id=turn_id)
+                self._pending_audio_commit_rows_by_turn_id[turn_id] = pending_row
+            await self._append_message_row(message=accepted_message, turn_id=turn_id)
+            return
+        del queued
         if turn_id is not None and pending_row is not None:
             await self._set_row_turn_id(row=pending_row, turn_id=turn_id)
         await self._append_message_row(message=accepted_message, turn_id=turn_id)
@@ -1210,6 +1380,8 @@ class DatasetThreadStorage(ThreadStorage):
         turn_id: str,
         reason: Literal["completed", "cancelled", "failed"],
     ) -> None:
+        await self._flush_turn_audio_transcriptions(turn_id=turn_id, reason=reason)
+
         content_item_ids = [
             item_id
             for item_id, active in self._active_content_by_item_id.items()
@@ -1238,13 +1410,216 @@ class DatasetThreadStorage(ThreadStorage):
         self,
         *,
         reason: Literal["completed", "cancelled", "failed"],
+        flush_pending_audio_commits: bool = True,
     ) -> None:
         for item_id in list(self._active_content_by_item_id):
             await self._flush_content_item(item_id=item_id, reason=reason)
+        for item_id in list(self._active_audio_transcriptions_by_item_id):
+            active = self._active_audio_transcriptions_by_item_id.get(item_id)
+            if active is not None:
+                await self._flush_turn_audio_transcriptions(
+                    turn_id=active.turn_id,
+                    reason=reason,
+                )
+        for turn_id in list(self._pending_audio_commit_rows_by_turn_id):
+            await self._flush_turn_audio_transcriptions(
+                turn_id=turn_id,
+                reason=reason,
+            )
+        if flush_pending_audio_commits:
+            self._flush_pending_audio_commit_rows(reason=reason)
         for item_id in list(self._active_tool_calls_by_item_id):
             await self._flush_tool_call(item_id=item_id, reason=reason)
         for item_id in list(self._active_image_generations_by_item_id):
             await self._flush_image_generation(item_id=item_id, reason=reason)
+
+    def _record_audio_transcription(
+        self,
+        *,
+        message: AgentAudioTranscriptionStarted
+        | AgentAudioTranscriptionDelta
+        | AgentAudioTranscriptionCompleted
+        | AgentAudioTranscriptionFailed,
+    ) -> None:
+        active = self._active_audio_transcriptions_by_item_id.get(message.item_id)
+        if active is None:
+            active = _ActiveAudioTranscription(
+                turn_id=message.turn_id,
+                item_id=message.item_id,
+                message_id=message.message_id,
+                role=message.role,
+                provider=message.provider,
+                model=message.model,
+                response_id=message.response_id,
+                content_index=message.content_index,
+                sender_name=message.sender_name,
+                status_detail=message.status_detail,
+            )
+            self._active_audio_transcriptions_by_item_id[message.item_id] = active
+
+        active.turn_id = message.turn_id
+        if active.role is None:
+            active.role = message.role
+        if active.provider is None:
+            active.provider = message.provider
+        if active.model is None:
+            active.model = message.model
+        if active.response_id is None:
+            active.response_id = message.response_id
+        if active.content_index is None:
+            active.content_index = message.content_index
+        if active.sender_name is None:
+            active.sender_name = message.sender_name
+        if message.status_detail is not None:
+            active.status_detail = message.status_detail
+
+        if isinstance(message, AgentAudioTranscriptionDelta):
+            active.parts = [
+                accumulate_text_delta(current="".join(active.parts), delta=message.text)
+            ]
+            active.status = "in_progress"
+        elif isinstance(message, AgentAudioTranscriptionCompleted):
+            if message.text is not None:
+                active.parts = [message.text]
+            active.status = "completed"
+        elif isinstance(message, AgentAudioTranscriptionFailed):
+            active.status = "failed"
+            active.error = message.error
+
+    async def _flush_turn_audio_transcriptions(
+        self,
+        *,
+        turn_id: str,
+        reason: Literal["completed", "cancelled", "failed"],
+    ) -> None:
+        item_ids = [
+            item_id
+            for item_id, active in self._active_audio_transcriptions_by_item_id.items()
+            if active.turn_id == turn_id
+        ]
+        if (
+            len(item_ids) == 0
+            and turn_id not in self._pending_audio_commit_rows_by_turn_id
+        ):
+            return
+
+        commit_row = self._pending_audio_commit_rows_by_turn_id.pop(turn_id, None)
+        user_transcriptions: list[_ActiveAudioTranscription] = []
+        for item_id in item_ids:
+            active = self._active_audio_transcriptions_by_item_id.pop(item_id)
+            if active.role == "user":
+                user_transcriptions.append(active)
+            else:
+                await self._append_audio_transcription_row(
+                    active=active,
+                    reason=reason,
+                )
+
+        if commit_row is None:
+            return
+
+        text = " ".join(
+            part
+            for part in (
+                "".join(active.parts).strip() for active in user_transcriptions
+            )
+            if part != ""
+        )
+        status: Literal["completed", "cancelled", "failed"]
+        status_detail: str | None = None
+        transcription_item_id: str | None = None
+        if any(active.status == "failed" for active in user_transcriptions):
+            status = "failed"
+            failed = next(
+                active for active in user_transcriptions if active.status == "failed"
+            )
+            status_detail = failed.status_detail
+            transcription_item_id = failed.item_id
+        elif reason == "cancelled":
+            status = "cancelled"
+        else:
+            status = "completed"
+        if transcription_item_id is None and len(user_transcriptions) > 0:
+            transcription_item_id = user_transcriptions[0].item_id
+        self._finalize_audio_commit_row(
+            row=commit_row,
+            text=text,
+            status=status,
+            status_detail=status_detail,
+            transcription_item_id=transcription_item_id,
+        )
+
+    def _flush_pending_audio_commit_rows(
+        self,
+        *,
+        reason: Literal["completed", "cancelled", "failed"],
+    ) -> None:
+        for message_id, queued in list(self._pending_user_turns.items()):
+            if not isinstance(queued.message, AgentRealtimeAudioCommit):
+                continue
+            row = self._pending_user_turn_rows.pop(message_id, None)
+            self._pending_user_turns.pop(message_id, None)
+            if row is None:
+                continue
+            status: Literal["completed", "cancelled", "failed"] = (
+                "failed" if reason == "failed" else "cancelled"
+            )
+            self._finalize_audio_commit_row(
+                row=row,
+                text="",
+                status=status,
+                status_detail="Audio turn did not complete",
+                transcription_item_id=None,
+            )
+
+    async def _append_audio_transcription_row(
+        self,
+        *,
+        active: _ActiveAudioTranscription,
+        reason: Literal["completed", "cancelled", "failed"],
+    ) -> None:
+        text = "".join(active.parts)
+        if text.strip() == "" and active.status != "failed":
+            return
+        status_detail = active.status_detail
+        if reason == "cancelled" and active.status != "completed":
+            status_detail = status_detail or "Audio transcription cancelled"
+        if active.status == "failed":
+            await self._append_message_row(
+                message=AgentAudioTranscriptionFailed(
+                    type=AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
+                    thread_id=self.path,
+                    turn_id=active.turn_id,
+                    item_id=active.item_id,
+                    message_id=active.message_id,
+                    response_id=active.response_id,
+                    content_index=active.content_index,
+                    role=active.role,
+                    provider=active.provider,
+                    model=active.model,
+                    sender_name=active.sender_name,
+                    error=active.error,
+                    status_detail=status_detail,
+                )
+            )
+            return
+        await self._append_message_row(
+            message=AgentAudioTranscriptionCompleted(
+                type=AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+                thread_id=self.path,
+                turn_id=active.turn_id,
+                item_id=active.item_id,
+                message_id=active.message_id,
+                response_id=active.response_id,
+                content_index=active.content_index,
+                role=active.role,
+                provider=active.provider,
+                model=active.model,
+                sender_name=active.sender_name,
+                text=text,
+                status_detail=status_detail,
+            )
+        )
 
     async def _flush_image_generation(
         self,
@@ -1272,6 +1647,22 @@ class DatasetThreadStorage(ThreadStorage):
             attachment=attachment,
         )
 
+    async def _reserve_message_row(
+        self,
+        *,
+        message: AgentThreadMessage,
+        turn_id: str | None = None,
+        item_id: str | None = None,
+    ) -> _StoredThreadRow:
+        data, attachment = self._message_row_data_and_attachment(message=message)
+        return await self._append_row(
+            turn_id=turn_id if turn_id is not None else self._message_turn_id(message),
+            item_id=item_id if item_id is not None else self._message_item_id(message),
+            data=data,
+            attachment=attachment,
+            queue_for_insert=False,
+        )
+
     @staticmethod
     def _message_row_data_and_attachment(
         *,
@@ -1294,6 +1685,7 @@ class DatasetThreadStorage(ThreadStorage):
                 TurnInterrupt,
                 TurnInterruptAccepted,
                 TurnInterrupted,
+                AgentRealtimeAudioCommit,
                 TurnSteerAccepted,
                 TurnSteered,
                 TurnSteerRejected,
@@ -1305,6 +1697,10 @@ class DatasetThreadStorage(ThreadStorage):
                 AgentTextContentStarted,
                 AgentTextContentDelta,
                 AgentTextContentEnded,
+                AgentAudioTranscriptionStarted,
+                AgentAudioTranscriptionDelta,
+                AgentAudioTranscriptionCompleted,
+                AgentAudioTranscriptionFailed,
                 AgentFileContentStarted,
                 AgentFileContentDelta,
                 AgentFileContentEnded,
@@ -1338,6 +1734,10 @@ class DatasetThreadStorage(ThreadStorage):
                 AgentTextContentStarted,
                 AgentTextContentDelta,
                 AgentTextContentEnded,
+                AgentAudioTranscriptionStarted,
+                AgentAudioTranscriptionDelta,
+                AgentAudioTranscriptionCompleted,
+                AgentAudioTranscriptionFailed,
                 AgentFileContentStarted,
                 AgentFileContentDelta,
                 AgentFileContentEnded,
@@ -1363,8 +1763,8 @@ class DatasetThreadStorage(ThreadStorage):
         item_id: str,
         data: dict[str, Any],
         attachment: bytes | None = None,
+        queue_for_insert: bool = True,
     ) -> _StoredThreadRow:
-        await self._ensure_ready()
         timestamp = _now_iso()
         sequence = self._next_sequence
         self._next_sequence += 1
@@ -1380,6 +1780,18 @@ class DatasetThreadStorage(ThreadStorage):
             data=data,
             attachment=attachment,
         )
+        if queue_for_insert:
+            self._pending_insert_rows.append(row)
+        self._rows.append(row)
+        self._rows.sort(key=lambda stored: stored.sequence)
+        return row
+
+    async def _flush_pending_insert_rows(self) -> None:
+        await self._ensure_ready()
+        rows = self._pending_insert_rows
+        if len(rows) == 0:
+            return
+        rows = sorted(rows, key=lambda stored: stored.sequence)
         await self._room.datasets.insert(
             table=self._table_name,
             namespace=self._namespace,
@@ -1393,16 +1805,17 @@ class DatasetThreadStorage(ThreadStorage):
                     "data": DatasetJson(row.data),
                     "attachment": row.attachment,
                 }
+                for row in rows
             ],
         )
-        self._rows.append(row)
-        self._rows.sort(key=lambda stored: stored.sequence)
-        self._note_appended_row()
-        return row
+        del self._pending_insert_rows[: len(rows)]
+        for _ in rows:
+            self._note_appended_row()
 
     async def _set_row_turn_id(self, *, row: _StoredThreadRow, turn_id: str) -> None:
         if row.turn_id == turn_id and row.data.get("turn_id") == turn_id:
             return
+        await self._flush_pending_insert_rows()
         updated_data = {**row.data, "turn_id": turn_id}
         await self._room.datasets.update(
             table=self._table_name,
@@ -1412,6 +1825,31 @@ class DatasetThreadStorage(ThreadStorage):
         )
         row.turn_id = turn_id
         row.data = updated_data
+
+    def _set_reserved_row_turn_id(self, *, row: _StoredThreadRow, turn_id: str) -> None:
+        if row.turn_id == turn_id and row.data.get("turn_id") == turn_id:
+            return
+        row.turn_id = turn_id
+        row.data = {**row.data, "turn_id": turn_id}
+
+    def _finalize_audio_commit_row(
+        self,
+        *,
+        row: _StoredThreadRow,
+        text: str,
+        status: Literal["completed", "cancelled", "failed"],
+        status_detail: str | None,
+        transcription_item_id: str | None,
+    ) -> None:
+        row.data = {
+            **row.data,
+            "text": text,
+            "status": status,
+            "status_detail": status_detail,
+            "transcription_item_id": transcription_item_id,
+        }
+        if row not in self._pending_insert_rows:
+            self._pending_insert_rows.append(row)
 
     def _note_appended_row(self) -> None:
         if self._optimize_after_append_count <= 0:
@@ -1515,6 +1953,7 @@ class DatasetThreadStorage(ThreadStorage):
         context: AgentSessionContext,
         llm_adapter: "LLMAdapter[Any] | None" = None,
     ) -> None:
+        await self._ensure_ready()
         if llm_adapter is None:
             self.restore_session_context(context=context)
             return

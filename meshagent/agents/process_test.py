@@ -55,10 +55,13 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STEER_REJECTED,
     AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+    AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
     AGENT_MESSAGE_TURN_INTERRUPT,
@@ -66,12 +69,16 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_TURN_STEER,
     ApproveAgentToolCall,
     AgentError,
+    AgentAudioTranscriptionCompleted,
     AgentContextCompacted,
+    AgentContextWindowUsage,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
     AgentMessage,
     AgentModelChanged,
+    AgentRealtimeAudioChunk,
+    AgentRealtimeAudioCommit,
     AgentTextContent,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -87,6 +94,7 @@ from meshagent.agents.messages import (
     AgentToolCallEnded,
     AgentThreadEvent,
     AgentThreadStatus,
+    AgentUsageUpdated,
     ClearThread,
     CloseThread,
     OpenThread,
@@ -162,6 +170,7 @@ class _RecordingChannel(_LifecycleChannel):
         super().__init__()
         self.handled_type = handled_type
         self.received: list[Message] = []
+        self.buffered: list[Message] = []
         self.message_event = asyncio.Event()
 
     def handles(self, message: Message) -> bool:
@@ -173,6 +182,9 @@ class _RecordingChannel(_LifecycleChannel):
     async def on_message(self, message: Message) -> None:
         self.received.append(message)
         self.message_event.set()
+
+    def buffer_agent_event(self, *, message: Message) -> None:
+        self.buffered.append(message)
 
 
 class _ThreadOpenResponseChannel(_RecordingChannel):
@@ -300,6 +312,7 @@ class _LifecycleThreadStorage:
         self._path = path
         self.started = 0
         self.stopped = 0
+        self.flushed = 0
         self.messages: list[AgentMessage] = []
 
     @property
@@ -311,6 +324,12 @@ class _LifecycleThreadStorage:
 
     async def stop(self) -> None:
         self.stopped += 1
+
+    async def flush(self) -> None:
+        self.flushed += 1
+
+    def unflushed_agent_messages(self) -> list[AgentMessage]:
+        return [*self.messages]
 
     def push_message(
         self,
@@ -682,6 +701,40 @@ class _AttachmentRecordingSession(_LifecycleSession):
         return message
 
 
+class _RealtimeAudioRecordingSession(_LifecycleSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.audio_chunk_calls: list[dict[str, Any]] = []
+        self.commit_calls = 0
+        self.event_handler = None
+
+    @property
+    def supports_realtime_audio(self) -> bool:
+        return True
+
+    async def append_realtime_audio_chunk(
+        self, *, mime_type: str, data: bytes, sample_rate: int | None = None
+    ) -> None:
+        self.audio_chunk_calls.append(
+            {
+                "mime_type": mime_type,
+                "data": data,
+                "sample_rate": sample_rate,
+            }
+        )
+
+    async def commit_realtime_audio(self) -> None:
+        self.commit_calls += 1
+        if self.event_handler is not None:
+            self.event_handler(
+                {
+                    "type": "input_audio_transcription.completed",
+                    "item_id": "user-audio-1",
+                    "text": "hello from audio",
+                }
+            )
+
+
 class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(self, *, session: _LifecycleSession | None = None) -> None:
         self.session = session if session is not None else _LifecycleSession()
@@ -771,6 +824,40 @@ class _AudioRecordingLLMAdapter(_RecordingLLMAdapter):
                 modalities=("text", "audio"),
             )
         ]
+
+    async def start_session(
+        self,
+        *,
+        context: AgentSessionContext,
+        event_handler=None,
+    ) -> None:
+        await super().start_session(context=context, event_handler=event_handler)
+        if isinstance(context, _RealtimeAudioRecordingSession):
+            context.event_handler = event_handler
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            if event["type"] == "input_audio_transcription.completed":
+                callback(
+                    AgentAudioTranscriptionCompleted(
+                        type=AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id=event["item_id"],
+                        role="user",
+                        text=event["text"],
+                    )
+                )
+
+        return publish
 
 
 class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
@@ -2543,6 +2630,41 @@ async def test_agent_supervisor_route_initializes_thread_storage_before_returnin
 
 
 @pytest.mark.asyncio
+async def test_agent_supervisor_route_buffers_unflushed_storage_before_thread_open_reaches_channel() -> (
+    None
+):
+    thread_storage = _LifecycleThreadStorage(path="/threads/created")
+    unflushed = AgentUsageUpdated(
+        type=AGENT_EVENT_USAGE_UPDATED,
+        thread_id="/threads/created",
+        usage={},
+        context_window=AgentContextWindowUsage(used_tokens=0),
+    )
+    thread_storage.messages.append(unflushed)
+    supervisor = _StorageThreadCreatingSupervisor(thread_storage=thread_storage)
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+    try:
+        open_thread = OpenThread(
+            type=AGENT_MESSAGE_THREAD_OPEN,
+            thread_id="/threads/created",
+        )
+
+        await supervisor.route(Message(data=open_thread))
+
+        assert thread_storage.flushed == 0
+        assert len(channel.buffered) == 1
+        assert channel.buffered[0].data is unflushed
+        await asyncio.wait_for(channel.message_event.wait(), timeout=1)
+        assert len(channel.received) == 1
+        assert channel.received[0].data is open_thread
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_process_enriches_received_messages_with_sender_name() -> None:
     thread_storage = _LifecycleThreadStorage(path="thread-1")
     supervisor = AgentSupervisor()
@@ -3340,10 +3462,12 @@ async def test_llm_agent_process_stops_adapter_session_on_thread_close() -> None
     adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
     room = _DownloadRecordingRoom()
+    thread_storage = _LifecycleThreadStorage(path="thread-1")
     process = _make_llm_agent_process(
         room=room,
         thread_id="thread-1",
         llm_adapter=adapter,
+        thread_storage=thread_storage,
     )
 
     await process.start(supervisor)
@@ -3371,6 +3495,7 @@ async def test_llm_agent_process_stops_adapter_session_on_thread_close() -> None
 
     assert adapter.call_order == ["start_session", "stop_session"]
     assert adapter.stop_session_calls == [{"context": adapter.session}]
+    assert thread_storage.stopped == 1
 
     await process.stop(supervisor)
 
@@ -5104,6 +5229,128 @@ async def test_llm_agent_process_handles_audio_file_attachments_as_files() -> No
     ]
 
     await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None:
+    session = _RealtimeAudioRecordingSession()
+    adapter = _AudioRecordingLLMAdapter(session=session)
+    supervisor = _RecordingSupervisor()
+    thread_status_publisher = _RecordingThreadStatusPublisher()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=thread_status_publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=AgentRealtimeAudioChunk(
+                    type=AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+                    thread_id="thread-1",
+                    message_id="audio-chunk-1",
+                    data=b"pcm-bytes",
+                    mime_type="audio/pcm",
+                    sample_rate=24000,
+                ),
+            )
+        )
+        process.send(
+            Message(
+                data=AgentRealtimeAudioCommit(
+                    type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+                    thread_id="thread-1",
+                    message_id="audio-commit-1",
+                    output_modalities=["text"],
+                ),
+            )
+        )
+
+        await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+        await _wait_for(
+            lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+        )
+    finally:
+        await process.stop(supervisor)
+
+    assert session.audio_chunk_calls == [
+        {
+            "mime_type": "audio/pcm",
+            "data": b"pcm-bytes",
+            "sample_rate": 24000,
+        }
+    ]
+    assert session.commit_calls == 1
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0]["options"] == {"output_modalities": ["text"]}
+    assert len(adapter.start_session_calls) == 3
+    assert adapter.start_session_calls[0]["event_handler"] is None
+    assert adapter.start_session_calls[1]["event_handler"] is None
+    assert callable(adapter.start_session_calls[2]["event_handler"])
+    assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_START_ACCEPTED)) == 1
+    assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)) == 1
+    assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    assert thread_status_publisher.statuses[:3] == [
+        {
+            "status": "Receiving audio",
+            "mode": "busy",
+            "pending_item_id": None,
+            "total_bytes": None,
+            "lines_added": None,
+            "lines_removed": None,
+        },
+        {
+            "status": "Processing audio",
+            "mode": "busy",
+            "pending_item_id": None,
+            "total_bytes": None,
+            "lines_added": None,
+            "lines_removed": None,
+        },
+        {
+            "status": "Thinking",
+            "mode": None,
+            "pending_item_id": None,
+            "total_bytes": None,
+            "lines_added": None,
+            "lines_removed": None,
+        },
+    ]
+    audio_transcriptions = supervisor.payloads(
+        message_type=AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED
+    )
+    assert audio_transcriptions == [
+        {
+            "content_index": None,
+            "item_id": "user-audio-1",
+            "message_id": audio_transcriptions[0]["message_id"],
+            "model": "default-model",
+            "provider": "test-provider",
+            "response_id": None,
+            "role": "user",
+            "sender_name": "assistant",
+            "status_detail": None,
+            "text": "hello from audio",
+            "thread_id": "thread-1",
+            "turn_id": supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0][
+                "turn_id"
+            ],
+            "type": AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+        }
+    ]
+    emitted_types = [message.data.type for message in supervisor.sent]
+    assert emitted_types.index(AGENT_EVENT_TURN_START_ACCEPTED) < emitted_types.index(
+        AGENT_EVENT_TURN_STARTED
+    )
+    assert emitted_types.index(AGENT_EVENT_TURN_STARTED) < emitted_types.index(
+        AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED
+    )
+    assert emitted_types.index(AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED) < (
+        emitted_types.index(AGENT_EVENT_TURN_ENDED)
+    )
 
 
 def test_llm_agent_process_accepts_generic_thread_adapter() -> None:

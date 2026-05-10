@@ -374,6 +374,13 @@ def _humanize_name(name: str) -> str:
     return name.replace("_", " ").strip().lower()
 
 
+def _capitalize_headline_fragment(text: str) -> str:
+    text = text.strip()
+    if text == "":
+        return ""
+    return text[0].upper() + text[1:]
+
+
 def _normalize_positive_dimension(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -2574,7 +2581,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 headline = f"Calling {humanized}"
             elif state == "failed":
                 if humanized != "":
-                    headline = f"Attempted to call {humanized}"
+                    headline = (
+                        f"Attempted to call {_capitalize_headline_fragment(humanized)}"
+                    )
                 else:
                     headline = "Attempted to call tool"
             elif state == "cancelled":

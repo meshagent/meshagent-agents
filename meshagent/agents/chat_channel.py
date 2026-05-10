@@ -45,6 +45,7 @@ from .messages import (
     AgentAudioGenerationDelta,
     AgentMessage,
     AgentRealtimeAudioChunk,
+    AgentRealtimeAudioCommit,
     AgentTextContent,
     AgentThreadMessage,
     CloseThread,
@@ -68,10 +69,6 @@ from .threaded_channel import ThreadedChannel
 
 logger = logging.getLogger("chat-channel")
 _MessageT = TypeVar("_MessageT", bound=AgentMessage)
-
-
-class _AgentMessageEnvelope(BaseModel):
-    payload: dict[str, Any]
 
 
 class _ChatAttachmentPayload(BaseModel):
@@ -180,6 +177,14 @@ class ChatChannel(ThreadedChannel):
     async def on_message(self, message: Message) -> None:
         self._publish_agent_event_to_open_participants(message=message)
 
+    def buffer_agent_event(self, *, message: Message) -> None:
+        self._track_agent_event(message=message)
+        payload = self._outbound_agent_message_payload(message=message)
+        if self._should_buffer_agent_event(payload=payload):
+            if self._has_buffered_agent_event(payload=payload):
+                return
+            self._buffer_agent_event(payload=payload)
+
     def _publish_agent_event_to_open_participants(self, *, message: Message) -> None:
         self._track_agent_event(message=message)
         payload = self._outbound_agent_message_payload(message=message)
@@ -284,7 +289,7 @@ class ChatChannel(ThreadedChannel):
             self.room.messaging.send_message_nowait(
                 to=participant,
                 type="agent-message",
-                message={"payload": payload},
+                message=payload,
                 attachment=attachment,
             )
         except Exception:
@@ -343,6 +348,28 @@ class ChatChannel(ThreadedChannel):
         buffer.append(dict(payload))
         if len(buffer) > self._max_event_buffer_size:
             del buffer[: len(buffer) - self._max_event_buffer_size]
+
+    def _has_buffered_agent_event(self, *, payload: dict[str, Any]) -> bool:
+        thread_id = payload.get("thread_id")
+        message_type = payload.get("type")
+        if not isinstance(thread_id, str) or not isinstance(message_type, str):
+            return False
+
+        identity_fields = ("message_id", "item_id", "source_message_id", "turn_id")
+        identity = {
+            field: payload.get(field)
+            for field in identity_fields
+            if isinstance(payload.get(field), str)
+        }
+        if len(identity) == 0:
+            return False
+
+        for buffered in self._event_buffer_by_thread.get(thread_id, []):
+            if buffered.get("type") != message_type:
+                continue
+            if all(buffered.get(field) == value for field, value in identity.items()):
+                return True
+        return False
 
     @staticmethod
     def _should_buffer_agent_event(*, payload: dict[str, Any]) -> bool:
@@ -459,8 +486,13 @@ class ChatChannel(ThreadedChannel):
         self._track_inbound_agent_message(message=agent_message, sender=sender)
         self._broadcast_inbound_turn_input(message=agent_message, sender=sender)
         if (
-            isinstance(agent_message, AgentRealtimeAudioChunk)
-            and agent_message.final
+            isinstance(
+                agent_message, (AgentRealtimeAudioChunk, AgentRealtimeAudioCommit)
+            )
+            and (
+                not isinstance(agent_message, AgentRealtimeAudioChunk)
+                or agent_message.final
+            )
             and agent_message.thread_id in self._pending_thread_list_paths
         ):
             self._schedule_pending_thread_list_entry(
@@ -541,8 +573,11 @@ class ChatChannel(ThreadedChannel):
         message: RoomMessage,
         sender: Participant,
     ) -> bool:
-        envelope = _AgentMessageEnvelope.model_validate(message.message)
-        payload = self._normalize_agent_message_payload(payload=envelope.payload)
+        raw_payload = self._payload_from_agent_room_message(message=message)
+        if raw_payload is None:
+            return False
+
+        payload = self._normalize_agent_message_payload(payload=raw_payload)
         message_type = payload.get("type")
         if not isinstance(message_type, str):
             return False
@@ -935,14 +970,31 @@ class ChatChannel(ThreadedChannel):
         return normalized_payload
 
     @staticmethod
-    def _thread_id_from_room_message(*, message: RoomMessage) -> str | None:
+    def _payload_from_agent_room_message(
+        *,
+        message: RoomMessage,
+    ) -> dict[str, Any] | None:
+        if not isinstance(message.message, dict):
+            return None
+
+        raw_payload = message.message.get("payload")
+        if "type" not in message.message and isinstance(raw_payload, dict):
+            logger.warning(
+                "received deprecated agent-message payload wrapper; send agent "
+                "message fields at the top level"
+            )
+            return raw_payload
+
+        return message.message
+
+    @classmethod
+    def _thread_id_from_room_message(cls, *, message: RoomMessage) -> str | None:
         if message.type == "agent-message":
-            try:
-                envelope = _AgentMessageEnvelope.model_validate(message.message)
-            except Exception:
+            payload = cls._payload_from_agent_room_message(message=message)
+            if payload is None:
                 return None
 
-            raw_thread_id = envelope.payload.get("thread_id")
+            raw_thread_id = payload.get("thread_id")
             if not isinstance(raw_thread_id, str):
                 return None
 
@@ -974,12 +1026,11 @@ class ChatChannel(ThreadedChannel):
         if message.type != "agent-message":
             return False
 
-        try:
-            envelope = _AgentMessageEnvelope.model_validate(message.message)
-        except Exception:
+        payload = cls._payload_from_agent_room_message(message=message)
+        if payload is None:
             return False
 
-        payload_type = envelope.payload.get("type")
+        payload_type = payload.get("type")
         if not isinstance(payload_type, str):
             return False
 
@@ -990,8 +1041,11 @@ class ChatChannel(ThreadedChannel):
         *,
         message: RoomMessage,
     ) -> AgentMessage:
-        envelope = _AgentMessageEnvelope.model_validate(message.message)
-        payload = self._normalize_agent_message_payload(payload=envelope.payload)
+        raw_payload = self._payload_from_agent_room_message(message=message)
+        if raw_payload is None:
+            raise ValueError("agent-message payload must be a JSON object")
+
+        payload = self._normalize_agent_message_payload(payload=raw_payload)
         message_type = payload.get("type")
         if not isinstance(message_type, str):
             raise ValueError("agent-message payload must include a string type")

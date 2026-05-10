@@ -26,6 +26,7 @@ AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
 AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
 AGENT_MESSAGE_REALTIME_AUDIO_CHUNK = "meshagent.agent.realtime_audio.chunk"
+AGENT_MESSAGE_REALTIME_AUDIO_COMMIT = "meshagent.agent.realtime_audio.commit"
 AGENT_MESSAGE_THREAD_START = "meshagent.agent.thread.start"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
 AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
@@ -163,6 +164,21 @@ class AgentRealtimeAudioChunk(AgentThreadMessage):
     mime_type: str = "audio/pcm"
     sample_rate: int = 24000
     final: bool = False
+    output_modalities: list[Literal["text", "audio"]] | None = Field(
+        default=None,
+        max_length=1,
+    )
+
+
+class AgentRealtimeAudioCommit(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_REALTIME_AUDIO_COMMIT]
+    turn_id: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    text: str | None = None
+    status: Literal["in_progress", "completed", "cancelled", "failed"] | None = None
+    status_detail: str | None = None
+    transcription_item_id: str | None = None
     output_modalities: list[Literal["text", "audio"]] | None = Field(
         default=None,
         max_length=1,
@@ -696,6 +712,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_TURN_STEER: TurnSteer,
     AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK: AgentRealtimeAudioChunk,
+    AGENT_MESSAGE_REALTIME_AUDIO_COMMIT: AgentRealtimeAudioCommit,
     AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,

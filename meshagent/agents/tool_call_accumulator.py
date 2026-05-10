@@ -203,6 +203,15 @@ def _apply_patch_line_counts(
 def tool_status_text(
     *, state: str, toolkit: str, tool: str, arguments: dict[str, Any] | None
 ) -> str:
+    storage_text = _storage_status_text(
+        state=state,
+        toolkit=toolkit,
+        tool=tool,
+        arguments=arguments,
+    )
+    if storage_text is not None:
+        return storage_text
+
     normalized_tool = tool.strip().lower()
     if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
         command = _extract_tool_command(tool=normalized_tool, arguments=arguments)
@@ -237,6 +246,17 @@ def tool_status_text(
             return "Patch cancelled"
         return "Applying patch" if state in _ACTIVE_STATES else "Applied patch"
 
+    if normalized_tool == "image_generation":
+        if state == "pending":
+            return "Preparing image generation"
+        if state in _ACTIVE_STATES:
+            return "Generating image"
+        if state == "failed":
+            return "Attempted to generate image"
+        if state == "cancelled":
+            return "Image generation cancelled"
+        return "Generated image"
+
     humanized = tool.strip().replace("_", " ").replace("-", " ")
     if state == "pending":
         return f"Preparing {humanized}" if humanized != "" else "Preparing tool call"
@@ -253,25 +273,79 @@ def tool_status_text(
     return f"Called {humanized}" if humanized != "" else "Called tool"
 
 
+def _storage_status_text(
+    *,
+    state: str,
+    toolkit: str,
+    tool: str,
+    arguments: dict[str, Any] | None,
+) -> str | None:
+    if arguments is None or toolkit.strip().lower() != "storage":
+        return None
+
+    normalized_tool = tool.strip().lower()
+    if normalized_tool == "grep_file":
+        path = arguments.get("path")
+        if not isinstance(path, str) or path.strip() == "":
+            return "Preparing" if state == "pending" else None
+        normalized_path = path.strip()
+        if state == "pending":
+            return f"Preparing to search {normalized_path}"
+        if state in _ACTIVE_STATES:
+            return f"Searching {normalized_path}"
+        if state == "failed":
+            return f"Attempted to search file {normalized_path}"
+        if state == "cancelled":
+            return f"Cancelled searching file {normalized_path}"
+        return f"Searched {normalized_path}"
+
+    if normalized_tool not in {"read_file", "write_file"}:
+        return None
+
+    path = arguments.get("path")
+    if not isinstance(path, str) or path.strip() == "":
+        return "Preparing" if state == "pending" else None
+    normalized_path = path.strip()
+    operation = "read" if normalized_tool == "read_file" else "write"
+    present = "Reading" if operation == "read" else "Writing"
+    past = "Read" if operation == "read" else "Wrote"
+
+    if state == "pending":
+        return f"Preparing to {operation} {normalized_path}"
+    if state in _ACTIVE_STATES:
+        return f"{present} {normalized_path}"
+    if state == "failed":
+        return f"Attempted to {operation} file {normalized_path}"
+    if state == "cancelled":
+        return f"Cancelled {operation}ing file {normalized_path}"
+    return f"{past} {normalized_path}"
+
+
 class ToolCallAccumulator:
     def __init__(self) -> None:
         self._calls: dict[str, AccumulatedToolCall] = {}
         self._delta_bytes_by_item_id: dict[str, int] = {}
+        self._snapshot_bytes_by_item_id: dict[str, int] = {}
         self._delta_text_by_item_id: dict[str, str] = {}
 
     def clear(self) -> None:
         self._calls.clear()
         self._delta_bytes_by_item_id.clear()
+        self._snapshot_bytes_by_item_id.clear()
         self._delta_text_by_item_id.clear()
 
     def get(self, item_id: str) -> AccumulatedToolCall | None:
         return self._calls.get(item_id)
 
     def total_bytes(self, item_id: str) -> int:
-        return self._delta_bytes_by_item_id.get(item_id, 0)
+        return max(
+            self._delta_bytes_by_item_id.get(item_id, 0),
+            self._snapshot_bytes_by_item_id.get(item_id, 0),
+        )
 
     def remove(self, item_id: str) -> AccumulatedToolCall | None:
         self._delta_bytes_by_item_id.pop(item_id, None)
+        self._snapshot_bytes_by_item_id.pop(item_id, None)
         self._delta_text_by_item_id.pop(item_id, None)
         return self._calls.pop(item_id, None)
 
@@ -302,20 +376,18 @@ class ToolCallAccumulator:
             )
             if updated is not None:
                 merged_arguments = updated
-        total_bytes = max(
-            self._delta_bytes_by_item_id.get(item_id, 0),
-            _json_snapshot_bytes(merged_arguments),
-            argument_bytes or 0,
+        snapshot_bytes = max(
+            _json_snapshot_bytes(merged_arguments), argument_bytes or 0
         )
-        if total_bytes > 0:
-            self._delta_bytes_by_item_id[item_id] = total_bytes
+        if snapshot_bytes > 0:
+            self._snapshot_bytes_by_item_id[item_id] = snapshot_bytes
         call = AccumulatedToolCall(
             item_id=item_id,
             toolkit=toolkit,
             tool=tool,
             arguments=merged_arguments,
             state=state,
-            argument_bytes=total_bytes,
+            argument_bytes=self.total_bytes(item_id),
             argument_delta_text=delta_text,
         )
         self._calls[item_id] = call
@@ -393,6 +465,7 @@ class ToolCallAccumulator:
             item_id=item_id,
             total_bytes=status_total_bytes(
                 self._delta_bytes_by_item_id.get(item_id, 0)
+                or self._snapshot_bytes_by_item_id.get(item_id, 0)
             ),
             lines_added=lines_added,
             lines_removed=lines_removed,

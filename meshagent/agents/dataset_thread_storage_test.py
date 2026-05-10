@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -20,6 +21,8 @@ from meshagent.agents.images_dataset import ImagesDataset
 from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -38,9 +41,12 @@ from meshagent.agents.messages import (
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+    AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
     AGENT_MESSAGE_TURN_STEER,
     AgentContextWindowUsage,
     AgentAudioGenerationDelta,
+    AgentAudioTranscriptionCompleted,
+    AgentAudioTranscriptionDelta,
     AgentContextCompacted,
     AgentError,
     AgentGeneratedImage,
@@ -48,6 +54,7 @@ from meshagent.agents.messages import (
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
     AgentRealtimeAudioChunk,
+    AgentRealtimeAudioCommit,
     AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
@@ -76,6 +83,7 @@ class _FakeDatasets:
         self.schemas: dict[tuple[tuple[str, ...], str], pa.Schema] = {}
         self.rows: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
         self.create_calls: list[dict[str, Any]] = []
+        self.insert_calls: list[dict[str, Any]] = []
         self.optimize_calls: list[dict[str, Any]] = []
         self.update_calls: list[dict[str, Any]] = []
         self.raise_on_existing_create = False
@@ -166,6 +174,13 @@ class _FakeDatasets:
         records: list[dict[str, Any]],
         namespace: list[str] | None = None,
     ) -> None:
+        self.insert_calls.append(
+            {
+                "table": table,
+                "records": records,
+                "namespace": namespace,
+            }
+        )
         key = self._key(table=table, namespace=namespace)
         self.rows.setdefault(key, []).extend(
             [self._stored_record(record) for record in records]
@@ -221,9 +236,44 @@ class _FakeDatasets:
         )
 
 
-class _FakeRoom:
+class _BlockingInspectDatasets(_FakeDatasets):
     def __init__(self) -> None:
-        self.datasets = _FakeDatasets()
+        super().__init__()
+        self.inspect_started = asyncio.Event()
+        self.inspect_release = asyncio.Event()
+
+    async def inspect(
+        self,
+        *,
+        table: str,
+        namespace: list[str] | None = None,
+    ) -> pa.Schema:
+        self.inspect_started.set()
+        await self.inspect_release.wait()
+        return await super().inspect(table=table, namespace=namespace)
+
+
+class _BlockingInsertDatasets(_FakeDatasets):
+    def __init__(self) -> None:
+        super().__init__()
+        self.insert_started = asyncio.Event()
+        self.insert_release = asyncio.Event()
+
+    async def insert(
+        self,
+        *,
+        table: str,
+        records: list[dict[str, Any]],
+        namespace: list[str] | None = None,
+    ) -> None:
+        self.insert_started.set()
+        await self.insert_release.wait()
+        await super().insert(table=table, records=records, namespace=namespace)
+
+
+class _FakeRoom:
+    def __init__(self, datasets: _FakeDatasets | None = None) -> None:
+        self.datasets = datasets or _FakeDatasets()
         self.local_participant = _participant("assistant")
 
 
@@ -361,11 +411,210 @@ def _row_data(row: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_dataset_thread_storage_persists_binary_agent_message_attachment() -> (
+async def test_dataset_thread_storage_start_does_not_wait_for_dataset_setup() -> None:
+    datasets = _BlockingInspectDatasets()
+    room = _FakeRoom(datasets=datasets)
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+
+    await asyncio.wait_for(storage.start(), timeout=0.1)
+    await asyncio.wait_for(datasets.inspect_started.wait(), timeout=0.1)
+
+    storage.push_message(
+        message=AgentRealtimeAudioCommit(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+            thread_id="dataset://threads/demo",
+            message_id="audio-commit-1",
+        )
+    )
+    assert (("threads",), "demo") not in datasets.rows
+
+    datasets.inspect_release.set()
+    await storage.stop()
+
+    thread_rows = datasets.rows[(("threads",), "demo")]
+    assert _row_data(thread_rows[0])["message_id"] == "audio-commit-1"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_batches_queued_writes() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    await storage.wait_until_ready()
+
+    storage.push_message(
+        message=AgentRealtimeAudioCommit(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+            thread_id="dataset://threads/demo",
+            message_id="audio-commit-1",
+        )
+    )
+    storage.push_message(
+        message=AgentUsageUpdated(
+            type=AGENT_EVENT_USAGE_UPDATED,
+            thread_id="dataset://threads/demo",
+            message_id="usage-1",
+            usage={},
+            context_window=AgentContextWindowUsage(used_tokens=0),
+        )
+    )
+    await storage.stop()
+
+    assert len(room.datasets.insert_calls) == 1
+    assert len(room.datasets.insert_calls[0]["records"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_flush_drains_queued_writes_without_stopping() -> (
     None
 ):
     room = _FakeRoom()
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    await storage.wait_until_ready()
+
+    storage.push_message(
+        message=AgentRealtimeAudioCommit(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+            thread_id="dataset://threads/demo",
+            message_id="audio-commit-1",
+        )
+    )
+    await storage.flush()
+
+    assert room.datasets.rows[(("threads",), "demo")] == []
+    unflushed_messages = storage.unflushed_agent_messages()
+    assert len(unflushed_messages) == 1
+    assert isinstance(unflushed_messages[0], AgentRealtimeAudioCommit)
+    assert unflushed_messages[0].message_id == "audio-commit-1"
+
+    storage.push_message(
+        message=AgentUsageUpdated(
+            type=AGENT_EVENT_USAGE_UPDATED,
+            thread_id="dataset://threads/demo",
+            message_id="usage-1",
+            usage={},
+            context_window=AgentContextWindowUsage(used_tokens=0),
+        )
+    )
+    await storage.stop()
+
+    assert len(room.datasets.rows[(("threads",), "demo")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_exposes_unflushed_agent_messages() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    await storage.wait_until_ready()
+
+    storage.push_message(
+        message=AgentRealtimeAudioCommit(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+            thread_id="dataset://threads/demo",
+            message_id="audio-commit-1",
+        )
+    )
+    await storage.flush()
+
+    unflushed_messages = storage.unflushed_agent_messages()
+    assert len(unflushed_messages) == 1
+    assert isinstance(unflushed_messages[0], AgentRealtimeAudioCommit)
+    assert unflushed_messages[0].message_id == "audio-commit-1"
+
+    await storage.stop()
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_coalesces_audio_transcription_into_commit() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    await storage.wait_until_ready()
+
+    storage.push_message(
+        message=AgentRealtimeAudioCommit(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+            thread_id="dataset://threads/demo",
+            message_id="audio-commit-1",
+        )
+    )
+    storage.push_message(
+        message=TurnStartAccepted(
+            type=AGENT_EVENT_TURN_START_ACCEPTED,
+            thread_id="dataset://threads/demo",
+            message_id="accepted-1",
+            source_message_id="audio-commit-1",
+            turn_id="turn-1",
+        )
+    )
+    storage.push_message(
+        message=AgentAudioTranscriptionDelta(
+            type=AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
+            thread_id="dataset://threads/demo",
+            message_id="transcript-delta-1",
+            turn_id="turn-1",
+            item_id="realtime-item-1",
+            role="user",
+            text="hello",
+        )
+    )
+    storage.push_message(
+        message=AgentAudioTranscriptionCompleted(
+            type=AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+            thread_id="dataset://threads/demo",
+            message_id="transcript-completed-1",
+            turn_id="turn-1",
+            item_id="realtime-item-1",
+            role="user",
+            text="hello there",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            message_id="assistant-1",
+            turn_id="turn-1",
+            item_id="assistant-item-1",
+            text="assistant response",
+        )
+    )
+    storage.push_message(
+        message=TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="dataset://threads/demo",
+            message_id="ended-1",
+            turn_id="turn-1",
+            error=None,
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    audio_commit = _row_data(thread_rows[0])
+    assert audio_commit["type"] == AGENT_MESSAGE_REALTIME_AUDIO_COMMIT
+    assert audio_commit["message_id"] == "audio-commit-1"
+    assert audio_commit["turn_id"] == "turn-1"
+    assert audio_commit["text"] == "hello there"
+    assert audio_commit["status"] == "completed"
+    assert audio_commit["transcription_item_id"] == "realtime-item-1"
+    assert _row_data(thread_rows[2])["text"] == "assistant response"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_persists_binary_agent_message_attachment() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/demo",
+        persist_audio_input=True,
+    )
     await storage.start()
 
     storage.push_message(
@@ -399,6 +648,35 @@ async def test_dataset_thread_storage_persists_binary_agent_message_attachment()
     assert restored[0].data == b"\xf7\x00\x01"
     assert isinstance(restored[1], AgentAudioGenerationDelta)
     assert restored[1].data == b"\xf7\x02\x03"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_skips_realtime_audio_chunks_by_default() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentRealtimeAudioChunk(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+            thread_id="dataset://threads/demo",
+            message_id="audio-input-1",
+            data=b"\xf7\x00\x01",
+        )
+    )
+    storage.push_message(
+        message=AgentRealtimeAudioCommit(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
+            thread_id="dataset://threads/demo",
+            message_id="audio-commit-1",
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(thread_rows) == 1
+    assert _row_data(thread_rows[0])["type"] == AGENT_MESSAGE_REALTIME_AUDIO_COMMIT
+    assert thread_rows[0]["attachment"] is None
 
 
 @pytest.mark.asyncio
@@ -797,6 +1075,7 @@ async def test_dataset_thread_storage_restores_text_sender_name() -> None:
     restored = DatasetThreadStorage(room=room, path="dataset://threads/demo")
     await restored.start()
     try:
+        await restored.wait_until_ready()
         text_delta = next(
             message
             for message in restored.agent_messages()
@@ -849,6 +1128,7 @@ async def test_dataset_thread_storage_restores_text_phase() -> None:
     restored = DatasetThreadStorage(room=room, path="dataset://threads/demo")
     await restored.start()
     try:
+        await restored.wait_until_ready()
         context = AgentSessionContext(system_role=None)
         restored.restore_session_context(
             context=context,
@@ -1722,6 +2002,7 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
     ]
 
     await storage.start()
+    await storage.wait_until_ready()
     context = AgentSessionContext(system_role=None)
     storage.restore_session_context(context=context)
     await storage.stop()
