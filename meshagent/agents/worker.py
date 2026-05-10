@@ -273,7 +273,7 @@ class Worker(SingleRoomAgent):
             decision_context.append_user_message(
                 (f"Summarize what this request is:\n```{language}\n{payload_text}\n```")
             )
-            response = await self._decision_llm_adapter.next(
+            response = await self._decision_llm_adapter.create_response(
                 context=decision_context,
                 caller=self.room.local_participant,
                 toolkits=[],
@@ -536,7 +536,7 @@ class Worker(SingleRoomAgent):
             await self.append_message_context(
                 message=message, chat_context=chat_context
             )
-            return await self._llm_adapter.next(
+            return await self._llm_adapter.create_response(
                 context=chat_context,
                 caller=self.room.local_participant,
                 toolkits=toolkits,

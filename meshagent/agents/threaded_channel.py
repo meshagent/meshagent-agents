@@ -613,7 +613,7 @@ class ThreadedChannel(Channel):
                 )
             )
             try:
-                response = await adapter.next(
+                response = await adapter.create_response(
                     context=cloned_context,
                     caller=self._room.local_participant,
                     model=adapter.default_model(),

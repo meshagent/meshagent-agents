@@ -886,6 +886,14 @@ class MeshDocumentThreadStorage(ThreadStorage):
                         f"{author_name or 'a user'} attached a file available at {path}"
                     )
 
+    async def restore_session_context_async(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter: object | None = None,
+    ) -> None:
+        self.restore_session_context(context=context, llm_adapter=llm_adapter)
+
     async def handle_custom_event(
         self,
         *,
@@ -996,16 +1004,18 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 turn_id=message.turn_id if isinstance(message, TurnSteer) else None,
             )
         elif isinstance(message, AgentTextContentStarted):
-            self._text_content_accumulator.upsert(
+            accumulated = self._text_content_accumulator.upsert(
                 item_id=message.item_id,
                 turn_id=message.turn_id,
                 phase=message.phase,
             )
-            self._ensure_assistant_message(
+            assistant_message = self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="text", item_id=message.item_id),
                 turn_id=message.turn_id,
             )
+            if accumulated.phase is not None:
+                assistant_message.set_attribute("phase", accumulated.phase)
         elif isinstance(message, AgentTextContentDelta):
             accumulated = self._text_content_accumulator.append_delta(
                 item_id=message.item_id,
@@ -1020,11 +1030,19 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
             )
             assistant_message.set_attribute("text", accumulated.text)
+            if accumulated.phase is not None:
+                assistant_message.set_attribute("phase", accumulated.phase)
         elif isinstance(message, AgentTextContentEnded):
-            self._active_message_elements_by_key.pop(
-                self._content_message_key(kind="text", item_id=message.item_id),
-                None,
+            key = self._content_message_key(kind="text", item_id=message.item_id)
+            accumulated = self._text_content_accumulator.upsert(
+                item_id=message.item_id,
+                turn_id=message.turn_id,
+                phase=message.phase,
             )
+            assistant_message = self._active_message_elements_by_key.get(key)
+            if assistant_message is not None and accumulated.phase is not None:
+                assistant_message.set_attribute("phase", accumulated.phase)
+            self._active_message_elements_by_key.pop(key, None)
             self._text_content_accumulator.complete(item_id=message.item_id)
             self._text_content_accumulator.remove(message.item_id)
         elif isinstance(message, AgentFileContentStarted):

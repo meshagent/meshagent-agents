@@ -439,7 +439,7 @@ class MailBot(Worker):
                     Toolkit(name="attachments", tools=[AttachTool(room=self.room)]),
                 ]
 
-            reply = await self._llm_adapter.next(
+            reply = await self._llm_adapter.create_response(
                 context=chat_context,
                 caller=self.room.local_participant,
                 toolkits=toolkits,

@@ -76,4 +76,11 @@ class ThreadStorage(Protocol):
         llm_adapter: "LLMAdapter[Any] | None" = None,
     ) -> None: ...
 
+    async def restore_session_context_async(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter: "LLMAdapter[Any] | None" = None,
+    ) -> None: ...
+
     def make_toolkit(self) -> Toolkit: ...

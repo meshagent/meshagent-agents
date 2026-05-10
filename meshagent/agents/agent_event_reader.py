@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+import json
+from typing import Any, Callable, Protocol
 
 from meshagent.api.agent_content import AgentFileContent, AgentTextContent
 from meshagent.api.messaging import Content
 
-from .context import AgentSessionContext
 from .messages import (
+    AgentAudioGenerationCompleted,
+    AgentAudioGenerationDelta,
+    AgentAudioGenerationFailed,
+    AgentAudioGenerationStarted,
+    AgentAudioTranscriptionCompleted,
+    AgentAudioTranscriptionDelta,
+    AgentAudioTranscriptionFailed,
+    AgentAudioTranscriptionStarted,
     AgentContextCompacted,
     AgentFileContentDelta,
     AgentFileContentEnded,
+    AgentFileContentStarted,
     AgentImageGenerationCompleted,
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
@@ -19,9 +29,12 @@ from .messages import (
     AgentMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
+    AgentReasoningContentStarted,
     AgentTextContentDelta,
     AgentTextContentEnded,
+    AgentTextContentStarted,
     AgentThreadEvent,
+    AgentToolCallArgumentsDelta,
     AgentToolCallEnded,
     AgentToolCallLogDelta,
     AgentToolCallPending,
@@ -33,35 +46,53 @@ from .messages import (
     TurnSteer,
     TurnSteerAccepted,
 )
+from .stream_content_accumulator import FileContentAccumulator, TextContentAccumulator
 
 
 class AgentEventReader(Protocol):
+    def __call__(self, message: AgentMessage) -> None: ...
+
     def consume(self, message: AgentMessage) -> None: ...
 
     def finalize(self) -> None: ...
 
 
-@dataclass(slots=True)
-class _BufferedTextItem:
-    role: str
-    kind: str
-    phase: str | None = None
-    text: str = ""
-
-
-@dataclass(slots=True)
-class _BufferedFileItem:
-    urls: list[str] = field(default_factory=list)
+@dataclass(frozen=True, slots=True)
+class AgentEventReaderCallbacks:
+    record_event: Callable[[AgentMessage], None]
+    update_usage: Callable[[dict[str, float]], None]
+    restore_compacted_context: Callable[[AgentContextCompacted], None]
 
 
 @dataclass(slots=True)
 class _BufferedToolCall:
+    item_id: str
     namespace: str
     call_id: str | None
     toolkit: str
     tool: str
     arguments: dict[str, Any] | None
+    argument_deltas: list[str] = field(default_factory=list)
     logs: list[dict[str, str]] = field(default_factory=list)
+
+    def arguments_json(self) -> str:
+        if self.argument_deltas:
+            return "".join(self.argument_deltas)
+        if self.arguments is None:
+            return "{}"
+        return json.dumps(self.arguments, separators=(",", ":"), ensure_ascii=False)
+
+    def arguments_dict(self) -> dict[str, Any]:
+        if self.arguments is not None:
+            return deepcopy(self.arguments)
+        raw_arguments = self.arguments_json()
+        try:
+            parsed = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            return {"input": raw_arguments}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"input": parsed}
 
 
 def _image_generation_status(
@@ -77,13 +108,33 @@ def _image_generation_status(
     return "pending"
 
 
-class DefaultAgentEventReader:
-    def __init__(self, *, context: AgentSessionContext) -> None:
-        self._context = context
-        self._text_by_item_id: dict[str, _BufferedTextItem] = {}
-        self._files_by_item_id: dict[str, _BufferedFileItem] = {}
+def _noop_agent_event_reader_callbacks() -> AgentEventReaderCallbacks:
+    return AgentEventReaderCallbacks(
+        record_event=lambda message: None,
+        update_usage=lambda usage: None,
+        restore_compacted_context=lambda message: None,
+    )
+
+
+class AccumulatingAgentEventReader(ABC):
+    def __init__(
+        self,
+        *,
+        emit_message: Callable[[dict[str, Any]], None],
+        callbacks: AgentEventReaderCallbacks | None = None,
+    ) -> None:
+        self._emit_message = emit_message
+        self._callbacks = callbacks or _noop_agent_event_reader_callbacks()
+        self._text = TextContentAccumulator()
+        self._reasoning = TextContentAccumulator()
+        self._files = FileContentAccumulator()
         self._tool_calls_by_item_id: dict[str, _BufferedToolCall] = {}
-        context.metadata.setdefault("agent_events", [])
+
+    def _emit_context_message(self, message: dict[str, Any]) -> None:
+        self._emit_message(deepcopy(message))
+
+    def __call__(self, message: AgentMessage) -> None:
+        self.consume(message)
 
     def consume(self, message: AgentMessage) -> None:
         self._record_event(message=message)
@@ -100,12 +151,21 @@ class DefaultAgentEventReader:
             self._append_user_turn(message=message)
             return
 
-        if isinstance(message, AgentTextContentDelta):
-            self._buffer_text(
+        if isinstance(message, AgentTextContentStarted):
+            self._text.upsert(
                 item_id=message.item_id,
-                role="assistant",
-                kind="text",
-                text=message.text,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
+                phase=message.phase,
+            )
+            return
+
+        if isinstance(message, AgentTextContentDelta):
+            self._text.append_delta(
+                item_id=message.item_id,
+                delta=message.text,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
                 phase=message.phase,
             )
             return
@@ -114,25 +174,41 @@ class DefaultAgentEventReader:
             self._flush_text_item(item_id=message.item_id)
             return
 
-        if isinstance(message, AgentReasoningContentDelta):
-            self._buffer_text(
+        if isinstance(message, AgentReasoningContentStarted):
+            self._reasoning.upsert(
                 item_id=message.item_id,
-                role="assistant",
-                kind="reasoning",
-                text=message.text,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
+            )
+            return
+
+        if isinstance(message, AgentReasoningContentDelta):
+            self._reasoning.append_delta(
+                item_id=message.item_id,
+                delta=message.text,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
             )
             return
 
         if isinstance(message, AgentReasoningContentEnded):
-            self._flush_text_item(item_id=message.item_id)
+            self._flush_reasoning_item(item_id=message.item_id)
+            return
+
+        if isinstance(message, AgentFileContentStarted):
+            self._files.upsert(
+                item_id=message.item_id,
+                turn_id=message.turn_id,
+            )
             return
 
         if isinstance(message, AgentFileContentDelta):
-            item = self._files_by_item_id.setdefault(
-                message.item_id,
-                _BufferedFileItem(),
+            self._files.append_url(
+                item_id=message.item_id,
+                url=message.url,
+                turn_id=message.turn_id,
+                sender_name=message.sender_name,
             )
-            item.urls.append(message.url)
             return
 
         if isinstance(message, AgentFileContentEnded):
@@ -143,19 +219,39 @@ class DefaultAgentEventReader:
             message,
             (AgentToolCallPending, AgentToolCallInProgress, AgentToolCallStarted),
         ):
+            existing = self._tool_calls_by_item_id.get(message.item_id)
             self._tool_calls_by_item_id[message.item_id] = _BufferedToolCall(
+                item_id=message.item_id,
                 namespace=message.namespace,
                 call_id=message.call_id,
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
+                argument_deltas=[] if existing is None else existing.argument_deltas,
+                logs=[] if existing is None else existing.logs,
             )
+            return
+
+        if isinstance(message, AgentToolCallArgumentsDelta):
+            item = self._tool_calls_by_item_id.get(message.item_id)
+            if item is None:
+                item = _BufferedToolCall(
+                    item_id=message.item_id,
+                    namespace=message.namespace,
+                    call_id=message.call_id,
+                    toolkit="tool",
+                    tool="tool",
+                    arguments=None,
+                )
+                self._tool_calls_by_item_id[message.item_id] = item
+            item.argument_deltas.append(message.delta)
             return
 
         if isinstance(message, AgentToolCallLogDelta):
             item = self._tool_calls_by_item_id.get(message.item_id)
             if item is None:
                 item = _BufferedToolCall(
+                    item_id=message.item_id,
                     namespace=message.namespace,
                     call_id=message.call_id,
                     toolkit="tool",
@@ -171,13 +267,7 @@ class DefaultAgentEventReader:
             return
 
         if isinstance(message, AgentThreadEvent):
-            self._append_context_item(
-                role="assistant",
-                item={
-                    "type": "event",
-                    "event": message.event,
-                },
-            )
+            self._append_thread_event(event=message.event)
             return
 
         if isinstance(
@@ -189,62 +279,74 @@ class DefaultAgentEventReader:
                 AgentImageGenerationFailed,
             ),
         ):
-            self._append_context_item(
-                role="assistant",
-                item={
-                    "type": "image_generation",
-                    "event_type": message.type,
-                    "item_id": message.item_id,
-                    "call_id": message.call_id,
-                    "toolkit": message.toolkit,
-                    "tool": message.tool,
-                    "arguments": message.arguments,
-                    "images": [
-                        image.model_dump(mode="json") for image in message.images
-                    ]
-                    if isinstance(message, AgentImageGenerationCompleted)
-                    else [],
-                    "status": _image_generation_status(message=message),
-                    "status_detail": message.status_detail,
-                },
+            self._append_image_generation_event(
+                event_type=message.type,
+                item_id=message.item_id,
+                call_id=message.call_id,
+                toolkit=message.toolkit,
+                tool=message.tool,
+                arguments=message.arguments,
+                images=[image.model_dump(mode="json") for image in message.images]
+                if isinstance(message, AgentImageGenerationCompleted)
+                else [],
+                status=_image_generation_status(message=message),
+                status_detail=message.status_detail,
             )
+            return
+
+        if isinstance(
+            message,
+            (
+                AgentAudioGenerationStarted,
+                AgentAudioGenerationDelta,
+                AgentAudioGenerationCompleted,
+                AgentAudioGenerationFailed,
+            ),
+        ):
+            self._append_audio_generation_event(message=message)
+            return
+
+        if isinstance(
+            message,
+            (
+                AgentAudioTranscriptionStarted,
+                AgentAudioTranscriptionDelta,
+                AgentAudioTranscriptionCompleted,
+                AgentAudioTranscriptionFailed,
+            ),
+        ):
+            self._append_audio_transcription_event(message=message)
             return
 
         if isinstance(message, AgentContextCompacted):
             self.finalize()
-            self._context.metadata["last_compaction"] = {
-                "checkpoint_id": message.checkpoint_id,
-                "path": message.path,
-                "through_sequence": message.through_sequence,
-                "created_at": message.created_at,
-            }
             if message.messages is not None:
-                self._text_by_item_id.clear()
-                self._files_by_item_id.clear()
+                self._text.clear()
+                self._reasoning.clear()
+                self._files.clear()
                 self._tool_calls_by_item_id.clear()
-                self._context.messages.clear()
-                self._context.messages.extend(deepcopy(message.messages))
-                self._context.previous_messages.clear()
-                self._context.previous_response_id = None
+            self._callbacks.restore_compacted_context(message)
+            if message.messages is not None:
+                self._restore_compacted_messages(messages=message.messages)
             return
 
         if isinstance(message, AgentUsageUpdated):
-            self._context.usage.clear()
-            self._context.usage.update(message.usage)
+            self._callbacks.update_usage(message.usage)
             return
 
     def finalize(self) -> None:
-        for item_id in list(self._text_by_item_id):
+        for item_id in list(self._text.item_ids()):
             self._flush_text_item(item_id=item_id)
-        for item_id in list(self._files_by_item_id):
+        for item_id in list(self._reasoning.item_ids()):
+            self._flush_reasoning_item(item_id=item_id)
+        for item_id in list(self._files.item_ids()):
             self._flush_file_item(item_id=item_id)
+        for item_id in list(self._tool_calls_by_item_id):
+            item = self._tool_calls_by_item_id.pop(item_id)
+            self._append_tool_call(tool_call=item, result=None, error=None)
 
     def _record_event(self, *, message: AgentMessage) -> None:
-        events = self._context.metadata.get("agent_events")
-        if not isinstance(events, list):
-            events = []
-            self._context.metadata["agent_events"] = events
-        events.append(message.model_dump(mode="json"))
+        self._callbacks.record_event(message)
 
     def _append_user_turn(
         self, *, message: TurnStart | TurnSteer | TurnStartAccepted | TurnSteerAccepted
@@ -260,87 +362,152 @@ class DefaultAgentEventReader:
                 text_parts.append(f"attached file: {item.url}")
 
         if len(content) == 1 and len(text_parts) == 1:
-            self._context.messages.append({"role": "user", "content": text_parts[0]})
+            self._append_user_text(text_parts[0])
             return
 
-        self._context.messages.append({"role": "user", "content": content})
-
-    def _buffer_text(
-        self,
-        *,
-        item_id: str,
-        role: str,
-        kind: str,
-        text: str,
-        phase: str | None = None,
-    ) -> None:
-        item = self._text_by_item_id.get(item_id)
-        if item is None:
-            item = _BufferedTextItem(role=role, kind=kind, phase=phase)
-            self._text_by_item_id[item_id] = item
-        elif item.phase is None and phase is not None:
-            item.phase = phase
-        item.text += text
+        self._append_user_content(content)
 
     def _flush_text_item(self, *, item_id: str) -> None:
-        item = self._text_by_item_id.pop(item_id, None)
+        item = self._text.remove(item_id)
         if item is None or item.text == "":
             return
-        if item.kind == "text":
-            message: dict[str, Any] = {"role": item.role, "content": item.text}
-            if item.phase is not None:
-                message["phase"] = item.phase
-            self._context.messages.append(message)
+        self._append_assistant_text(text=item.text, phase=item.phase)
+
+    def _flush_reasoning_item(self, *, item_id: str) -> None:
+        item = self._reasoning.remove(item_id)
+        if item is None or item.text == "":
             return
-        self._append_context_item(
-            role=item.role,
-            item={"type": item.kind, "text": item.text},
-        )
+        self._append_assistant_reasoning(text=item.text)
 
     def _flush_file_item(self, *, item_id: str) -> None:
-        item = self._files_by_item_id.pop(item_id, None)
+        item = self._files.remove(item_id)
         if item is None:
             return
         for url in item.urls:
-            self._append_context_item(
-                role="assistant",
-                item={"type": "file", "url": url},
-            )
+            self._append_assistant_file(url=url)
 
     def _flush_tool_call(self, *, message: AgentToolCallEnded) -> None:
         item = self._tool_calls_by_item_id.pop(message.item_id, None)
         if item is None:
             item = _BufferedToolCall(
+                item_id=message.item_id,
                 namespace=message.namespace,
                 call_id=message.call_id,
-                toolkit="tool",
-                tool="tool",
+                toolkit=message.toolkit,
+                tool=message.tool,
                 arguments=None,
             )
 
-        self._append_context_item(
-            role="assistant",
-            item={
-                "type": "tool_call",
-                "item_id": message.item_id,
-                "namespace": item.namespace,
-                "call_id": item.call_id,
-                "toolkit": item.toolkit,
-                "tool": item.tool,
-                "arguments": item.arguments,
-                "result": self._content_to_json(content=message.result),
-                "error": None
-                if message.error is None
-                else message.error.model_dump(mode="json"),
-                "logs": item.logs,
-            },
+        self._append_tool_call(
+            tool_call=item,
+            result=self._content_to_json(content=message.result),
+            error=None
+            if message.error is None
+            else message.error.model_dump(mode="json"),
         )
-
-    def _append_context_item(self, *, role: str, item: dict[str, Any]) -> None:
-        self._context.messages.append({"role": role, "content": [item]})
 
     @staticmethod
     def _content_to_json(*, content: Content | None) -> dict[str, Any] | None:
         if content is None:
             return None
         return content.to_json()
+
+    @staticmethod
+    def _result_text(
+        *,
+        result: dict[str, Any] | None,
+        error: dict[str, Any] | None,
+        logs: list[dict[str, str]],
+    ) -> str:
+        if error is not None:
+            return json.dumps(
+                {"error": error}, separators=(",", ":"), ensure_ascii=False
+            )
+        if result is not None:
+            result_type = result.get("type")
+            if result_type == "text":
+                text = result.get("text")
+                if isinstance(text, str):
+                    return text
+            return json.dumps(result, separators=(",", ":"), ensure_ascii=False)
+        if logs:
+            return "\n".join(
+                line["text"] for line in logs if isinstance(line.get("text"), str)
+            )
+        return ""
+
+    @abstractmethod
+    def _append_user_text(self, text: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_user_content(self, content: list[dict[str, Any]]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_assistant_text(self, *, text: str, phase: str | None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_assistant_reasoning(self, *, text: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_assistant_file(self, *, url: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_thread_event(self, *, event: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_tool_call(
+        self,
+        *,
+        tool_call: _BufferedToolCall,
+        result: dict[str, Any] | None,
+        error: dict[str, Any] | None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_image_generation_event(
+        self,
+        *,
+        event_type: str,
+        item_id: str,
+        call_id: str | None,
+        toolkit: str,
+        tool: str,
+        arguments: dict[str, Any] | None,
+        images: list[dict[str, Any]],
+        status: str,
+        status_detail: str | None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_audio_generation_event(
+        self,
+        *,
+        message: AgentAudioGenerationStarted
+        | AgentAudioGenerationDelta
+        | AgentAudioGenerationCompleted
+        | AgentAudioGenerationFailed,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _append_audio_transcription_event(
+        self,
+        *,
+        message: AgentAudioTranscriptionStarted
+        | AgentAudioTranscriptionDelta
+        | AgentAudioTranscriptionCompleted
+        | AgentAudioTranscriptionFailed,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _restore_compacted_messages(self, *, messages: list[dict[str, Any]]) -> None:
+        raise NotImplementedError

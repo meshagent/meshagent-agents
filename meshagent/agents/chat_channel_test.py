@@ -22,11 +22,14 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_START_ACCEPTED,
+    AGENT_EVENT_TURN_START_REJECTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
+    AGENT_MESSAGE_MODELS_REQUEST,
+    AGENT_MESSAGE_MODELS_RESPONSE,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_OPEN,
@@ -39,6 +42,7 @@ from meshagent.agents.messages import (
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentError,
     AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
@@ -52,7 +56,11 @@ from meshagent.agents.messages import (
     ClearThread,
     CloseThread,
     AgentContextWindowUsage,
+    AgentModelInfo,
+    AgentProviderInfo,
     OpenThread,
+    ModelsRequest,
+    ModelsResponse,
     ThreadCleared,
     TurnEnded,
     TurnInterrupt,
@@ -235,6 +243,11 @@ class _RecordingSupervisor(AgentSupervisor):
         self.sent.append(message)
 
 
+class _RejectingStartSupervisor(_RecordingSupervisor):
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        return AgentError(message="unknown model", code="unknown_model")
+
+
 class _FakeThreadNameAdapter(LLMAdapter):
     def __init__(self, *, generated_thread_name: str) -> None:
         self.generated_thread_name = generated_thread_name
@@ -243,7 +256,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "thread-name-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,
@@ -412,6 +425,8 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
                     "payload": {
                         "type": AGENT_MESSAGE_THREAD_START,
                         "message_id": "start-thread-1",
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-5",
                         "content": [
                             {"type": "text", "text": "Plan this friendly thread"},
                             {"type": "file", "url": "uploads/plan.md"},
@@ -446,6 +461,8 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert turn.message_id == "start-thread-1"
         assert turn.thread_id == result_path
         assert turn.turn_id == status_payload["turn_id"]
+        assert turn.provider == "anthropic"
+        assert turn.model == "claude-sonnet-4-5"
         assert turn.content == [
             AgentTextContent(type="text", text="Plan this friendly thread"),
             AgentFileContent(type="file", url="room:///uploads/plan.md"),
@@ -456,6 +473,52 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
         assert entries[0].get_attribute("name") == "Plan this friendly thread"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_start_thread_rejection_does_not_create_thread() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    sync = _FakeSync()
+    room = _FakeRoom(participants=[caller], messaging_enabled=True, sync=sync)
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RejectingStartSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "provider": "openai",
+                        "model": "not-a-model",
+                        "content": [
+                            {"type": "text", "text": "Plan this friendly thread"},
+                        ],
+                    }
+                },
+            )
+        )
+
+        await _drain_background_tasks()
+
+        assert supervisor.sent == []
+        assert len(room.messaging.sent_messages) == 1
+        payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert payload["type"] == AGENT_EVENT_TURN_START_REJECTED
+        assert payload["source_message_id"] == "start-thread-1"
+        assert payload["error"]["code"] == "unknown_model"
+        assert channel._open_participant_ids_by_thread == {}
+        assert sync.document.root.get_children() == []
     finally:
         await channel.stop(supervisor)
 
@@ -1026,6 +1089,82 @@ async def test_agent_chat_channel_translates_capabilities_request_agent_message(
         assert request.type == AGENT_MESSAGE_CAPABILITIES_REQUEST
         assert request.thread_id == "/threads/test.thread"
         assert request.message_id == "capabilities-1"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_channel_passes_model_messages_through() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
+    room = _FakeRoom(participants=[caller, viewer], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_MODELS_REQUEST,
+                        "message_id": "models-request-1",
+                        "thread_id": "/threads/legacy.thread",
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, ModelsRequest)
+        assert "thread_id" not in supervisor.sent[0].data.model_dump(mode="json")
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+        room.messaging.sent_messages.clear()
+
+        await channel.on_message(
+            Message(
+                data=ModelsResponse(
+                    type=AGENT_MESSAGE_MODELS_RESPONSE,
+                    source_message_id="models-request-1",
+                    providers=[
+                        AgentProviderInfo(
+                            name="openai",
+                            friendly_name="OpenAI",
+                            default_model="gpt-5.4",
+                            models=[
+                                AgentModelInfo(name="gpt-5.4", active=True),
+                                AgentModelInfo(name="gpt-5.5"),
+                            ],
+                        )
+                    ],
+                ),
+                sender=viewer,
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        sent = room.messaging.sent_messages[0]
+        assert sent["to"] == viewer
+        payload = sent["message"]["payload"]
+        assert payload["type"] == AGENT_MESSAGE_MODELS_RESPONSE
+        assert [model["name"] for model in payload["providers"][0]["models"]] == [
+            "gpt-5.4",
+            "gpt-5.5",
+        ]
     finally:
         await channel.stop(supervisor)
 

@@ -221,7 +221,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "thread-name-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,

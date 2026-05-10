@@ -167,7 +167,7 @@ class _FakeLLMAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "test-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,
@@ -206,7 +206,7 @@ class _FakeDecisionLLMAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "decision-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,

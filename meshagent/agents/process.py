@@ -26,7 +26,12 @@ from urllib.parse import urlparse
 
 from meshagent.api import Participant
 from meshagent.api.messaging import FileContent
-from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
+from meshagent.agents.adapter import (
+    LLMAdapter,
+    LLMModelInfo,
+    LLMProvider,
+    ToolCallApprovalRequest,
+)
 from meshagent.agents.context import AgentSessionContext
 from meshagent.tools import ToolContext, Toolkit
 from opentelemetry import trace
@@ -39,8 +44,12 @@ from .version import __version__ as agents_version
 from .messages import (
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_CAPABILITIES_RESPONSE,
+    AGENT_MESSAGE_MODEL_CHANGE,
+    AGENT_MESSAGE_MODELS_REQUEST,
+    AGENT_MESSAGE_MODELS_RESPONSE,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_THREAD_EVENT,
@@ -76,14 +85,21 @@ from .messages import (
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
+    AgentThreadMessage,
+    AgentModelChanged,
+    AgentModelInfo,
     AgentThreadEvent,
     AgentContextWindowUsage,
     AgentUsageUpdated,
+    AgentProviderInfo,
     ApproveAgentToolCall,
     CapabilitiesRequest,
     CapabilitiesResponse,
+    ChangeModel,
     ClearThread,
     CloseThread,
+    ModelsRequest,
+    ModelsResponse,
     OpenThread,
     RejectAgentToolCall,
     ToolkitCapabilities,
@@ -119,6 +135,8 @@ _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
         AGENT_MESSAGE_THREAD_CLEAR,
         AGENT_MESSAGE_CAPABILITIES_REQUEST,
         AGENT_MESSAGE_CAPABILITIES_RESPONSE,
+        AGENT_MESSAGE_MODEL_CHANGE,
+        AGENT_EVENT_MODEL_CHANGED,
         AGENT_MESSAGE_THREAD_CLOSE,
         AGENT_MESSAGE_THREAD_OPEN,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
@@ -145,6 +163,11 @@ class ThreadStorageLifecycle(Protocol):
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
+
+
+@runtime_checkable
+class AgentMessageThreadStorage(Protocol):
+    def agent_messages(self) -> list[AgentThreadMessage]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -606,6 +629,46 @@ def _coerce_message_data(data: AgentMessage, model: type[_MessageT]) -> _Message
     return model.model_validate(data.model_dump(mode="python"))
 
 
+def agent_model_info(
+    *,
+    provider: LLMProvider,
+    model_info: LLMModelInfo,
+    current_provider: str,
+    current_model: str,
+) -> AgentModelInfo:
+    return AgentModelInfo(
+        name=model_info.name,
+        friendly_name=model_info.friendly_name,
+        description=model_info.description,
+        context_window=model_info.context_window,
+        pricing=model_info.pricing,
+        active=provider.name == current_provider and model_info.name == current_model,
+    )
+
+
+def agent_provider_info(
+    *,
+    provider: LLMProvider,
+    current_provider: str,
+    current_model: str,
+) -> AgentProviderInfo:
+    return AgentProviderInfo(
+        name=provider.name,
+        friendly_name=provider.adapter.provider_friendly_name(),
+        description=provider.adapter.provider_description(),
+        default_model=provider.adapter.default_model(),
+        models=[
+            agent_model_info(
+                provider=provider,
+                model_info=model_info,
+                current_provider=current_provider,
+                current_model=current_model,
+            )
+            for model_info in provider.adapter.list_models()
+        ],
+    )
+
+
 class Channel:
     def __init__(self) -> None:
         self._supervisor: AgentSupervisor | None = None
@@ -785,6 +848,13 @@ class AgentSupervisor:
         return None
 
     async def on_stop(self) -> None:
+        return None
+
+    async def on_models_request(self, message: Message) -> None:
+        self._send_to_processes(message)
+
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        del turn_start
         return None
 
     async def route(self, message: Message) -> None:
@@ -1079,6 +1149,13 @@ class AgentSupervisor:
                 data=thread_message,
             )
             target_processes = [process]
+
+        elif message_type == AGENT_MESSAGE_MODELS_REQUEST:
+            models_request = _coerce_message_data(message.data, ModelsRequest)
+            await self.on_models_request(
+                self._copy_message(message, data=models_request)
+            )
+            return
 
         target_processes = await self._ensure_routing_processes_started(
             processes=target_processes
@@ -1380,7 +1457,9 @@ class LLMAgentProcess(AgentProcess):
         *,
         thread_id: str,
         participant: Participant,
-        llm_adapter: LLMAdapter,
+        llm_adapter: LLMAdapter | None = None,
+        llm_providers: list[LLMProvider] | None = None,
+        default_provider: LLMProvider | None = None,
         toolkits: Optional[list[Toolkit]] = None,
         thread_storage: ThreadStorage | None = None,
         thread_adapter: ThreadStorage | None = None,
@@ -1398,7 +1477,22 @@ class LLMAgentProcess(AgentProcess):
         super().__init__(thread_id=thread_id, thread_storage=thread_storage)
         self._thread_status_publisher = thread_status_publisher
         self._format_message = format_message or default_format_message
-        self.llm_adapter = llm_adapter
+        providers = self._normalize_llm_providers(
+            llm_adapter=llm_adapter,
+            llm_providers=llm_providers,
+            default_provider=default_provider,
+        )
+        self._llm_providers_by_name = {
+            provider.name: provider for provider in providers
+        }
+        self._default_provider = (
+            self._llm_providers_by_name[default_provider.name]
+            if default_provider is not None
+            else providers[0]
+        )
+        self._current_provider = self._default_provider
+        self.llm_adapter = self._current_provider.adapter
+        self._current_model = self.llm_adapter.default_model()
         self._turn_id: str | None = None
         self._last_usage_update: AgentUsageUpdated | None = None
         self._handlers: dict[str, Callable[[Message], Awaitable[None]]] = {
@@ -1408,6 +1502,8 @@ class LLMAgentProcess(AgentProcess):
             AGENT_MESSAGE_TURN_STEER: self.on_turn_steer,
             AGENT_MESSAGE_TURN_INTERRUPT: self.on_turn_interrupt,
             AGENT_MESSAGE_CAPABILITIES_REQUEST: self.on_capabilities_request,
+            AGENT_MESSAGE_MODELS_REQUEST: self.on_models_request,
+            AGENT_MESSAGE_MODEL_CHANGE: self.on_model_change,
             AGENT_MESSAGE_TOOL_CALL_APPROVE: self.on_tool_call_approve,
             AGENT_MESSAGE_TOOL_CALL_REJECT: self.on_tool_call_reject,
         }
@@ -1434,9 +1530,10 @@ class LLMAgentProcess(AgentProcess):
         self._session_initializer = session_initializer
         self._turn_instructions_provider = turn_instructions_provider
         self._turn_toolkits_builder = turn_toolkits_builder
-        self.llm_adapter.set_tool_call_approval_handler(
-            self._request_tool_call_approval
-        )
+        for provider in providers:
+            provider.adapter.set_tool_call_approval_handler(
+                self._request_tool_call_approval
+            )
 
     @property
     def turn_id(self) -> str | None:
@@ -1457,6 +1554,236 @@ class LLMAgentProcess(AgentProcess):
     @property
     def thread_status_publisher(self) -> ThreadStatusPublisher | None:
         return self._thread_status_publisher
+
+    @staticmethod
+    def _provider_name_for_adapter(adapter: LLMAdapter) -> str:
+        provider_name = adapter.provider_name()
+        if provider_name is not None and provider_name.strip() != "":
+            return provider_name
+        return "default"
+
+    @classmethod
+    def _normalize_llm_providers(
+        cls,
+        *,
+        llm_adapter: LLMAdapter | None,
+        llm_providers: list[LLMProvider] | None,
+        default_provider: LLMProvider | None,
+    ) -> list[LLMProvider]:
+        providers: list[LLMProvider] = []
+        if llm_providers is not None:
+            providers.extend(llm_providers)
+        if llm_adapter is not None:
+            if len(providers) > 0:
+                raise ValueError("llm_adapter and llm_providers cannot both be set")
+            providers.append(
+                LLMProvider(
+                    name=cls._provider_name_for_adapter(llm_adapter),
+                    adapter=llm_adapter,
+                )
+            )
+        if default_provider is not None:
+            matching_provider = next(
+                (
+                    provider
+                    for provider in providers
+                    if provider.name == default_provider.name
+                ),
+                None,
+            )
+            if matching_provider is None:
+                providers.append(default_provider)
+            elif matching_provider.adapter is not default_provider.adapter:
+                raise ValueError(
+                    "default_provider must match the provider with the same name"
+                )
+        if len(providers) == 0:
+            raise ValueError("at least one LLM provider is required")
+
+        seen: set[str] = set()
+        for provider in providers:
+            provider_name = provider.name.strip()
+            if provider_name == "":
+                raise ValueError("LLM provider name cannot be empty")
+            if provider_name != provider.name:
+                raise ValueError(
+                    "LLM provider name cannot have leading or trailing whitespace"
+                )
+            if provider_name in seen:
+                raise ValueError(f"duplicate LLM provider name: {provider_name}")
+            seen.add(provider_name)
+        return providers
+
+    def _resolve_llm_provider(self, provider_name: str | None) -> LLMProvider:
+        if provider_name is None or provider_name.strip() == "":
+            return self._current_provider
+        provider = self._llm_providers_by_name.get(provider_name)
+        if provider is None:
+            names = ", ".join(sorted(self._llm_providers_by_name))
+            raise ValueError(
+                f"unknown LLM provider {provider_name!r}; available providers: {names}"
+            )
+        return provider
+
+    @staticmethod
+    def _provider_models(provider: LLMProvider) -> list[LLMModelInfo]:
+        return provider.adapter.list_models()
+
+    def _resolve_llm_model(self, *, provider: LLMProvider, model: str | None) -> str:
+        if model is None or model.strip() == "":
+            if provider.name == self._current_provider.name:
+                return self._current_model
+            return provider.adapter.default_model()
+
+        models = self._provider_models(provider)
+        for model_info in models:
+            if model_info.name == model:
+                return model
+
+        names = ", ".join(model_info.name for model_info in models)
+        raise ValueError(
+            f"unknown model {model!r} for provider {provider.name!r}; "
+            f"available models: {names}"
+        )
+
+    def _agent_model_info(
+        self,
+        *,
+        provider: LLMProvider,
+        model_info: LLMModelInfo,
+    ) -> AgentModelInfo:
+        return agent_model_info(
+            provider=provider,
+            model_info=model_info,
+            current_provider=self._current_provider.name,
+            current_model=self._current_model,
+        )
+
+    def _agent_provider_info(self, provider: LLMProvider) -> AgentProviderInfo:
+        return agent_provider_info(
+            provider=provider,
+            current_provider=self._current_provider.name,
+            current_model=self._current_model,
+        )
+
+    def _current_model_info(self) -> LLMModelInfo | None:
+        for model_info in self._provider_models(self._current_provider):
+            if model_info.name == self._current_model:
+                return model_info
+        return None
+
+    def _build_model_changed(
+        self,
+        *,
+        thread_id: str,
+        source_message_id: str | None,
+    ) -> AgentModelChanged:
+        return AgentModelChanged(
+            type=AGENT_EVENT_MODEL_CHANGED,
+            thread_id=thread_id,
+            source_message_id=source_message_id,
+            provider=self._current_provider.name,
+            model=self._current_model,
+        )
+
+    def _restore_current_model_from_thread_storage(self) -> bool:
+        thread_storage = self.thread_storage
+        if thread_storage is None:
+            return False
+        if not isinstance(thread_storage, AgentMessageThreadStorage):
+            return False
+
+        restored_provider: LLMProvider | None = None
+        restored_model: str | None = None
+        for stored_message in thread_storage.agent_messages():
+            if not isinstance(stored_message, AgentModelChanged):
+                continue
+            try:
+                provider = self._resolve_llm_provider(stored_message.provider)
+                model = self._resolve_llm_model(
+                    provider=provider,
+                    model=stored_message.model,
+                )
+            except ValueError:
+                logger.debug(
+                    "ignoring unavailable persisted model selection",
+                    extra={
+                        "provider": stored_message.provider,
+                        "model": stored_message.model,
+                    },
+                )
+                continue
+            restored_provider = provider
+            restored_model = model
+
+        if restored_provider is None or restored_model is None:
+            return False
+        if (
+            restored_provider.name == self._current_provider.name
+            and restored_model == self._current_model
+        ):
+            return False
+
+        self._current_provider = restored_provider
+        self.llm_adapter = restored_provider.adapter
+        self._current_model = restored_model
+        self._session_context = None
+        return True
+
+    async def _initialize_session_context(
+        self, *, turn_id: str | None
+    ) -> AgentSessionContext:
+        restore_turn_id = turn_id or ""
+        self._session_context = self.llm_adapter.create_session()
+
+        with tracer.start_as_current_span("agent.turn.context.initialize"):
+            await self.on_session_context_created()
+
+        thread_storage = self.thread_storage
+        if thread_storage is not None:
+            await thread_storage.restore_session_context_async(
+                context=self._session_context,
+                llm_adapter=self.llm_adapter,
+            )
+
+        with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
+            await self.on_restore_session_context(
+                restore_turn_id, self._session_context
+            )
+
+        with tracer.start_as_current_span("agent.turn.context.start"):
+            await self._session_context.start()
+
+        return self._session_context
+
+    async def _switch_llm_provider_if_needed(
+        self,
+        *,
+        provider: LLMProvider,
+        model: str,
+        turn_id: str | None,
+    ) -> bool:
+        provider_changed = provider.name != self._current_provider.name
+        model_changed = model != self._current_model
+        if not provider_changed and not model_changed:
+            return False
+
+        previous_context = self._session_context
+        previous_provider = self._current_provider
+        self._current_provider = provider
+        self.llm_adapter = provider.adapter
+        self._current_model = model
+        if previous_context is None:
+            return True
+
+        if not provider_changed:
+            return True
+
+        await previous_provider.adapter.stop_session(context=previous_context)
+        await previous_context.close()
+        self._session_context = None
+        await self._initialize_session_context(turn_id=turn_id)
+        return True
 
     def _agent_message_with_participant_name(
         self,
@@ -1525,25 +1852,7 @@ class LLMAgentProcess(AgentProcess):
                 span.set_attribute("turn_id", turn_id)
             span.set_attribute("context.cached", self._session_context is not None)
             if self._session_context is None:
-                self._session_context = self.llm_adapter.create_session()
-
-                with tracer.start_as_current_span("agent.turn.context.initialize"):
-                    await self.on_session_context_created()
-
-                thread_storage = self.thread_storage
-                if thread_storage is not None:
-                    thread_storage.restore_session_context(
-                        context=self._session_context,
-                        llm_adapter=self.llm_adapter,
-                    )
-
-                with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
-                    await self.on_restore_session_context(
-                        restore_turn_id, self._session_context
-                    )
-
-                with tracer.start_as_current_span("agent.turn.context.start"):
-                    await self._session_context.start()
+                await self._initialize_session_context(turn_id=restore_turn_id)
 
         return self._session_context
 
@@ -1614,7 +1923,7 @@ class LLMAgentProcess(AgentProcess):
                 context.metadata.update(session.metadata)
                 context.previous_messages.extend(session.previous_messages)
                 context.previous_response_id = session.previous_response_id
-                thread_storage.restore_session_context(
+                await thread_storage.restore_session_context_async(
                     context=context,
                     llm_adapter=self.llm_adapter,
                 )
@@ -2460,7 +2769,7 @@ class LLMAgentProcess(AgentProcess):
         if turn_id is None or thread_id is None:
             raise RuntimeError("turn publisher requested without an active turn")
 
-        llm_provider = self.llm_adapter.provider_name()
+        llm_provider = self._current_provider.name
 
         def enrich_llm_message(message: AgentMessage) -> AgentMessage:
             if not isinstance(message, AgentLLMMessage):
@@ -2725,8 +3034,12 @@ class LLMAgentProcess(AgentProcess):
                     model=model,
                     publish_event=publish_event,
                 )
+                await self.llm_adapter.start_session(
+                    context=session,
+                    event_handler=handle_event,
+                )
                 next_task = asyncio.create_task(
-                    self.llm_adapter.next(
+                    self.llm_adapter.create_response(
                         context=session,
                         toolkits=combined_toolkits,
                         caller=self._participant,
@@ -2899,13 +3212,28 @@ class LLMAgentProcess(AgentProcess):
         error: AgentError | None = None
         session: AgentSessionContext | None = None
         original_instructions: str | None = None
+        model = self._current_model
         try:
-            session = await self.ensure_session_context(turn_id=turn_id)
-            model = (
-                queued_turn.request.model
-                if queued_turn.request.model is not None
-                else self.llm_adapter.default_model()
+            provider = self._resolve_llm_provider(queued_turn.request.provider)
+            model = self._resolve_llm_model(
+                provider=provider,
+                model=queued_turn.request.model,
             )
+            changed_model = await self._switch_llm_provider_if_needed(
+                provider=provider,
+                model=model,
+                turn_id=turn_id,
+            )
+            if changed_model:
+                self.emit(
+                    sender=queued_turn.sender,
+                    payload=self._build_model_changed(
+                        thread_id=queued_turn.request.thread_id,
+                        source_message_id=queued_turn.request.message_id,
+                    ),
+                )
+            session = await self.ensure_session_context(turn_id=turn_id)
+            turn_span.set_attribute("provider", provider.name)
             turn_span.set_attribute("model", model)
             original_instructions = session.instructions
             turn_instructions = await self._resolve_turn_instructions(
@@ -3116,18 +3444,29 @@ class LLMAgentProcess(AgentProcess):
             self._schedule_next_turn()
 
     async def on_thread_open(self, message: Message) -> None:
-        _coerce_message_data(message.data, OpenThread)
+        request = _coerce_message_data(message.data, OpenThread)
+        self._restore_current_model_from_thread_storage()
+        super().emit(
+            sender=message.sender,
+            payload=self._agent_message_with_participant_name(
+                self._build_model_changed(
+                    thread_id=request.thread_id,
+                    source_message_id=request.message_id,
+                )
+            ),
+        )
+        session = await self.ensure_session_context(turn_id=None)
+        await self.llm_adapter.start_session(context=session)
         if self._emit_cached_usage_update(
             turn_id=self._turn_id,
             sender=message.sender,
             source=message.source,
         ):
             return
-        session = await self.ensure_session_context(turn_id=None)
         try:
             usage_update = await self._build_usage_update(
                 session=session,
-                model=self.llm_adapter.default_model(),
+                model=self._current_model,
                 toolkits=self._toolkits,
                 turn_id=self._turn_id,
                 restore_context_from_storage=True,
@@ -3144,9 +3483,46 @@ class LLMAgentProcess(AgentProcess):
 
     async def on_thread_close(self, message: Message) -> None:
         _coerce_message_data(message.data, CloseThread)
+        if self._session_context is not None:
+            await self.llm_adapter.stop_session(context=self._session_context)
+            await self._session_context.close()
+            self._session_context = None
 
     async def on_turn_start(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnStart)
+        try:
+            provider = self._resolve_llm_provider(turn.provider)
+        except ValueError as exc:
+            self.emit(
+                sender=message.sender,
+                payload=TurnStartRejected(
+                    type=AGENT_EVENT_TURN_START_REJECTED,
+                    thread_id=turn.thread_id,
+                    source_message_id=turn.message_id,
+                    error=self._turn_error(
+                        message=str(exc),
+                        code="unknown_provider",
+                    ),
+                ),
+            )
+            return
+        try:
+            self._resolve_llm_model(provider=provider, model=turn.model)
+        except ValueError as exc:
+            self.emit(
+                sender=message.sender,
+                payload=TurnStartRejected(
+                    type=AGENT_EVENT_TURN_START_REJECTED,
+                    thread_id=turn.thread_id,
+                    source_message_id=turn.message_id,
+                    error=self._turn_error(
+                        message=str(exc),
+                        code="unknown_model",
+                    ),
+                ),
+            )
+            return
+
         turn_id = turn.turn_id or str(uuid.uuid4())
         turn = turn.model_copy(update={"turn_id": turn_id})
         queued_message = _QueuedTurnMessage(
@@ -3187,6 +3563,59 @@ class LLMAgentProcess(AgentProcess):
                 source_message_id=request.message_id,
                 version=agents_version,
                 toolkits=capabilities,
+            ),
+        )
+
+    async def on_models_request(self, message: Message) -> None:
+        request = _coerce_message_data(message.data, ModelsRequest)
+        self.emit(
+            sender=message.sender,
+            payload=ModelsResponse(
+                type=AGENT_MESSAGE_MODELS_RESPONSE,
+                source_message_id=request.message_id,
+                providers=[
+                    self._agent_provider_info(provider)
+                    for provider in self._llm_providers_by_name.values()
+                ],
+            ),
+        )
+
+    async def on_model_change(self, message: Message) -> None:
+        request = _coerce_message_data(message.data, ChangeModel)
+        try:
+            provider = self._resolve_llm_provider(request.provider)
+            model = self._resolve_llm_model(provider=provider, model=request.model)
+        except ValueError as exc:
+            self.emit(
+                sender=message.sender,
+                payload=AgentThreadEvent(
+                    type=AGENT_EVENT_THREAD_EVENT,
+                    thread_id=request.thread_id,
+                    provider=self._current_provider.name,
+                    model=self._current_model,
+                    event={
+                        "type": "model_change_rejected",
+                        "error": {
+                            "message": str(exc),
+                            "code": "unknown_model",
+                        },
+                        "source_message_id": request.message_id,
+                    },
+                ),
+            )
+            return
+
+        changed = await self._switch_llm_provider_if_needed(
+            provider=provider,
+            model=model,
+            turn_id=self._turn_id,
+        )
+        del changed
+        self.emit(
+            sender=message.sender,
+            payload=self._build_model_changed(
+                thread_id=request.thread_id,
+                source_message_id=request.message_id,
             ),
         )
 
@@ -3296,6 +3725,7 @@ class LLMAgentProcess(AgentProcess):
             await thread_status_publisher.clear_thread_status()
 
         if self._session_context is not None:
+            await self.llm_adapter.stop_session(context=self._session_context)
             await self._session_context.close()
             self._session_context = None
 

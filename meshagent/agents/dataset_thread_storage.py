@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -10,15 +11,24 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import parse_qs, urlparse
 
 import pyarrow as pa
 from pydantic_core import from_json as pydantic_core_from_json
 
-from meshagent.api import DatasetJson, DatasetOptimizeConfig, Participant, RoomClient
+from meshagent.api import (
+    DatasetJson,
+    DatasetOptimizeConfig,
+    LANCE_ZSTD_FIELD_METADATA,
+    Participant,
+    RoomClient,
+)
 from meshagent.api.messaging import TextContent
 from meshagent.tools import Toolkit, tool
 
+from .agent_event_reader import AgentEventReaderCallbacks
 from .context import AgentSessionContext
+from .images_dataset import ImagesDataset
 from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
@@ -71,6 +81,7 @@ from .messages import (
     TurnSteerRejected,
     parse_agent_message,
 )
+from .stream_content_accumulator import accumulate_text_delta
 from .thread_adapter import default_format_message
 from .thread_storage import ThreadStorage
 
@@ -383,6 +394,7 @@ class DatasetThreadStorage(ThreadStorage):
                     "data",
                     pa.json_(pa.large_string()),
                     nullable=False,
+                    metadata=LANCE_ZSTD_FIELD_METADATA,
                 ),
             ]
         )
@@ -425,18 +437,26 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         schema = self._schema()
-        await self._room.datasets.create_table_with_schema(
-            name=self._table_name,
-            schema=schema,
-            mode="create_if_not_exists",
-            namespace=self._namespace,
-        )
-
-        with contextlib.suppress(Exception):
+        existing_schema: pa.Schema | None = None
+        try:
             existing_schema = await self._room.datasets.inspect(
                 table=self._table_name,
                 namespace=self._namespace,
             )
+        except Exception:
+            await self._room.datasets.create_table_with_schema(
+                name=self._table_name,
+                schema=schema,
+                mode="create_if_not_exists",
+                namespace=self._namespace,
+            )
+            with contextlib.suppress(Exception):
+                existing_schema = await self._room.datasets.inspect(
+                    table=self._table_name,
+                    namespace=self._namespace,
+                )
+
+        if existing_schema is not None:
             existing_names = set(existing_schema.names)
             missing_columns = {
                 field.name: field
@@ -444,11 +464,12 @@ class DatasetThreadStorage(ThreadStorage):
                 if field.name not in existing_names
             }
             if len(missing_columns) > 0:
-                await self._room.datasets.add_columns(
-                    table=self._table_name,
-                    new_columns=missing_columns,
-                    namespace=self._namespace,
-                )
+                with contextlib.suppress(Exception):
+                    await self._room.datasets.add_columns(
+                        table=self._table_name,
+                        new_columns=missing_columns,
+                        namespace=self._namespace,
+                    )
 
         rows = await self._room.datasets.search(
             table=self._table_name,
@@ -640,7 +661,12 @@ class DatasetThreadStorage(ThreadStorage):
 
         if isinstance(message, AgentTextContentDelta):
             active = self._ensure_active_content(message=message, kind="text")
-            active.parts.append(message.text)
+            active.parts = [
+                accumulate_text_delta(
+                    current="".join(active.parts),
+                    delta=message.text,
+                )
+            ]
             await self._append_verbose_delta_row(message=message)
             return
 
@@ -665,7 +691,12 @@ class DatasetThreadStorage(ThreadStorage):
 
         if isinstance(message, AgentReasoningContentDelta):
             active = self._ensure_active_content(message=message, kind="reasoning")
-            active.parts.append(message.text)
+            active.parts = [
+                accumulate_text_delta(
+                    current="".join(active.parts),
+                    delta=message.text,
+                )
+            ]
             await self._append_verbose_delta_row(message=message)
             return
 
@@ -1416,11 +1447,22 @@ class DatasetThreadStorage(ThreadStorage):
         llm_adapter: "LLMAdapter[Any] | None" = None,
     ) -> None:
         if llm_adapter is not None:
-            reader = llm_adapter.make_agent_event_reader(context=context)
+            restored_messages: list[dict[str, Any]] = []
+            reader = llm_adapter.make_agent_event_reader(
+                emit_message=restored_messages.append,
+                callbacks=self._agent_event_reader_callbacks(
+                    context=context,
+                    restored_messages=restored_messages,
+                ),
+            )
             for row in self._rows:
                 for message in self._messages_from_row(row=row):
-                    reader.consume(message)
+                    reader(message)
             reader.finalize()
+            llm_adapter.restore_context_messages(
+                context=context,
+                messages=restored_messages,
+            )
             return
 
         rows = self._rows
@@ -1434,6 +1476,74 @@ class DatasetThreadStorage(ThreadStorage):
 
         for row in rows:
             self._restore_row(context=context, row=row)
+
+    async def restore_session_context_async(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter: "LLMAdapter[Any] | None" = None,
+    ) -> None:
+        if llm_adapter is None:
+            self.restore_session_context(context=context)
+            return
+
+        restored_messages: list[dict[str, Any]] = []
+        reader = llm_adapter.make_agent_event_reader(
+            emit_message=restored_messages.append,
+            callbacks=self._agent_event_reader_callbacks(
+                context=context,
+                restored_messages=restored_messages,
+            ),
+        )
+        images_dataset = ImagesDataset(self._room)
+        for row in self._rows:
+            for message in await self._messages_from_row_async(
+                row=row,
+                images_dataset=images_dataset,
+            ):
+                reader(message)
+        reader.finalize()
+        llm_adapter.restore_context_messages(
+            context=context,
+            messages=restored_messages,
+        )
+
+    @staticmethod
+    def _agent_event_reader_callbacks(
+        *,
+        context: AgentSessionContext,
+        restored_messages: list[dict[str, Any]],
+    ) -> AgentEventReaderCallbacks:
+        def record_event(message: AgentThreadMessage) -> None:
+            events = context.metadata.setdefault("agent_events", [])
+            if not isinstance(events, list):
+                events = []
+                context.metadata["agent_events"] = events
+            events.append(message.model_dump(mode="json"))
+
+        def update_usage(usage: dict[str, float]) -> None:
+            context.usage.clear()
+            context.usage.update(usage)
+
+        def restore_compacted_context(message: AgentContextCompacted) -> None:
+            context.metadata["last_compaction"] = {
+                "checkpoint_id": message.checkpoint_id,
+                "path": message.path,
+                "through_sequence": message.through_sequence,
+                "created_at": message.created_at,
+            }
+            if message.messages is None:
+                return
+            restored_messages.clear()
+            context.messages.clear()
+            context.previous_messages.clear()
+            context.previous_response_id = None
+
+        return AgentEventReaderCallbacks(
+            record_event=record_event,
+            update_usage=update_usage,
+            restore_compacted_context=restore_compacted_context,
+        )
 
     def _restore_row(
         self,
@@ -1688,6 +1798,93 @@ class DatasetThreadStorage(ThreadStorage):
             return messages
 
         return []
+
+    async def _messages_from_row_async(
+        self,
+        *,
+        row: _StoredThreadRow,
+        images_dataset: ImagesDataset,
+    ) -> list[AgentThreadMessage]:
+        messages = self._messages_from_row(row=row)
+        return [
+            await self._hydrate_persisted_image_generation_message(
+                message=message,
+                images_dataset=images_dataset,
+            )
+            for message in messages
+        ]
+
+    async def _hydrate_persisted_image_generation_message(
+        self,
+        *,
+        message: AgentThreadMessage,
+        images_dataset: ImagesDataset,
+    ) -> AgentThreadMessage:
+        if isinstance(message, AgentImageGenerationPartial):
+            if message.image is None:
+                return message
+            image = await self._hydrate_persisted_image(
+                image=message.image,
+                images_dataset=images_dataset,
+            )
+            if image == message.image:
+                return message
+            return message.model_copy(update={"image": image})
+
+        if isinstance(message, AgentImageGenerationCompleted):
+            images = [
+                await self._hydrate_persisted_image(
+                    image=image,
+                    images_dataset=images_dataset,
+                )
+                for image in message.images
+            ]
+            if images == message.images:
+                return message
+            return message.model_copy(update={"images": images})
+
+        return message
+
+    async def _hydrate_persisted_image(
+        self,
+        *,
+        image: AgentGeneratedImage,
+        images_dataset: ImagesDataset,
+    ) -> AgentGeneratedImage:
+        image_id = self._image_id_from_dataset_uri(uri=image.uri)
+        if image_id is None:
+            return image
+
+        saved_image = await images_dataset.read(image_id=image_id)
+        image_data = await images_dataset.read_data(image_id=image_id)
+        if saved_image is None or image_data is None:
+            return image
+
+        mime_type = image.mime_type or saved_image.mime_type or "image/png"
+        data_uri = (
+            f"data:{mime_type};base64,{base64.b64encode(image_data).decode('ascii')}"
+        )
+        return image.model_copy(
+            update={
+                "uri": data_uri,
+                "mime_type": mime_type,
+                "created_at": image.created_at or saved_image.created_at,
+                "created_by": image.created_by or saved_image.created_by,
+            }
+        )
+
+    @staticmethod
+    def _image_id_from_dataset_uri(*, uri: str | None) -> str | None:
+        if not isinstance(uri, str):
+            return None
+        parsed = urlparse(uri)
+        if parsed.scheme != "dataset" or parsed.netloc != ImagesDataset.TABLE_NAME:
+            return None
+        values = parse_qs(parsed.query).get("id")
+        if not values:
+            return None
+        image_id = values[0].strip()
+        return image_id if image_id != "" else None
 
     @staticmethod
     def _stored_agent_message(*, value: Any) -> AgentThreadMessage | None:

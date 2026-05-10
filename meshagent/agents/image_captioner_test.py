@@ -45,7 +45,7 @@ class _FakeAdapter(LLMAdapter):
             return _ImageCapableContext(system_role=None)
         return AgentSessionContext(system_role=None)
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,

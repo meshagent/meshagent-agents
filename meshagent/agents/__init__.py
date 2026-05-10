@@ -13,7 +13,7 @@ from .task_runner import TaskRunner
 from .threaded_task_runner import ThreadedTaskRunner, ThreadingMode
 from .development import connect_development_agent
 from .listener import Listener, ListenerContext
-from .adapter import ToolResponseAdapter, LLMAdapter
+from .adapter import ToolResponseAdapter, LLMAdapter, LLMProvider
 from .image_captioner import ImageCaptioner, LLMImageCaptioner
 from .dataset_thread_storage import DatasetThreadStorage
 from .process_thread_adapter import MeshDocumentThreadStorage
@@ -52,6 +52,7 @@ __all__ = [
     ListenerContext,
     ToolResponseAdapter,
     LLMAdapter,
+    LLMProvider,
     ImageCaptioner,
     LLMImageCaptioner,
     DatasetThreadStorage,

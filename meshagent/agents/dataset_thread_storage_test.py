@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import pyarrow as pa
 import pytest
 
 from meshagent.agents.adapter import LLMAdapter
+from meshagent.agents.agent_event_reader import (
+    AccumulatingAgentEventReader,
+    AgentEventReader,
+    AgentEventReaderCallbacks,
+    _BufferedToolCall,
+)
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.dataset_thread_storage import DatasetThreadStorage
+from meshagent.agents.images_dataset import ImagesDataset
 from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
@@ -67,6 +74,7 @@ class _FakeDatasets:
         self.create_calls: list[dict[str, Any]] = []
         self.optimize_calls: list[dict[str, Any]] = []
         self.update_calls: list[dict[str, Any]] = []
+        self.raise_on_existing_create = False
 
     @staticmethod
     def _key(
@@ -96,6 +104,8 @@ class _FakeDatasets:
             }
         )
         key = self._key(name=name, namespace=namespace)
+        if self.raise_on_existing_create and key in self.schemas:
+            raise ValueError(f"Table {name!r} already exists with a different schema")
         self.schemas.setdefault(key, schema)
         self.rows.setdefault(key, [])
 
@@ -127,9 +137,23 @@ class _FakeDatasets:
         *,
         table: str,
         namespace: list[str] | None = None,
+        where: str | dict[str, Any] | None = None,
+        limit: int | None = None,
+        select: list[str] | None = None,
     ) -> pa.Table:
         key = self._key(table=table, namespace=namespace)
-        return pa.Table.from_pylist(self.rows.get(key, []), schema=self.schemas[key])
+        rows = list(self.rows.get(key, []))
+        if isinstance(where, dict):
+            rows = [
+                row
+                for row in rows
+                if all(row.get(field) == value for field, value in where.items())
+            ]
+        if limit is not None:
+            rows = rows[:limit]
+        if select is not None:
+            rows = [{field: row.get(field) for field in select} for row in rows]
+        return pa.Table.from_pylist(rows)
 
     async def insert(
         self,
@@ -203,6 +227,128 @@ def _participant(name: str) -> Participant:
     return Participant(id=name, attributes={"name": name})
 
 
+class _DatasetStorageTestReader(AccumulatingAgentEventReader):
+    def _append_user_text(self, text: str) -> None:
+        self._emit_context_message({"role": "user", "content": text})
+
+    def _append_user_content(self, content: list[dict[str, Any]]) -> None:
+        self._emit_context_message({"role": "user", "content": content})
+
+    def _append_assistant_text(self, *, text: str, phase: str | None) -> None:
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        if phase is not None:
+            message["phase"] = phase
+        self._emit_context_message(message)
+
+    def _append_assistant_reasoning(self, *, text: str) -> None:
+        self._emit_context_message({"role": "assistant", "content": text})
+
+    def _append_assistant_file(self, *, url: str) -> None:
+        self._emit_context_message({"role": "assistant", "content": url})
+
+    def _append_thread_event(self, *, event: dict[str, Any]) -> None:
+        self._emit_context_message(
+            {"role": "assistant", "content": [{"type": "event", "event": event}]}
+        )
+
+    def _append_tool_call(
+        self,
+        *,
+        tool_call: _BufferedToolCall,
+        result: dict[str, Any] | None,
+        error: dict[str, Any] | None,
+    ) -> None:
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_call",
+                        "item_id": tool_call.item_id,
+                        "namespace": tool_call.namespace,
+                        "call_id": tool_call.call_id,
+                        "toolkit": tool_call.toolkit,
+                        "tool": tool_call.tool,
+                        "arguments": tool_call.arguments_dict(),
+                        "result": result,
+                        "error": error,
+                        "logs": tool_call.logs,
+                    }
+                ],
+            }
+        )
+
+    def _append_image_generation_event(
+        self,
+        *,
+        event_type: str,
+        item_id: str,
+        call_id: str | None,
+        toolkit: str,
+        tool: str,
+        arguments: dict[str, Any] | None,
+        images: list[dict[str, Any]],
+        status: str,
+        status_detail: str | None,
+    ) -> None:
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "image_generation",
+                        "event_type": event_type,
+                        "item_id": item_id,
+                        "call_id": call_id,
+                        "toolkit": toolkit,
+                        "tool": tool,
+                        "arguments": arguments,
+                        "images": images,
+                        "status": status,
+                        "status_detail": status_detail,
+                    }
+                ],
+            }
+        )
+
+    def _append_audio_generation_event(self, *, message: Any) -> None:
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "content": [message.model_dump(mode="json")],
+            }
+        )
+
+    def _append_audio_transcription_event(self, *, message: Any) -> None:
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "content": [message.model_dump(mode="json")],
+            }
+        )
+
+    def _restore_compacted_messages(self, *, messages: list[dict[str, Any]]) -> None:
+        for message in messages:
+            self._emit_context_message(message)
+
+
+class _DatasetStorageTestAdapter(LLMAdapter[dict[str, Any]]):
+    def make_agent_event_reader(
+        self,
+        *,
+        emit_message: Callable[[dict[str, Any]], None],
+        callbacks: AgentEventReaderCallbacks | None = None,
+    ) -> AgentEventReader:
+        return _DatasetStorageTestReader(
+            emit_message=emit_message,
+            callbacks=callbacks,
+        )
+
+
+def _test_llm_adapter() -> LLMAdapter[dict[str, Any]]:
+    return _DatasetStorageTestAdapter()
+
+
 def _row_data(row: dict[str, Any]) -> dict[str, Any]:
     raw_data = row["data"]
     data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
@@ -241,6 +387,41 @@ async def test_dataset_thread_storage_accepts_dataset_thread_urls() -> None:
         "threads",
     ]
     assert room.datasets.create_calls[0]["name"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_schema_compresses_json_data() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+
+    await storage.start()
+    await storage.stop()
+
+    schema = room.datasets.create_calls[0]["schema"]
+    assert schema.field("data").metadata == {b"lance-encoding:compression": b"zstd"}
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_opens_existing_table_without_recreating() -> None:
+    room = _FakeRoom()
+    room.datasets.raise_on_existing_create = True
+    room.datasets.schemas[(("threads",), "demo")] = pa.schema(
+        [
+            pa.field("turn_id", pa.string()),
+            pa.field("item_id", pa.string(), nullable=False),
+            pa.field("type", pa.string()),
+            pa.field("sequence", pa.int64(), nullable=False),
+            pa.field("timestamp", pa.timestamp("us"), nullable=False),
+            pa.field("data", pa.json_(pa.large_string()), nullable=False),
+        ]
+    )
+    room.datasets.rows[(("threads",), "demo")] = []
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+
+    await storage.start()
+    await storage.stop()
+
+    assert room.datasets.create_calls == []
 
 
 def test_dataset_thread_storage_rejects_non_dataset_paths() -> None:
@@ -424,7 +605,7 @@ async def test_dataset_thread_storage_restores_usage_updates() -> None:
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
 
     assert context.usage == {
         "gpt-test.input_tokens": 120.0,
@@ -474,7 +655,7 @@ async def test_dataset_thread_storage_restores_compacted_context_messages() -> N
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
 
     assert context.messages == compacted_messages
 
@@ -624,12 +805,79 @@ async def test_dataset_thread_storage_restores_text_phase() -> None:
     await restored.start()
     try:
         context = AgentSessionContext(system_role=None)
-        restored.restore_session_context(context=context, llm_adapter=LLMAdapter())
+        restored.restore_session_context(
+            context=context,
+            llm_adapter=_test_llm_adapter(),
+        )
     finally:
         await restored.stop()
 
     assert context.messages == [
         {"role": "assistant", "content": "checking", "phase": "commentary"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_restores_streamed_text_as_single_message() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    storage.push_message(
+        message=AgentTextContentStarted(
+            type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            provider="openai",
+            model="gpt-test",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            text="Hi",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            text=" there",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+            text="Hi there",
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentEnded(
+            type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="text-1",
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+
+    assert context.messages == [{"role": "assistant", "content": "Hi there"}]
+    assert [event["type"] for event in context.metadata["agent_events"]] == [
+        AGENT_EVENT_TEXT_CONTENT_DELTA,
+        AGENT_EVENT_TEXT_CONTENT_ENDED,
     ]
 
 
@@ -1040,7 +1288,7 @@ async def test_dataset_thread_storage_does_not_persist_binary_image_generation_r
     assert ended["type"] == "meshagent.agent.tool_call.ended"
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
     assert context.messages[0]["role"] == "assistant"
     content = context.messages[0]["content"][0]
     assert content["type"] == "tool_call"
@@ -1148,6 +1396,62 @@ async def test_dataset_thread_storage_does_not_overwrite_typed_image_generation_
     assert data["images"][0]["uri"] == "dataset://images?id=image-1"
     ended = _row_data(thread_rows[1])
     assert ended["type"] == AGENT_EVENT_TURN_ENDED
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_async_restore_hydrates_image_dataset_uris() -> (
+    None
+):
+    room = _FakeRoom()
+    saved_image = await ImagesDataset(room).save(
+        image_id="image-1",
+        data=b"fake image bytes",
+        mime_type="image/png",
+        created_by="chatbot",
+        created_at="2026-05-09T18:00:00Z",
+    )
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentImageGenerationCompleted(
+            type="meshagent.agent.image_generation.completed",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-tool",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            images=[
+                AgentGeneratedImage(
+                    uri="dataset://images?id=image-1",
+                    mime_type="image/png",
+                    width=512,
+                    height=512,
+                    status="completed",
+                )
+            ],
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    await storage.restore_session_context_async(
+        context=context,
+        llm_adapter=_test_llm_adapter(),
+    )
+
+    content = context.messages[0]["content"][0]
+    assert content["type"] == "image_generation"
+    assert content["images"][0]["uri"] == (
+        "data:image/png;base64,ZmFrZSBpbWFnZSBieXRlcw=="
+    )
+    assert content["images"][0]["created_at"] == saved_image.created_at
+    assert content["images"][0]["created_by"] == saved_image.created_by
+
+    row = _row_data(room.datasets.rows[(("threads",), "demo")][0])
+    assert row["images"][0]["uri"] == "dataset://images?id=image-1"
 
 
 @pytest.mark.asyncio
@@ -1480,7 +1784,7 @@ async def test_dataset_thread_storage_restores_agent_events_with_llm_reader() ->
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=LLMAdapter())
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
 
     assert context.messages[0] == {"role": "user", "content": "question"}
     assert context.messages[1] == {"role": "assistant", "content": "answer"}

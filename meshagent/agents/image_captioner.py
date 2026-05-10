@@ -88,7 +88,7 @@ class LLMImageCaptioner(ImageCaptioner):
             session_context.append_user_message(self._prompt)
             session_context.append_image_message(mime_type=mime_type, data=image_data)
 
-            response = await self._llm_adapter.next(
+            response = await self._llm_adapter.create_response(
                 context=session_context,
                 caller=room.local_participant,
                 toolkits=[],

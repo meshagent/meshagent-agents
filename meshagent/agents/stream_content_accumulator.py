@@ -61,7 +61,7 @@ class TextContentAccumulator:
             item_id=item_id,
             turn_id=current.turn_id,
             status="in_progress",
-            text=current.text + delta,
+            text=accumulate_text_delta(current=current.text, delta=delta),
             sender_name=current.sender_name,
             phase=current.phase,
         )
@@ -94,8 +94,25 @@ class TextContentAccumulator:
         self._items[item_id] = next_item
         return next_item
 
+    def item_ids(self) -> tuple[str, ...]:
+        return tuple(self._items)
+
     def clear(self) -> None:
         self._items.clear()
+
+
+def accumulate_text_delta(*, current: str, delta: str) -> str:
+    if current == "":
+        return delta
+    if delta == "":
+        return current
+    if delta == current:
+        return current
+    if delta.startswith(current):
+        return delta
+    if current.endswith(delta):
+        return current
+    return current + delta
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +203,9 @@ class FileContentAccumulator:
         )
         self._items[item_id] = next_item
         return next_item
+
+    def item_ids(self) -> tuple[str, ...]:
+        return tuple(self._items)
 
     def clear(self) -> None:
         self._items.clear()

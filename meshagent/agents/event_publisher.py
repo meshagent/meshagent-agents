@@ -31,11 +31,28 @@ from .messages import (
     AGENT_EVENT_IMAGE_GENERATION_FAILED,
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_IMAGE_GENERATION_STARTED,
+    AGENT_EVENT_AUDIO_GENERATION_COMPLETED,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_EVENT_AUDIO_GENERATION_FAILED,
+    AGENT_EVENT_AUDIO_GENERATION_STARTED,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED,
     AgentError,
+    AgentAudioGenerationCompleted,
+    AgentAudioGenerationDelta,
+    AgentAudioGenerationFailed,
+    AgentAudioGenerationStarted,
+    AgentAudioTranscriptionCompleted,
+    AgentAudioTranscriptionDelta,
+    AgentAudioTranscriptionFailed,
+    AgentAudioTranscriptionStarted,
     AgentContextCompacted,
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentGeneratedAudio,
     AgentGeneratedImage,
     AgentImageGenerationCompleted,
     AgentImageGenerationFailed,
@@ -62,6 +79,7 @@ AgentEventCallback = Callable[[AgentMessage], None]
 FunctionToolNameResolver = Callable[[str], tuple[str, str] | None]
 _ContentKind = Literal["file", "reasoning", "text"]
 _MessagePhase = Literal["commentary", "final_answer"]
+_AudioKind = Literal["generation", "transcription"]
 _MESHAGENT_TOOL_NAMESPACE = "meshagent"
 _OPENAI_RESPONSES_TOOL_NAMESPACE = "openai.responses"
 _ANTHROPIC_MESSAGES_TOOL_NAMESPACE = "anthropic.messages"
@@ -711,6 +729,9 @@ class _AgentMessageEmitter:
     _in_progress_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _started_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _ended_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
+    _started_audio: set[tuple[_AudioKind, str]] = field(default_factory=set)
+    _ended_audio: set[tuple[_AudioKind, str]] = field(default_factory=set)
+    _audio_with_data: set[tuple[_AudioKind, str]] = field(default_factory=set)
 
     def _content_key(
         self, *, kind: _ContentKind, item_id: str
@@ -1053,6 +1074,229 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 result=info.result,
                 error=info.error,
+            )
+        )
+
+    def _audio_key(self, *, kind: _AudioKind, item_id: str) -> tuple[_AudioKind, str]:
+        return kind, item_id
+
+    def emit_audio_generation_started(
+        self,
+        *,
+        item_id: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+    ) -> None:
+        key = self._audio_key(kind="generation", item_id=item_id)
+        if key in self._started_audio:
+            return
+        self._started_audio.add(key)
+        self.callback(
+            AgentAudioGenerationStarted(
+                type=AGENT_EVENT_AUDIO_GENERATION_STARTED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                status_detail="Generating audio",
+            )
+        )
+
+    def emit_audio_generation_delta(
+        self,
+        *,
+        item_id: str,
+        delta: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        if delta == "":
+            return
+        self.emit_audio_generation_started(
+            item_id=item_id,
+            response_id=response_id,
+            content_index=content_index,
+        )
+        self._audio_with_data.add(self._audio_key(kind="generation", item_id=item_id))
+        self.callback(
+            AgentAudioGenerationDelta(
+                type=AGENT_EVENT_AUDIO_GENERATION_DELTA,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                delta=delta,
+                mime_type=mime_type,
+                status_detail="Generating audio",
+            )
+        )
+
+    def emit_audio_generation_completed(
+        self,
+        *,
+        item_id: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        audio: AgentGeneratedAudio | None = None,
+    ) -> None:
+        key = self._audio_key(kind="generation", item_id=item_id)
+        if key in self._ended_audio:
+            return
+        self.emit_audio_generation_started(
+            item_id=item_id,
+            response_id=response_id,
+            content_index=content_index,
+        )
+        self._ended_audio.add(key)
+        self.callback(
+            AgentAudioGenerationCompleted(
+                type=AGENT_EVENT_AUDIO_GENERATION_COMPLETED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                audio=audio,
+                status_detail="Audio generated",
+            )
+        )
+
+    def emit_audio_generation_failed(
+        self,
+        *,
+        item_id: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        error: AgentError | None = None,
+    ) -> None:
+        self.callback(
+            AgentAudioGenerationFailed(
+                type=AGENT_EVENT_AUDIO_GENERATION_FAILED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                error=error,
+                status_detail=error.message if error is not None else None,
+            )
+        )
+
+    def emit_audio_transcription_started(
+        self,
+        *,
+        item_id: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        role: str | None = None,
+    ) -> None:
+        key = self._audio_key(kind="transcription", item_id=item_id)
+        if key in self._started_audio:
+            return
+        self._started_audio.add(key)
+        self.callback(
+            AgentAudioTranscriptionStarted(
+                type=AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                role=role,
+                status_detail="Transcribing audio",
+            )
+        )
+
+    def emit_audio_transcription_delta(
+        self,
+        *,
+        item_id: str,
+        text: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        role: str | None = None,
+    ) -> None:
+        if text == "":
+            return
+        self.emit_audio_transcription_started(
+            item_id=item_id,
+            response_id=response_id,
+            content_index=content_index,
+            role=role,
+        )
+        self._audio_with_data.add(
+            self._audio_key(kind="transcription", item_id=item_id)
+        )
+        self.callback(
+            AgentAudioTranscriptionDelta(
+                type=AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                role=role,
+                text=text,
+                status_detail="Transcribing audio",
+            )
+        )
+
+    def emit_audio_transcription_completed(
+        self,
+        *,
+        item_id: str,
+        text: str | None = None,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        role: str | None = None,
+    ) -> None:
+        key = self._audio_key(kind="transcription", item_id=item_id)
+        if key in self._ended_audio:
+            return
+        self.emit_audio_transcription_started(
+            item_id=item_id,
+            response_id=response_id,
+            content_index=content_index,
+            role=role,
+        )
+        self._ended_audio.add(key)
+        self.callback(
+            AgentAudioTranscriptionCompleted(
+                type=AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                role=role,
+                text=text,
+                status_detail="Audio transcribed",
+            )
+        )
+
+    def emit_audio_transcription_failed(
+        self,
+        *,
+        item_id: str,
+        response_id: str | None = None,
+        content_index: int | None = None,
+        role: str | None = None,
+        error: AgentError | None = None,
+    ) -> None:
+        self.callback(
+            AgentAudioTranscriptionFailed(
+                type=AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
+                thread_id=self.thread_id,
+                turn_id=self.turn_id,
+                item_id=item_id,
+                response_id=response_id,
+                content_index=content_index,
+                role=role,
+                error=error,
+                status_detail=error.message if error is not None else None,
             )
         )
 
@@ -1571,6 +1815,107 @@ class _OpenAIAgentEventPublisher:
                 self.emitter.emit_reasoning_delta(item_id=item_id, text=final_text)
         self.emitter.emit_reasoning_ended(item_id=item_id)
 
+    def _audio_item_id_from_event(
+        self,
+        *,
+        event: dict[str, Any],
+        kind: str,
+    ) -> str:
+        item_id = self._item_id_from_event(event=event)
+        if item_id is not None:
+            return item_id
+        return self._synthetic_item_id(event=event, kind=kind)
+
+    def _content_index_from_event(self, *, event: dict[str, Any]) -> int | None:
+        content_index = _as_int(event.get("content_index"))
+        if content_index is not None:
+            return content_index
+        return _as_int(event.get("content_part_index"))
+
+    def _on_audio_delta(self, *, event: dict[str, Any]) -> None:
+        item_id = self._audio_item_id_from_event(event=event, kind="audio")
+        self.emitter.emit_audio_generation_delta(
+            item_id=item_id,
+            response_id=self._response_id_from_event(event=event),
+            content_index=self._content_index_from_event(event=event),
+            delta=_as_text(event.get("delta")) or "",
+            mime_type=_as_str(event.get("mime_type")),
+        )
+
+    def _on_audio_done(self, *, event: dict[str, Any]) -> None:
+        item_id = self._audio_item_id_from_event(event=event, kind="audio")
+        audio_b64 = _as_str(event.get("audio")) or _as_str(event.get("audio_b64"))
+        mime_type = _as_str(event.get("mime_type")) or "audio/wav"
+        audio = None
+        if audio_b64 is not None:
+            audio = AgentGeneratedAudio(
+                uri=f"data:{mime_type};base64,{audio_b64}",
+                mime_type=mime_type,
+                status="completed",
+            )
+        self.emitter.emit_audio_generation_completed(
+            item_id=item_id,
+            response_id=self._response_id_from_event(event=event),
+            content_index=self._content_index_from_event(event=event),
+            audio=audio,
+        )
+
+    def _on_audio_transcript_delta(
+        self,
+        *,
+        event: dict[str, Any],
+        role: str | None,
+    ) -> None:
+        item_id = self._audio_item_id_from_event(event=event, kind="audio_transcript")
+        self.emitter.emit_audio_transcription_delta(
+            item_id=item_id,
+            response_id=self._response_id_from_event(event=event),
+            content_index=self._content_index_from_event(event=event),
+            role=role,
+            text=_as_text(event.get("delta")) or "",
+        )
+
+    def _on_audio_transcript_done(
+        self,
+        *,
+        event: dict[str, Any],
+        role: str | None,
+    ) -> None:
+        item_id = self._audio_item_id_from_event(event=event, kind="audio_transcript")
+        transcript = _as_text(event.get("transcript"))
+        self.emitter.emit_audio_transcription_completed(
+            item_id=item_id,
+            response_id=self._response_id_from_event(event=event),
+            content_index=self._content_index_from_event(event=event),
+            role=role,
+            text=transcript,
+        )
+
+    def _on_audio_transcript_failed(
+        self,
+        *,
+        event: dict[str, Any],
+        role: str | None,
+    ) -> None:
+        item_id = self._audio_item_id_from_event(event=event, kind="audio_transcript")
+        error = _as_dict(event.get("error"))
+        message = "audio transcription failed"
+        code = "audio_transcription_failed"
+        if error is not None:
+            error_message = _as_str(error.get("message"))
+            error_code = _as_str(error.get("code"))
+            if error_message is not None:
+                message = error_message
+            if error_code is not None:
+                code = error_code
+        self.emitter.emit_audio_transcription_failed(
+            item_id=item_id,
+            response_id=self._response_id_from_event(event=event),
+            content_index=self._content_index_from_event(event=event),
+            role=role,
+            error=AgentError(message=message, code=code),
+        )
+
     def __call__(self, event: dict[str, Any]) -> None:
         event_type = _as_str(event.get("type"))
         if event_type is None:
@@ -1641,6 +1986,40 @@ class _OpenAIAgentEventPublisher:
 
         if event_type in {"response.output_text.delta", "response.refusal.delta"}:
             self._on_text_delta(event=event)
+            return
+
+        if event_type in {"response.audio.delta", "response.output_audio.delta"}:
+            self._on_audio_delta(event=event)
+            return
+
+        if event_type in {"response.audio.done", "response.output_audio.done"}:
+            self._on_audio_done(event=event)
+            return
+
+        if event_type in {
+            "response.audio_transcript.delta",
+            "response.output_audio_transcript.delta",
+        }:
+            self._on_audio_transcript_delta(event=event, role="assistant")
+            return
+
+        if event_type in {
+            "response.audio_transcript.done",
+            "response.output_audio_transcript.done",
+        }:
+            self._on_audio_transcript_done(event=event, role="assistant")
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.delta":
+            self._on_audio_transcript_delta(event=event, role="user")
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.completed":
+            self._on_audio_transcript_done(event=event, role="user")
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.failed":
+            self._on_audio_transcript_failed(event=event, role="user")
             return
 
         if event_type in {

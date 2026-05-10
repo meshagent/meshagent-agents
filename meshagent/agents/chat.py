@@ -917,7 +917,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 cloned_context.replace_rules(rules=self._thread_name_rules)
                 cloned_context.append_user_message(text)
                 try:
-                    response = await adapter.next(
+                    response = await adapter.create_response(
                         context=cloned_context,
                         caller=self.room.local_participant,
                         model=self.default_model(),
@@ -2635,7 +2635,7 @@ class ChatBot(ChatBotBase):
                     "if the user they appear to be talking to is offline, then they probably are talking to you",
                 ]
             )
-            response = await self._llm_adapter.next(
+            response = await self._llm_adapter.create_response(
                 context=cloned_context,
                 caller=self._room.local_participant,
                 model=self._decision_model or self._llm_adapter.default_model(),
@@ -2796,7 +2796,7 @@ class ChatBot(ChatBotBase):
         self.prepare_chat_context(chat_context=thread_context.session)
         self._touch_thread_in_index(path=thread_context.path)
 
-        return await self._llm_adapter.next(
+        return await self._llm_adapter.create_response(
             context=thread_context.session,
             caller=self._room.local_participant,
             toolkits=message_toolkits,

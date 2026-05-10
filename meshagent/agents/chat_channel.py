@@ -25,18 +25,15 @@ from .messages import (
     AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TURN_START_ACCEPTED,
+    AGENT_EVENT_TURN_START_REJECTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
-    AGENT_MESSAGE_CAPABILITIES_REQUEST,
+    AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_THREAD_CLOSE,
-    AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_START,
-    AGENT_MESSAGE_TOOL_CALL_APPROVE,
-    AGENT_MESSAGE_TOOL_CALL_REJECT,
-    AGENT_MESSAGE_TURN_INTERRUPT,
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
     AgentFileContent,
@@ -45,24 +42,22 @@ from .messages import (
     AgentFileContentStarted,
     AgentMessage,
     AgentTextContent,
-    ApproveAgentToolCall,
-    CapabilitiesRequest,
-    ClearThread,
+    AgentThreadMessage,
     CloseThread,
     AgentThreadStatus,
     AgentToolCallEnded,
     OpenThread,
-    RejectAgentToolCall,
     StartThread,
     ThreadCleared,
     ThreadStarted,
     TurnEnded,
-    TurnInterrupt,
     TurnSteered,
     TurnStart,
     TurnStartAccepted,
+    TurnStartRejected,
     TurnStarted,
     TurnSteer,
+    parse_agent_message,
 )
 from .process import Message
 from .threaded_channel import ThreadedChannel
@@ -88,19 +83,6 @@ class _ChatMessagePayload(BaseModel):
 class _PathMessagePayload(BaseModel):
     path: str
 
-
-_INBOUND_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
-    AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
-    AGENT_MESSAGE_THREAD_START: StartThread,
-    AGENT_MESSAGE_TURN_START: TurnStart,
-    AGENT_MESSAGE_TURN_STEER: TurnSteer,
-    AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
-    AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
-    AGENT_MESSAGE_THREAD_OPEN: OpenThread,
-    AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
-    AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,
-    AGENT_MESSAGE_TOOL_CALL_REJECT: RejectAgentToolCall,
-}
 
 _THREAD_CONTROL_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_START: StartThread,
@@ -161,8 +143,6 @@ class ChatChannel(ThreadedChannel):
 
     def handles(self, message: Message) -> bool:
         message_type = message.data.type
-        if message_type in _INBOUND_AGENT_MESSAGE_MODELS:
-            return False
         return message_type.startswith("meshagent.agent.")
 
     async def on_start(self) -> None:
@@ -199,12 +179,19 @@ class ChatChannel(ThreadedChannel):
     def _publish_agent_event_to_open_participants(self, *, message: Message) -> None:
         self._track_agent_event(message=message)
         payload = self._outbound_agent_message_payload(message=message)
-        if self._should_buffer_agent_event(payload=payload):
-            self._buffer_agent_event(payload=payload)
-        for participant in self._open_participants(thread_id=message.data.thread_id):
+        data = message.data
+        if isinstance(data, AgentThreadMessage):
+            if self._should_buffer_agent_event(payload=payload):
+                self._buffer_agent_event(payload=payload)
+            participants = self._open_participants(thread_id=data.thread_id)
+        elif message.sender is not None:
+            participants = [message.sender]
+        else:
+            participants = []
+
+        for participant in participants:
             if participant.id == self.room.local_participant.id:
                 continue
-
             self._send_agent_payload_nowait(participant=participant, payload=payload)
 
     def _outbound_agent_message_payload(self, *, message: Message) -> dict[str, Any]:
@@ -578,11 +565,25 @@ class ChatChannel(ThreadedChannel):
             turn_id=str(uuid.uuid4()),
             content=start_thread.content,
             sender_name=start_thread.sender_name,
+            provider=start_thread.provider,
             model=start_thread.model,
             instructions=start_thread.instructions,
             toolkits=start_thread.toolkits,
             tool_choice=start_thread.tool_choice,
         )
+        error = await self.supervisor.validate_turn_start(turn_start)
+        if error is not None:
+            self._send_agent_payload_nowait(
+                participant=sender,
+                payload=TurnStartRejected(
+                    type=AGENT_EVENT_TURN_START_REJECTED,
+                    thread_id=path,
+                    source_message_id=start_thread.message_id,
+                    error=error,
+                ).model_dump(mode="json"),
+            )
+            return
+
         self._begin_pending_thread_list_entry(path=path)
         self._register_open_participant(thread_id=path, participant_id=sender.id)
         self._track_turn_input_payload(
@@ -840,6 +841,10 @@ class ChatChannel(ThreadedChannel):
     ) -> dict[str, Any]:
         normalized_payload = dict(payload)
         message_type = normalized_payload.get("type")
+        if message_type == AGENT_MESSAGE_MODELS_REQUEST:
+            normalized_payload.pop("thread_id", None)
+            return normalized_payload
+
         if message_type not in {
             AGENT_MESSAGE_THREAD_START,
             AGENT_MESSAGE_TURN_START,
@@ -942,11 +947,7 @@ class ChatChannel(ThreadedChannel):
         if not isinstance(message_type, str):
             raise ValueError("agent-message payload must include a string type")
 
-        model = _INBOUND_AGENT_MESSAGE_MODELS.get(message_type)
-        if model is None:
-            raise ValueError(f"unsupported agent-message payload type: {message_type}")
-
-        return model.model_validate(payload)
+        return parse_agent_message(payload)
 
     def _build_thread_list_tools(self) -> list[FunctionTool]:
         if self._thread_list_dir() is None:

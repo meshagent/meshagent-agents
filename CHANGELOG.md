@@ -1,3 +1,6 @@
+## [0.40.0]
+- Breaking: Renamed the `LLMAdapter.next(...)` response creation hook to `LLMAdapter.create_response(...)`; custom adapters must implement the new method name.
+
 ## [0.39.9]
 - Added/expanded `meshagent init` and `meshagent doctor` CLI workflows in the Python SDK, including TUI init improvements.
 - Expanded `meshagent doctor` to provide richer, toolchain-aware diagnostics (Python/TypeScript/.NET), including stronger deployment/runtime guidance and missing toolchain detection.

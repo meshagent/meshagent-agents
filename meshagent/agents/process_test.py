@@ -19,12 +19,13 @@ from meshagent.agents.thread_status_publisher import (
     ParticipantAttributeThreadStatusPublisher,
 )
 from meshagent.agents.thread_schema import thread_schema
-from meshagent.agents.adapter import LLMAdapter, ToolCallApprovalRequest
+from meshagent.agents.adapter import LLMAdapter, LLMProvider, ToolCallApprovalRequest
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
+    AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
@@ -51,6 +52,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_THREAD_CLEAR,
+    AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
@@ -64,6 +66,7 @@ from meshagent.agents.messages import (
     AgentFileContentEnded,
     AgentFileContentStarted,
     AgentMessage,
+    AgentModelChanged,
     AgentTextContent,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -80,6 +83,7 @@ from meshagent.agents.messages import (
     AgentThreadEvent,
     AgentThreadStatus,
     ClearThread,
+    CloseThread,
     OpenThread,
     RejectAgentToolCall,
     TurnStart,
@@ -288,6 +292,9 @@ class _LifecycleThreadStorage:
         del sender
         self.messages.append(message)
 
+    def agent_messages(self) -> list[AgentMessage]:
+        return [*self.messages]
+
     def restore_session_context(
         self,
         *,
@@ -296,6 +303,14 @@ class _LifecycleThreadStorage:
     ) -> None:
         del context
         del llm_adapter
+
+    async def restore_session_context_async(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter=None,
+    ) -> None:
+        self.restore_session_context(context=context, llm_adapter=llm_adapter)
 
     def make_toolkit(self) -> Toolkit:
         return Toolkit(name="thread-storage", tools=[])
@@ -326,6 +341,26 @@ class _RestoringLifecycleThreadStorage(_LifecycleThreadStorage):
             text = "".join(parts)
             if text != "":
                 context.append_assistant_message(text)
+
+
+class _ProviderRestoreRecordingThreadStorage(_LifecycleThreadStorage):
+    def __init__(self, *, path: str) -> None:
+        super().__init__(path=path)
+        self.restore_calls: list[dict[str, Any]] = []
+
+    def restore_session_context(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter=None,
+    ) -> None:
+        self.restore_calls.append(
+            {
+                "context": context,
+                "llm_adapter": llm_adapter,
+            }
+        )
+        context.append_assistant_message(f"restored {len(self.restore_calls)}")
 
 
 class _StorageThreadRecordingProcess(AgentProcess):
@@ -622,7 +657,12 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(self, *, session: _LifecycleSession | None = None) -> None:
         self.session = session if session is not None else _LifecycleSession()
         self.calls: list[dict[str, Any]] = []
+        self.start_session_calls: list[dict[str, Any]] = []
+        self.stop_session_calls: list[dict[str, Any]] = []
+        self.call_order: list[str] = []
         self.call_event = asyncio.Event()
+        self.start_session_event = asyncio.Event()
+        self.stop_session_event = asyncio.Event()
 
     def default_model(self) -> str:
         return "default-model"
@@ -633,7 +673,33 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def create_session(self) -> AgentSessionContext:
         return self.session
 
-    async def next(
+    async def start_session(
+        self,
+        *,
+        context: AgentSessionContext,
+        event_handler=None,
+    ) -> None:
+        self.call_order.append("start_session")
+        self.start_session_calls.append(
+            {
+                "context": context,
+                "messages": [*context.messages],
+                "metadata": dict(context.metadata),
+                "event_handler": event_handler,
+            }
+        )
+        self.start_session_event.set()
+
+    async def stop_session(
+        self,
+        *,
+        context: AgentSessionContext,
+    ) -> None:
+        self.call_order.append("stop_session")
+        self.stop_session_calls.append({"context": context})
+        self.stop_session_event.set()
+
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -651,6 +717,7 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         del steering_callback
         del on_behalf_of
         del options
+        self.call_order.append("create_response")
         self.calls.append(
             {
                 "context": context,
@@ -690,7 +757,7 @@ class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
         self.input_token_calls += 1
         return 120 + (self.input_token_calls * 10)
 
-    async def next(self, **kwargs) -> Any:
+    async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
         context.usage["gpt-test.input_tokens"] = 1000
         context.usage["gpt-test.output_tokens"] = 250
@@ -699,7 +766,7 @@ class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
             "gpt-test.output_tokens": 250.0,
         }
         context.metadata["last_response_context_used_tokens"] = 1250
-        return await super().next(**kwargs)
+        return await super().create_response(**kwargs)
 
 
 class _UsageCountingFailingLLMAdapter(_UsageRecordingLLMAdapter):
@@ -720,14 +787,14 @@ class _UsageCountingFailingLLMAdapter(_UsageRecordingLLMAdapter):
 
 
 class _CompactedUsageLLMAdapter(_UsageRecordingLLMAdapter):
-    async def next(self, **kwargs) -> Any:
+    async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
         context.metadata["last_response_compaction_threshold"] = 250
-        return await super().next(**kwargs)
+        return await super().create_response(**kwargs)
 
 
 class _OpenAIStyleUsageLLMAdapter(_UsageRecordingLLMAdapter):
-    async def next(self, **kwargs) -> Any:
+    async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
         previous_input = float(context.usage.get("gpt-test.input_tokens", 0.0))
         previous_output = float(context.usage.get("gpt-test.output_tokens", 0.0))
@@ -742,7 +809,7 @@ class _OpenAIStyleUsageLLMAdapter(_UsageRecordingLLMAdapter):
             "gpt-test.output_tokens": 1200.0,
         }
         context.metadata["last_response_context_used_tokens"] = 65200
-        return await _RecordingLLMAdapter.next(self, **kwargs)
+        return await _RecordingLLMAdapter.create_response(self, **kwargs)
 
 
 class _CompactingLLMAdapter(_RecordingLLMAdapter):
@@ -824,7 +891,7 @@ class _ThresholdManualCompactionLLMAdapter(_RecordingLLMAdapter):
         )
         context.metadata["token_count"] = 128
 
-    async def next(self, **kwargs) -> Any:
+    async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
         context.usage["gpt-test.input_tokens"] = float(
             context.metadata.get("token_count", 0)
@@ -835,7 +902,7 @@ class _ThresholdManualCompactionLLMAdapter(_RecordingLLMAdapter):
         context.metadata["last_response_context_used_tokens"] = int(
             context.metadata.get("token_count", 0)
         )
-        return await super().next(**kwargs)
+        return await super().create_response(**kwargs)
 
 
 class _ThresholdAutoCompactionLLMAdapter(_RecordingLLMAdapter):
@@ -870,7 +937,7 @@ class _ThresholdAutoCompactionLLMAdapter(_RecordingLLMAdapter):
         assert model == "gpt-test"
         return int(context.metadata.get("token_count", 0))
 
-    async def next(self, **kwargs) -> Any:
+    async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
         event_handler = kwargs.get("event_handler")
         token_count = int(context.metadata.get("token_count", 0))
@@ -907,7 +974,7 @@ class _ThresholdAutoCompactionLLMAdapter(_RecordingLLMAdapter):
         context.metadata["last_response_context_used_tokens"] = int(
             context.metadata.get("token_count", 0)
         )
-        return await super().next(**kwargs)
+        return await super().create_response(**kwargs)
 
 
 class _CancellationUsageLLMAdapter(LLMAdapter[dict[str, Any]]):
@@ -946,7 +1013,7 @@ class _CancellationUsageLLMAdapter(LLMAdapter[dict[str, Any]]):
                 total += len(content)
         return total
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1001,7 +1068,7 @@ class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
     def create_session(self) -> AgentSessionContext:
         return self.session
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1104,7 +1171,7 @@ class _ImageGenerationStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1200,7 +1267,7 @@ class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1276,7 +1343,7 @@ class _ToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1364,7 +1431,7 @@ class _PartialToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1442,7 +1509,7 @@ class _ToolEventArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1524,7 +1591,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1565,7 +1632,7 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
     def create_session(self) -> AgentSessionContext:
         return self.session
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1629,7 +1696,7 @@ class _ToolBoundarySteeringLLMAdapter(LLMAdapter[dict[str, Any]]):
     def create_session(self) -> AgentSessionContext:
         return self.session
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -1749,7 +1816,7 @@ class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -2100,7 +2167,7 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
     def set_tool_call_approval_handler(self, handler) -> None:
         self._approval_handler = handler
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -2229,7 +2296,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
 
         return publish
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -2271,7 +2338,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
     def create_session(self) -> AgentSessionContext:
         return self.session
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -3070,7 +3137,117 @@ async def test_llm_agent_process_passes_turn_id_to_restore_session_context() -> 
 
 
 @pytest.mark.asyncio
-async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapter_next() -> (
+async def test_llm_agent_process_starts_adapter_session_before_create_response() -> (
+    None
+):
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+
+    assert adapter.call_order == ["start_session", "create_response"]
+    assert len(adapter.start_session_calls) == 1
+    assert adapter.start_session_calls[0]["context"] is adapter.session
+    assert adapter.start_session_calls[0]["messages"] == [
+        {"role": "user", "content": "hello"}
+    ]
+    assert callable(adapter.start_session_calls[0]["event_handler"])
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_starts_adapter_session_on_thread_open() -> None:
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+
+    assert adapter.call_order == ["start_session"]
+    assert len(adapter.start_session_calls) == 1
+    assert adapter.start_session_calls[0]["context"] is adapter.session
+    assert adapter.start_session_calls[0]["event_handler"] is None
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_stops_adapter_session_on_thread_close() -> None:
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+
+    process.send(
+        Message(
+            data=CloseThread(
+                type=AGENT_MESSAGE_THREAD_CLOSE,
+                thread_id="thread-1",
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.stop_session_event.wait(), timeout=1)
+
+    assert adapter.call_order == ["start_session", "stop_session"]
+    assert adapter.stop_session_calls == [{"context": adapter.session}]
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapter_create_response() -> (
     None
 ):
     adapter = _UsageRecordingLLMAdapter()
@@ -3159,7 +3336,7 @@ async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapt
 @pytest.mark.asyncio
 async def test_llm_agent_process_adds_participant_name_to_agent_messages() -> None:
     class _AgentMessageAdapter(_RecordingLLMAdapter):
-        async def next(self, **kwargs) -> Any:
+        async def create_response(self, **kwargs) -> Any:
             event_handler = kwargs.get("event_handler")
             if event_handler is not None:
                 event_handler(
@@ -3182,7 +3359,7 @@ async def test_llm_agent_process_adds_participant_name_to_agent_messages() -> No
                         arguments={"cmd": "pwd"},
                     )
                 )
-            return await super().next(**kwargs)
+            return await super().create_response(**kwargs)
 
     room = _DownloadRecordingRoom()
     await room.local_participant.set_attribute("name", "chatbot")
@@ -4759,6 +4936,234 @@ def test_llm_agent_process_allows_storage_path_to_differ_from_thread_id() -> Non
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_defaults_to_first_provider() -> None:
+    primary = _RecordingLLMAdapter(session=_LifecycleSession())
+    secondary = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_providers=[
+            LLMProvider(name="primary", adapter=primary),
+            LLMProvider(name="secondary", adapter=secondary),
+        ],
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+        await _wait_for(lambda: len(primary.calls) == 1)
+
+        assert secondary.calls == []
+        assert primary.calls[0]["messages"] == [{"role": "user", "content": "hello"}]
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_uses_configured_default_provider() -> None:
+    primary = _RecordingLLMAdapter(session=_LifecycleSession())
+    secondary = _RecordingLLMAdapter(session=_LifecycleSession())
+    secondary_provider = LLMProvider(name="secondary", adapter=secondary)
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_providers=[
+            LLMProvider(name="primary", adapter=primary),
+            secondary_provider,
+        ],
+        default_provider=secondary_provider,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+        await _wait_for(lambda: len(secondary.calls) == 1)
+
+        assert primary.calls == []
+        assert secondary.calls[0]["messages"] == [{"role": "user", "content": "hello"}]
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_thread_open_restores_last_persisted_model() -> None:
+    primary = _RecordingLLMAdapter(session=_LifecycleSession())
+    secondary = _RecordingLLMAdapter(session=_LifecycleSession())
+    storage = _LifecycleThreadStorage(path="thread-1")
+    storage.messages.extend(
+        [
+            AgentModelChanged(
+                type=AGENT_EVENT_MODEL_CHANGED,
+                thread_id="thread-1",
+                provider="primary",
+                provider_friendly_name="Primary",
+                model="default-model",
+            ),
+            AgentModelChanged(
+                type=AGENT_EVENT_MODEL_CHANGED,
+                thread_id="thread-1",
+                provider="secondary",
+                provider_friendly_name="Secondary",
+                model="default-model",
+            ),
+        ]
+    )
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_providers=[
+            LLMProvider(name="primary", adapter=primary),
+            LLMProvider(name="secondary", adapter=secondary),
+        ],
+        thread_storage=storage,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="thread-1",
+                )
+            )
+        )
+
+        await _wait_for(lambda: len(secondary.start_session_calls) == 1)
+
+        changed = supervisor.payloads(message_type=AGENT_EVENT_MODEL_CHANGED)
+        assert len(changed) == 1
+        assert changed[0]["provider"] == "secondary"
+        assert changed[0]["model"] == "default-model"
+        assert primary.start_session_calls == []
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_turn_provider_override_switches_and_restores() -> None:
+    primary_session = _LifecycleSession()
+    secondary_session = _LifecycleSession()
+    primary = _RecordingLLMAdapter(session=primary_session)
+    secondary = _RecordingLLMAdapter(session=secondary_session)
+    storage = _ProviderRestoreRecordingThreadStorage(path="thread-1")
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_providers=[
+            LLMProvider(name="primary", adapter=primary),
+            LLMProvider(name="secondary", adapter=secondary),
+        ],
+        thread_storage=storage,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    provider="primary",
+                    content=[{"type": "text", "text": "first"}],
+                )
+            )
+        )
+        await _wait_for(lambda: len(primary.calls) == 1)
+
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    provider="secondary",
+                    content=[{"type": "text", "text": "second"}],
+                )
+            )
+        )
+        await _wait_for(lambda: len(secondary.calls) == 1)
+
+        assert len(storage.restore_calls) == 2
+        assert storage.restore_calls[0]["context"] is primary_session
+        assert storage.restore_calls[0]["llm_adapter"] is primary
+        assert storage.restore_calls[1]["context"] is secondary_session
+        assert storage.restore_calls[1]["llm_adapter"] is secondary
+        assert primary.stop_session_calls == [{"context": primary_session}]
+        assert primary_session.closed == 1
+        assert process.session_context is secondary_session
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_rejects_unknown_turn_provider() -> None:
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_providers=[LLMProvider(name="known", adapter=adapter)],
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    provider="missing",
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+        await _wait_for(
+            lambda: any(
+                message.data.type == AGENT_EVENT_TURN_START_REJECTED
+                for message in supervisor.sent
+            )
+        )
+
+        rejected = [
+            message.data
+            for message in supervisor.sent
+            if message.data.type == AGENT_EVENT_TURN_START_REJECTED
+        ]
+        assert len(rejected) == 1
+        rejection = rejected[0]
+        assert isinstance(rejection, TurnStartRejected)
+        assert rejection.error is not None
+        assert rejection.error.code == "unknown_provider"
+        assert "missing" in rejection.error.message
+        assert adapter.calls == []
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_uses_optional_thread_status_publisher() -> None:
     adapter = _QueuedSteerLLMAdapter()
     publisher = _RecordingThreadStatusPublisher()
@@ -5863,6 +6268,87 @@ async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messag
         assert reasoning.get_attribute("turn_id") == "turn-1"
         assert tool_event.get_attribute("turn_id") == "turn-1"
         assert turn_event.get_attribute("turn_id") == "turn-1"
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_persists_text_phase(
+    monkeypatch,
+) -> None:
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=AgentTextContentStarted(
+                type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-1",
+                phase="commentary",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentDelta(
+                type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-1",
+                text="checking",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentEnded(
+                type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-1",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentStarted(
+                type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-2",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentDelta(
+                type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-2",
+                text="done",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentEnded(
+                type=AGENT_EVENT_TEXT_CONTENT_ENDED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="assistant-2",
+                phase="final_answer",
+            ),
+        )
+
+        await real_sleep(0)
+        await _wait_for(lambda: len(room.sync.document.message_elements) == 2)
+
+        commentary_message = room.sync.document.message_elements[0]
+        final_answer_message = room.sync.document.message_elements[1]
+        assert commentary_message.get_attribute("phase") == "commentary"
+        assert final_answer_message.get_attribute("phase") == "final_answer"
     finally:
         await adapter.stop()
 

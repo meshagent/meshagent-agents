@@ -29,6 +29,10 @@ AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
 AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
 AGENT_MESSAGE_CAPABILITIES_REQUEST = "meshagent.agent.capabilities_request"
 AGENT_MESSAGE_CAPABILITIES_RESPONSE = "meshagent.agent.capabilities_response"
+AGENT_MESSAGE_MODELS_REQUEST = "meshagent.agent.models.request"
+AGENT_MESSAGE_MODELS_RESPONSE = "meshagent.agent.models.response"
+AGENT_MESSAGE_MODEL_CHANGE = "meshagent.agent.model.change"
+AGENT_EVENT_MODEL_CHANGED = "meshagent.agent.model.changed"
 AGENT_EVENT_THREAD_CLEARED = "meshagent.agent.thread.cleared"
 AGENT_EVENT_TURN_START_ACCEPTED = "meshagent.agent.turn.start.accepted"
 AGENT_EVENT_TURN_START_REJECTED = "meshagent.agent.turn.start.rejected"
@@ -64,6 +68,16 @@ AGENT_EVENT_IMAGE_GENERATION_STARTED = "meshagent.agent.image_generation.started
 AGENT_EVENT_IMAGE_GENERATION_PARTIAL = "meshagent.agent.image_generation.partial"
 AGENT_EVENT_IMAGE_GENERATION_COMPLETED = "meshagent.agent.image_generation.completed"
 AGENT_EVENT_IMAGE_GENERATION_FAILED = "meshagent.agent.image_generation.failed"
+AGENT_EVENT_AUDIO_GENERATION_STARTED = "meshagent.agent.audio_generation.started"
+AGENT_EVENT_AUDIO_GENERATION_DELTA = "meshagent.agent.audio_generation.delta"
+AGENT_EVENT_AUDIO_GENERATION_COMPLETED = "meshagent.agent.audio_generation.completed"
+AGENT_EVENT_AUDIO_GENERATION_FAILED = "meshagent.agent.audio_generation.failed"
+AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED = "meshagent.agent.audio_transcription.started"
+AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA = "meshagent.agent.audio_transcription.delta"
+AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED = (
+    "meshagent.agent.audio_transcription.completed"
+)
+AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED = "meshagent.agent.audio_transcription.failed"
 AGENT_EVENT_CONTEXT_COMPACTED = "meshagent.agent.context.compacted"
 AGENT_EVENT_USAGE_UPDATED = "meshagent.agent.usage.updated"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
@@ -98,6 +112,7 @@ class StartThread(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_START]
     content: list[AgentInputContent]
     sender_name: str | None = None
+    provider: Optional[str] = None
     model: Optional[str] = None
     instructions: Optional[str] = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
@@ -109,6 +124,7 @@ class TurnStart(AgentThreadMessage):
     turn_id: str | None = None
     content: list[AgentInputContent]
     sender_name: str | None = None
+    provider: Optional[str] = None
     model: Optional[str] = None
     instructions: Optional[str] = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
@@ -170,6 +186,50 @@ class CapabilitiesResponse(AgentThreadMessage):
     source_message_id: str
     version: str
     toolkits: list[ToolkitCapabilities]
+
+
+class AgentModelInfo(BaseModel):
+    name: str
+    friendly_name: str | None = None
+    description: str | None = None
+    context_window: int | None = None
+    pricing: dict[str, float] | None = None
+    active: bool = False
+
+
+class AgentProviderInfo(BaseModel):
+    name: str
+    friendly_name: str
+    description: str | None = None
+    default_model: str
+    models: list[AgentModelInfo] = Field(default_factory=list)
+
+
+class ModelsRequest(AgentMessage):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[AGENT_MESSAGE_MODELS_REQUEST]
+
+
+class ModelsResponse(AgentMessage):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[AGENT_MESSAGE_MODELS_RESPONSE]
+    source_message_id: str
+    providers: list[AgentProviderInfo]
+
+
+class ChangeModel(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_MODEL_CHANGE]
+    provider: str | None = None
+    model: str | None = None
+
+
+class AgentModelChanged(AgentThreadMessage):
+    type: Literal[AGENT_EVENT_MODEL_CHANGED]
+    source_message_id: str | None = None
+    provider: str
+    model: str
 
 
 class ThreadCleared(AgentThreadMessage):
@@ -471,6 +531,99 @@ class AgentImageGenerationFailed(AgentLLMMessage):
     status_detail: str | None = None
 
 
+class AgentGeneratedAudio(BaseModel):
+    uri: str | None = None
+    mime_type: str | None = None
+    created_at: str | None = None
+    created_by: str | None = None
+    status: str | None = None
+    status_detail: str | None = None
+    transcript: str | None = None
+
+
+class AgentAudioGenerationStarted(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_GENERATION_STARTED]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    status_detail: str | None = None
+
+
+class AgentAudioGenerationDelta(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_GENERATION_DELTA]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    delta: str
+    mime_type: str | None = None
+    status_detail: str | None = None
+
+
+class AgentAudioGenerationCompleted(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_GENERATION_COMPLETED]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    audio: AgentGeneratedAudio | None = None
+    status_detail: str | None = None
+
+
+class AgentAudioGenerationFailed(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_GENERATION_FAILED]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    error: AgentError | None = None
+    status_detail: str | None = None
+
+
+class AgentAudioTranscriptionStarted(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    role: str | None = None
+    status_detail: str | None = None
+
+
+class AgentAudioTranscriptionDelta(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    role: str | None = None
+    text: str
+    status_detail: str | None = None
+
+
+class AgentAudioTranscriptionCompleted(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    role: str | None = None
+    text: str | None = None
+    status_detail: str | None = None
+
+
+class AgentAudioTranscriptionFailed(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED]
+    turn_id: str
+    item_id: str
+    response_id: str | None = None
+    content_index: int | None = None
+    role: str | None = None
+    error: AgentError | None = None
+    status_detail: str | None = None
+
+
 class AgentContextCompacted(AgentThreadMessage):
     type: Literal[AGENT_EVENT_CONTEXT_COMPACTED]
     checkpoint_id: str
@@ -516,6 +669,10 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
     AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
     AGENT_MESSAGE_CAPABILITIES_RESPONSE: CapabilitiesResponse,
+    AGENT_MESSAGE_MODELS_REQUEST: ModelsRequest,
+    AGENT_MESSAGE_MODELS_RESPONSE: ModelsResponse,
+    AGENT_MESSAGE_MODEL_CHANGE: ChangeModel,
+    AGENT_EVENT_MODEL_CHANGED: AgentModelChanged,
     AGENT_EVENT_THREAD_CLEARED: ThreadCleared,
     AGENT_EVENT_TURN_START_ACCEPTED: TurnStartAccepted,
     AGENT_EVENT_TURN_START_REJECTED: TurnStartRejected,
@@ -549,6 +706,14 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL: AgentImageGenerationPartial,
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED: AgentImageGenerationCompleted,
     AGENT_EVENT_IMAGE_GENERATION_FAILED: AgentImageGenerationFailed,
+    AGENT_EVENT_AUDIO_GENERATION_STARTED: AgentAudioGenerationStarted,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA: AgentAudioGenerationDelta,
+    AGENT_EVENT_AUDIO_GENERATION_COMPLETED: AgentAudioGenerationCompleted,
+    AGENT_EVENT_AUDIO_GENERATION_FAILED: AgentAudioGenerationFailed,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED: AgentAudioTranscriptionStarted,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA: AgentAudioTranscriptionDelta,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED: AgentAudioTranscriptionCompleted,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED: AgentAudioTranscriptionFailed,
     AGENT_EVENT_CONTEXT_COMPACTED: AgentContextCompacted,
     AGENT_EVENT_USAGE_UPDATED: AgentUsageUpdated,
     AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,

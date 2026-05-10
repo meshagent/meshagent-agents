@@ -1,6 +1,7 @@
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, Optional, TypeVar
 
@@ -11,7 +12,7 @@ from meshagent.api import Participant, RoomException
 from meshagent.tools import Content, ToolContext, Toolkit
 
 from .agent import AgentSessionContext
-from .agent_event_reader import AgentEventReader, DefaultAgentEventReader
+from .agent_event_reader import AgentEventReader, AgentEventReaderCallbacks
 from .messages import AgentMessage, ToolChoice
 
 TEvent = TypeVar("TEvent")
@@ -35,6 +36,42 @@ class ToolCallApprovalRequest:
     toolkit: str
     tool: str
     arguments: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMProvider:
+    name: str
+    adapter: "LLMAdapter[Any]"
+
+
+@dataclass(frozen=True, slots=True)
+class LLMModelInfo:
+    name: str
+    friendly_name: str | None = None
+    description: str | None = None
+    context_window: int | None = None
+    pricing: dict[str, float] | None = None
+
+
+def llm_model_pricing(*, provider: str, model: str) -> dict[str, float] | None:
+    try:
+        from meshagent.llm_proxy.pricing import pricing
+    except ImportError:
+        return None
+
+    provider_pricing = pricing.get(provider)
+    if not isinstance(provider_pricing, dict):
+        return None
+
+    model_pricing = provider_pricing.get(model)
+    if not isinstance(model_pricing, dict):
+        return None
+
+    out: dict[str, float] = {}
+    for key, value in model_pricing.items():
+        if isinstance(key, str) and isinstance(value, int | float):
+            out[key] = float(value)
+    return out or None
 
 
 ToolCallApprovalHandler = Callable[
@@ -159,6 +196,27 @@ class LLMAdapter(Generic[TEvent]):
     def provider_name(self) -> str | None:
         return None
 
+    def provider_friendly_name(self) -> str:
+        provider_name = self.provider_name()
+        if provider_name is not None and provider_name.strip() != "":
+            return provider_name
+        return type(self).__name__.removesuffix("Adapter")
+
+    def provider_description(self) -> str | None:
+        return None
+
+    def list_models(self) -> list[LLMModelInfo]:
+        model = self.default_model()
+        context_window = self.context_window_size(model)
+        return [
+            LLMModelInfo(
+                name=model,
+                context_window=(
+                    int(context_window) if context_window != float("inf") else None
+                ),
+            )
+        ]
+
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()
 
@@ -212,6 +270,24 @@ class LLMAdapter(Generic[TEvent]):
         del api_key
         return self
 
+    async def start_session(
+        self,
+        *,
+        context: AgentSessionContext,
+        event_handler: Callable[[TEvent], None] | None = None,
+    ) -> None:
+        del context
+        del event_handler
+        return None
+
+    async def stop_session(
+        self,
+        *,
+        context: AgentSessionContext,
+    ) -> None:
+        del context
+        return None
+
     def make_agent_event_publisher(
         self,
         turn_id: str,
@@ -239,11 +315,26 @@ class LLMAdapter(Generic[TEvent]):
     def make_agent_event_reader(
         self,
         *,
-        context: AgentSessionContext,
+        emit_message: Callable[[dict[str, Any]], None],
+        callbacks: AgentEventReaderCallbacks | None = None,
     ) -> AgentEventReader:
-        return DefaultAgentEventReader(context=context)
+        del emit_message, callbacks
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement make_agent_event_reader()"
+        )
 
-    async def next(
+    def restore_context_messages(
+        self,
+        *,
+        context: AgentSessionContext,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        context.messages.clear()
+        context.messages.extend(deepcopy(messages))
+        context.previous_messages.clear()
+        context.previous_response_id = None
+
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,
@@ -277,13 +368,19 @@ class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
     def provider_name(self) -> str | None:
         return "meshagent"
 
+    def provider_friendly_name(self) -> str:
+        return "MeshAgent"
+
+    def provider_description(self) -> str | None:
+        return "Delegates turns to a remote MeshAgent participant."
+
     def create_session(self) -> AgentSessionContext:
         return AgentSessionContext()
 
     async def check_for_termination(self, *, context: AgentSessionContext):
         return True
 
-    async def next(
+    async def create_response(
         self,
         *,
         context: AgentSessionContext,

@@ -1,9 +1,7 @@
 import pytest
 
-from meshagent.agents.event_publisher import (
-    make_anthropic_agent_event_publisher,
-    make_openai_agent_event_publisher,
-)
+from meshagent.anthropic.event_publisher import make_anthropic_agent_event_publisher
+from meshagent.openai.tools.event_publisher import make_openai_agent_event_publisher
 from meshagent.agents.messages import (
     AgentMessage,
     AgentImageGenerationCompleted,

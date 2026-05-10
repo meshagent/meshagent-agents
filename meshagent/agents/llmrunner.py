@@ -244,7 +244,7 @@ class LLMTaskRunner(ThreadedTaskRunner):
             resp = None
             while not await self.is_done(context=context):
                 try:
-                    resp = await self._llm_adapter.next(
+                    resp = await self._llm_adapter.create_response(
                         context=context.session,
                         caller=context.room.local_participant,
                         toolkits=combined_toolkits,

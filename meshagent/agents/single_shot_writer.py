@@ -70,7 +70,7 @@ class SingleShotWriter(Writer):
         toolkits = [*self._toolkits, *writer_context.call_context.toolkits]
 
         try:
-            response = await self._llm_adapter.next(
+            response = await self._llm_adapter.create_response(
                 context=writer_context.call_context.session,
                 caller=writer_context.room.local_participant,
                 toolkits=toolkits,

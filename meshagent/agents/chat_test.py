@@ -284,7 +284,7 @@ class _FakeThreadNameAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "thread-name-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,
@@ -324,7 +324,7 @@ class _SessionRequiredThreadNameAdapter(LLMAdapter):
     def create_session(self) -> AgentSessionContext:
         return _SessionRequiredContext(system_role=None)
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,
@@ -359,7 +359,7 @@ class _CaptureChatAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "chat-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,
@@ -391,7 +391,7 @@ class _ShouldReplyAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "decision-model"
 
-    async def next(
+    async def create_response(
         self,
         *,
         context,

@@ -374,7 +374,7 @@ class ThreadedTaskRunner(TaskRunner):
             cloned_context.append_user_message(prompt)
 
             try:
-                response = await self._thread_name_adapter.next(
+                response = await self._thread_name_adapter.create_response(
                     context=cloned_context,
                     caller=context.room.local_participant,
                     model=model,
