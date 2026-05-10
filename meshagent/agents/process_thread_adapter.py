@@ -86,7 +86,6 @@ from .stream_content_accumulator import FileContentAccumulator, TextContentAccum
 from .tool_call_accumulator import ToolCallAccumulator
 
 logger = logging.getLogger("agent.process_thread_adapter")
-
 ThreadStatusMode = Literal["busy", "steerable"]
 _ACTIVE_STATES = {"queued", "in_progress", "running", "pending", "searching"}
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}

@@ -129,6 +129,16 @@ def _as_text(value: Any) -> str | None:
     return None
 
 
+def _base64_bytes(value: Any) -> bytes:
+    text = _as_text(value)
+    if text is None:
+        return b""
+    try:
+        return base64.b64decode(text, validate=True)
+    except Exception:
+        return b""
+
+
 def _parse_tool_arguments(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -1107,12 +1117,12 @@ class _AgentMessageEmitter:
         self,
         *,
         item_id: str,
-        delta: str,
+        data: bytes,
         response_id: str | None = None,
         content_index: int | None = None,
         mime_type: str | None = None,
     ) -> None:
-        if delta == "":
+        if data == b"":
             return
         self.emit_audio_generation_started(
             item_id=item_id,
@@ -1128,7 +1138,7 @@ class _AgentMessageEmitter:
                 item_id=item_id,
                 response_id=response_id,
                 content_index=content_index,
-                delta=delta,
+                data=data,
                 mime_type=mime_type,
                 status_detail="Generating audio",
             )
@@ -1838,7 +1848,7 @@ class _OpenAIAgentEventPublisher:
             item_id=item_id,
             response_id=self._response_id_from_event(event=event),
             content_index=self._content_index_from_event(event=event),
-            delta=_as_text(event.get("delta")) or "",
+            data=_base64_bytes(event.get("delta")),
             mime_type=_as_str(event.get("mime_type")),
         )
 

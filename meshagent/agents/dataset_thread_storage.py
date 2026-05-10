@@ -39,6 +39,9 @@ from .messages import (
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+    AgentAudioGenerationDelta,
     AgentContextCompacted,
     AgentError,
     AgentFileContentDelta,
@@ -49,6 +52,7 @@ from .messages import (
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
+    AgentRealtimeAudioChunk,
     AgentThreadMessage,
     AgentReasoningContentDelta,
     AgentReasoningContentEnded,
@@ -276,6 +280,7 @@ class _StoredThreadRow:
     sequence: int
     timestamp: str
     data: dict[str, Any]
+    attachment: bytes | None = None
 
 
 @dataclass(slots=True)
@@ -394,6 +399,11 @@ class DatasetThreadStorage(ThreadStorage):
                     "data",
                     pa.json_(pa.large_string()),
                     nullable=False,
+                    metadata=LANCE_ZSTD_FIELD_METADATA,
+                ),
+                pa.field(
+                    "attachment",
+                    pa.large_binary(),
                     metadata=LANCE_ZSTD_FIELD_METADATA,
                 ),
             ]
@@ -536,6 +546,12 @@ class DatasetThreadStorage(ThreadStorage):
             )
         else:
             timestamp = str(raw_timestamp) if raw_timestamp is not None else ""
+        attachment = record.get("attachment")
+        if isinstance(attachment, bytearray):
+            attachment = bytes(attachment)
+        elif not isinstance(attachment, bytes):
+            attachment = None
+
         return _StoredThreadRow(
             turn_id=turn_id,
             item_id=item_id,
@@ -543,6 +559,7 @@ class DatasetThreadStorage(ThreadStorage):
             sequence=sequence,
             timestamp=timestamp,
             data=data,
+            attachment=attachment,
         )
 
     def push_message(
@@ -1247,11 +1264,23 @@ class DatasetThreadStorage(ThreadStorage):
         turn_id: str | None = None,
         item_id: str | None = None,
     ) -> _StoredThreadRow:
+        data, attachment = self._message_row_data_and_attachment(message=message)
         return await self._append_row(
             turn_id=turn_id if turn_id is not None else self._message_turn_id(message),
             item_id=item_id if item_id is not None else self._message_item_id(message),
-            data=message.model_dump(mode="json"),
+            data=data,
+            attachment=attachment,
         )
+
+    @staticmethod
+    def _message_row_data_and_attachment(
+        *,
+        message: AgentThreadMessage,
+    ) -> tuple[dict[str, Any], bytes | None]:
+        if isinstance(message, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)):
+            stored_message = message.model_copy(update={"data": b""})
+            return stored_message.model_dump(mode="json"), message.data
+        return message.model_dump(mode="json"), None
 
     @staticmethod
     def _message_turn_id(message: AgentThreadMessage) -> str | None:
@@ -1333,6 +1362,7 @@ class DatasetThreadStorage(ThreadStorage):
         turn_id: str | None,
         item_id: str,
         data: dict[str, Any],
+        attachment: bytes | None = None,
     ) -> _StoredThreadRow:
         await self._ensure_ready()
         timestamp = _now_iso()
@@ -1348,6 +1378,7 @@ class DatasetThreadStorage(ThreadStorage):
             sequence=sequence,
             timestamp=timestamp,
             data=data,
+            attachment=attachment,
         )
         await self._room.datasets.insert(
             table=self._table_name,
@@ -1360,6 +1391,7 @@ class DatasetThreadStorage(ThreadStorage):
                     "sequence": row.sequence,
                     "timestamp": row.timestamp,
                     "data": DatasetJson(row.data),
+                    "attachment": row.attachment,
                 }
             ],
         )
@@ -1552,7 +1584,7 @@ class DatasetThreadStorage(ThreadStorage):
         row: _StoredThreadRow,
     ) -> None:
         data = row.data
-        raw_message = self._stored_agent_message(value=data)
+        raw_message = self._stored_agent_message(value=data, attachment=row.attachment)
         if (
             isinstance(raw_message, AgentContextCompacted)
             and raw_message.messages is not None
@@ -1620,7 +1652,7 @@ class DatasetThreadStorage(ThreadStorage):
 
     def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:
         data = row.data
-        raw_message = self._stored_agent_message(value=data)
+        raw_message = self._stored_agent_message(value=data, attachment=row.attachment)
         if raw_message is not None:
             return [raw_message]
 
@@ -1887,9 +1919,20 @@ class DatasetThreadStorage(ThreadStorage):
         return image_id if image_id != "" else None
 
     @staticmethod
-    def _stored_agent_message(*, value: Any) -> AgentThreadMessage | None:
+    def _stored_agent_message(
+        *,
+        value: Any,
+        attachment: bytes | None = None,
+    ) -> AgentThreadMessage | None:
         if not isinstance(value, dict):
             return None
+        if attachment is not None:
+            message_type = value.get("type")
+            if message_type in (
+                AGENT_EVENT_AUDIO_GENERATION_DELTA,
+                AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+            ):
+                value = {**value, "data": attachment}
         try:
             message = parse_agent_message(value)
         except Exception:

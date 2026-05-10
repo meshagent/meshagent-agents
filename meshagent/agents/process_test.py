@@ -19,7 +19,12 @@ from meshagent.agents.thread_status_publisher import (
     ParticipantAttributeThreadStatusPublisher,
 )
 from meshagent.agents.thread_schema import thread_schema
-from meshagent.agents.adapter import LLMAdapter, LLMProvider, ToolCallApprovalRequest
+from meshagent.agents.adapter import (
+    LLMAdapter,
+    LLMModelInfo,
+    LLMProvider,
+    ToolCallApprovalRequest,
+)
 from meshagent.agents.context import AgentSessionContext
 from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -126,6 +131,30 @@ class _LifecycleChannel(Channel):
     async def on_stop(self) -> None:
         self.stopped += 1
         self.stop_event.set()
+
+
+def test_agent_model_info_includes_modalities() -> None:
+    class _Adapter(LLMAdapter):
+        def default_model(self) -> str:
+            return "gpt-realtime"
+
+        def list_models(self) -> list[LLMModelInfo]:
+            return [
+                LLMModelInfo(
+                    name="gpt-realtime",
+                    modalities=("text", "audio"),
+                )
+            ]
+
+    adapter = _Adapter()
+    model_info = process_module.agent_model_info(
+        provider=LLMProvider(name="openai-realtime", adapter=adapter),
+        model_info=adapter.list_models()[0],
+        current_provider="openai-realtime",
+        current_model="gpt-realtime",
+    )
+
+    assert model_info.modalities == ["text", "audio"]
 
 
 class _RecordingChannel(_LifecycleChannel):
@@ -716,7 +745,6 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         del output_schema
         del steering_callback
         del on_behalf_of
-        del options
         self.call_order.append("create_response")
         self.calls.append(
             {
@@ -726,12 +754,23 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
                 "metadata": dict(context.metadata),
                 "toolkits": [toolkit.name for toolkit in toolkits],
                 "model": model,
+                "options": options,
             }
         )
         if event_handler is not None:
             event_handler({"type": "adapter.event", "call_index": len(self.calls) - 1})
         self.call_event.set()
         return {"ok": True}
+
+
+class _AudioRecordingLLMAdapter(_RecordingLLMAdapter):
+    def list_models(self) -> list[LLMModelInfo]:
+        return [
+            LLMModelInfo(
+                name=self.default_model(),
+                modalities=("text", "audio"),
+            )
+        ]
 
 
 class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
@@ -3207,6 +3246,96 @@ async def test_llm_agent_process_starts_adapter_session_on_thread_open() -> None
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_thread_open_during_active_turn_does_not_block_next_turn() -> (
+    None
+):
+    class _BlockingOpenAdapter(_RecordingLLMAdapter):
+        def __init__(self) -> None:
+            super().__init__(session=_LifecycleSession())
+            self.release_response = asyncio.Event()
+            self.open_session_started = asyncio.Event()
+
+        async def start_session(
+            self,
+            *,
+            context: AgentSessionContext,
+            event_handler=None,
+        ) -> None:
+            await super().start_session(context=context, event_handler=event_handler)
+            if event_handler is None:
+                self.open_session_started.set()
+                await asyncio.Event().wait()
+
+        async def create_response(self, **kwargs) -> Any:
+            result = await super().create_response(**kwargs)
+            await self.release_response.wait()
+            return result
+
+    adapter = _BlockingOpenAdapter()
+    supervisor = _RecordingSupervisor()
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                message_id="first-message",
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "hi"}],
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                message_id="second-message",
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "hi"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: any(
+            payload["source_message_id"] == "second-message"
+            for payload in supervisor.payloads(
+                message_type=AGENT_EVENT_TURN_START_ACCEPTED
+            )
+        )
+    )
+
+    assert not adapter.open_session_started.is_set()
+    assert all(
+        call["event_handler"] is not None for call in adapter.start_session_calls
+    )
+
+    adapter.release_response.set()
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) >= 2
+    )
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_stops_adapter_session_on_thread_close() -> None:
     adapter = _RecordingLLMAdapter(session=_LifecycleSession())
     supervisor = _RecordingSupervisor()
@@ -4832,6 +4961,11 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
                 name="report.pdf",
                 mime_type="application/pdf",
             ),
+            "audio/prompt.wav": FileContent(
+                data=b"wav-bytes",
+                name="prompt.wav",
+                mime_type="audio/wav",
+            ),
         }
     )
     supervisor = _RecordingSupervisor()
@@ -4851,6 +4985,7 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
                 content=[
                     {"type": "file", "url": "room://images/cat.png"},
                     {"type": "file", "url": "room:///docs/report.pdf"},
+                    {"type": "file", "url": "room:///audio/prompt.wav"},
                 ],
             )
         )
@@ -4861,7 +4996,11 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
 
-    assert room.storage.download_calls == ["images/cat.png", "docs/report.pdf"]
+    assert room.storage.download_calls == [
+        "images/cat.png",
+        "docs/report.pdf",
+        "audio/prompt.wav",
+    ]
     assert session.image_message_calls == [
         {"mime_type": "image/png", "data": b"png-bytes"}
     ]
@@ -4870,7 +5009,12 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
             "filename": "report.pdf",
             "mime_type": "application/pdf",
             "data": b"%PDF-1.7",
-        }
+        },
+        {
+            "filename": "prompt.wav",
+            "mime_type": "audio/wav",
+            "data": b"wav-bytes",
+        },
     ]
     assert session.image_url_calls == []
     assert session.file_url_calls == []
@@ -4896,6 +5040,67 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
                 }
             ],
         },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file-bytes",
+                    "filename": "prompt.wav",
+                    "mime_type": "audio/wav",
+                    "size": len(b"wav-bytes"),
+                }
+            ],
+        },
+    ]
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_handles_audio_file_attachments_as_files() -> None:
+    session = _AttachmentRecordingSession()
+    adapter = _RecordingLLMAdapter(session=session)
+    room = _DownloadRecordingRoom(
+        files={
+            "audio/prompt.wav": FileContent(
+                data=b"wav-bytes",
+                name="prompt.wav",
+                mime_type="audio/wav",
+            ),
+        }
+    )
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[
+                    {"type": "file", "url": "room:///audio/prompt.wav"},
+                ],
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    assert session.file_message_calls == [
+        {
+            "filename": "prompt.wav",
+            "mime_type": "audio/wav",
+            "data": b"wav-bytes",
+        }
     ]
 
     await process.stop(supervisor)
@@ -5001,6 +5206,43 @@ async def test_llm_agent_process_uses_configured_default_provider() -> None:
 
         assert primary.calls == []
         assert secondary.calls[0]["messages"] == [{"role": "user", "content": "hello"}]
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_turn_output_modalities_change_emits_model_changed() -> (
+    None
+):
+    adapter = _AudioRecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_providers=[LLMProvider(name="primary", adapter=adapter)],
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    output_modalities=["audio"],
+                    content=[{"type": "text", "text": "hello"}],
+                )
+            )
+        )
+
+        await _wait_for(lambda: len(adapter.calls) == 1)
+
+        changed = supervisor.payloads(message_type=AGENT_EVENT_MODEL_CHANGED)
+        assert len(changed) == 1
+        assert changed[0]["provider"] == "primary"
+        assert changed[0]["model"] == "default-model"
+        assert changed[0]["output_modalities"] == ["audio"]
+        assert adapter.calls[0]["options"] == {"output_modalities": ["audio"]}
     finally:
         await process.stop(supervisor)
 
@@ -8585,6 +8827,7 @@ async def test_agent_process_thread_adapter_strips_room_scheme_from_turn_attachm
                 thread_id="/threads/test.thread",
                 content=[
                     {"type": "text", "text": "hello"},
+                    {"type": "file", "url": "room:///audio/prompt.wav"},
                     {"type": "file", "url": "room:///docs/report.pdf"},
                     {"type": "file", "url": "room://images/cat.png"},
                     {"type": "file", "url": "https://example.com/report.pdf"},
@@ -8602,6 +8845,7 @@ async def test_agent_process_thread_adapter_strips_room_scheme_from_turn_attachm
             child.get_attribute("path")
             for child in user_message.get_children_by_tag_name("file")
         ] == [
+            "audio/prompt.wav",
             "docs/report.pdf",
             "images/cat.png",
             "https://example.com/report.pdf",

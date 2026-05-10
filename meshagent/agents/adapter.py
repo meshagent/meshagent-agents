@@ -51,6 +51,7 @@ class LLMModelInfo:
     description: str | None = None
     context_window: int | None = None
     pricing: dict[str, float] | None = None
+    modalities: tuple[Literal["text", "audio"], ...] = ("text",)
 
 
 def llm_model_pricing(*, provider: str, model: str) -> dict[str, float] | None:

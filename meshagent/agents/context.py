@@ -79,6 +79,10 @@ class AgentSessionContext:
     def supports_files(self) -> bool:
         return False
 
+    @property
+    def supports_realtime_audio(self) -> bool:
+        return False
+
     def track_response(self, id: str):
         self.previous_response_id = id
         self._previous_messages.extend(self.messages)
@@ -127,6 +131,17 @@ class AgentSessionContext:
     def append_file_url(self, *, url: str) -> dict:
         del url
         raise RoomException("this chat context does not support file URL inputs")
+
+    async def append_realtime_audio_chunk(
+        self, *, mime_type: str, data: bytes, sample_rate: int | None = None
+    ) -> None:
+        del mime_type
+        del data
+        del sample_rate
+        raise RoomException("this chat context does not support realtime audio inputs")
+
+    async def commit_realtime_audio(self) -> None:
+        raise RoomException("this chat context does not support realtime audio inputs")
 
     def append_rules(self, rules: list[str]):
         system_message = None

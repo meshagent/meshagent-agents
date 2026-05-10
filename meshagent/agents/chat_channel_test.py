@@ -12,6 +12,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
@@ -30,6 +31,7 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_MODELS_RESPONSE,
+    AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_OPEN,
@@ -42,6 +44,7 @@ from meshagent.agents.messages import (
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentAudioGenerationDelta,
     AgentError,
     AgentTextContent,
     AgentTextContentDelta,
@@ -58,6 +61,7 @@ from meshagent.agents.messages import (
     AgentContextWindowUsage,
     AgentModelInfo,
     AgentProviderInfo,
+    AgentRealtimeAudioChunk,
     OpenThread,
     ModelsRequest,
     ModelsResponse,
@@ -205,8 +209,10 @@ class _FakeMessaging:
         message: dict,
         attachment=None,
     ) -> None:
-        del attachment
-        self.sent_messages.append({"to": to, "type": type, "message": message})
+        sent_message = {"to": to, "type": type, "message": message}
+        if attachment is not None:
+            sent_message["attachment"] = attachment
+        self.sent_messages.append(sent_message)
 
     def emit_message(self, message: RoomMessage) -> None:
         for handler in self._handlers.get("message", []):
@@ -478,6 +484,83 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
 
 
 @pytest.mark.asyncio
+async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() -> None:
+    caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
+    sync = _FakeSync()
+    room = _FakeRoom(participants=[caller], messaging_enabled=True, sync=sync)
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "provider": "openai",
+                        "model": "gpt-realtime",
+                        "content": [],
+                    }
+                },
+            )
+        )
+        await _drain_background_tasks()
+
+        assert supervisor.sent == []
+        assert len(room.messaging.sent_messages) == 1
+        response_payload = room.messaging.sent_messages[0]["message"]["payload"]
+        assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
+        result_path = response_payload["thread_id"]
+        assert isinstance(result_path, str)
+        assert channel._open_participant_ids_by_thread == {result_path: {caller.id}}
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+                        "thread_id": result_path,
+                        "message_id": "audio-1",
+                        "mime_type": "audio/pcm",
+                        "sample_rate": 24000,
+                        "final": True,
+                    }
+                },
+                attachment=b"\x01\x02\x03\x04",
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        sent = supervisor.sent[0]
+        assert sent.sender is caller
+        assert sent.source is channel
+        chunk = sent.data
+        assert isinstance(chunk, AgentRealtimeAudioChunk)
+        assert chunk.thread_id == result_path
+        assert chunk.data == b"\x01\x02\x03\x04"
+        assert chunk.final is True
+
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
+        entries = sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("path") == result_path
+        assert entries[0].get_attribute("name") == "Audio message"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_start_thread_rejection_does_not_create_thread() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     sync = _FakeSync()
@@ -557,6 +640,7 @@ async def test_chat_channel_start_thread_message_responds_when_storage_exists_st
                         "type": AGENT_MESSAGE_THREAD_START,
                         "message_id": "start-thread-1",
                         "content": [{"type": "text", "text": "hello"}],
+                        "output_modalities": ["audio"],
                     }
                 },
             )
@@ -579,6 +663,7 @@ async def test_chat_channel_start_thread_message_responds_when_storage_exists_st
         assert storage.exists_calls == []
         assert len(supervisor.sent) == 1
         assert supervisor.sent[0].data.thread_id == result_path
+        assert supervisor.sent[0].data.output_modalities == ["audio"]
     finally:
         await channel.stop(supervisor)
 
@@ -1546,6 +1631,51 @@ async def test_chat_channel_sends_usage_updates_to_open_participants() -> None:
                 },
             }
         }
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_sends_audio_generation_delta_as_attachment() -> None:
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        await channel.on_message(
+            Message(
+                data=AgentAudioGenerationDelta(
+                    type=AGENT_EVENT_AUDIO_GENERATION_DELTA,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="audio-1",
+                    data=b"\xf7\x00\x01",
+                )
+            )
+        )
+
+        assert len(room.messaging.sent_messages) == 1
+        sent = room.messaging.sent_messages[0]
+        assert sent["attachment"] == b"\xf7\x00\x01"
+        payload = sent["message"]["payload"]
+        assert payload["type"] == AGENT_EVENT_AUDIO_GENERATION_DELTA
+        assert payload["thread_id"] == "/threads/test.thread"
+        assert "data" not in payload
     finally:
         await channel.stop(supervisor)
 

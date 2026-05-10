@@ -19,6 +19,7 @@ from meshagent.agents.dataset_thread_storage import DatasetThreadStorage
 from meshagent.agents.images_dataset import ImagesDataset
 from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -36,14 +37,17 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_TURN_START,
+    AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_TURN_STEER,
     AgentContextWindowUsage,
+    AgentAudioGenerationDelta,
     AgentContextCompacted,
     AgentError,
     AgentGeneratedImage,
     AgentImageGenerationCompleted,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
+    AgentRealtimeAudioChunk,
     AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
@@ -354,6 +358,47 @@ def _row_data(row: dict[str, Any]) -> dict[str, Any]:
     data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
     assert isinstance(data, dict)
     return data
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_persists_binary_agent_message_attachment() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentRealtimeAudioChunk(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+            thread_id="dataset://threads/demo",
+            message_id="audio-input-1",
+            data=b"\xf7\x00\x01",
+            final=True,
+        )
+    )
+    storage.push_message(
+        message=AgentAudioGenerationDelta(
+            type=AGENT_EVENT_AUDIO_GENERATION_DELTA,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="audio-output-1",
+            data=b"\xf7\x02\x03",
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert thread_rows[0]["attachment"] == b"\xf7\x00\x01"
+    assert thread_rows[1]["attachment"] == b"\xf7\x02\x03"
+    assert _row_data(thread_rows[0])["data"] == ""
+    assert _row_data(thread_rows[1])["data"] == ""
+
+    restored = storage.agent_messages()
+    assert isinstance(restored[0], AgentRealtimeAudioChunk)
+    assert restored[0].data == b"\xf7\x00\x01"
+    assert isinstance(restored[1], AgentAudioGenerationDelta)
+    assert restored[1].data == b"\xf7\x02\x03"
 
 
 @pytest.mark.asyncio

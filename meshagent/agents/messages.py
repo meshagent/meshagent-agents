@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional
 
 from meshagent.api.agent_content import (
     AgentContent,
+    AgentAudioContent,
     AgentFileContent,
     AgentInputContent,
     AgentTextContent,
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 __all__ = [
     "AgentContent",
+    "AgentAudioContent",
     "AgentFileContent",
     "AgentInputContent",
     "AgentTextContent",
@@ -23,6 +25,7 @@ __all__ = [
 AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
 AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
+AGENT_MESSAGE_REALTIME_AUDIO_CHUNK = "meshagent.agent.realtime_audio.chunk"
 AGENT_MESSAGE_THREAD_START = "meshagent.agent.thread.start"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
 AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
@@ -114,6 +117,10 @@ class StartThread(AgentMessage):
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    output_modalities: list[Literal["text", "audio"]] | None = Field(
+        default=None,
+        max_length=1,
+    )
     instructions: Optional[str] = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
@@ -126,6 +133,10 @@ class TurnStart(AgentThreadMessage):
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    output_modalities: list[Literal["text", "audio"]] | None = Field(
+        default=None,
+        max_length=1,
+    )
     instructions: Optional[str] = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
@@ -141,6 +152,21 @@ class TurnSteer(AgentThreadMessage):
 class TurnInterrupt(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_INTERRUPT]
     turn_id: str
+
+
+class AgentRealtimeAudioChunk(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_REALTIME_AUDIO_CHUNK]
+    turn_id: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    data: bytes = b""
+    mime_type: str = "audio/pcm"
+    sample_rate: int = 24000
+    final: bool = False
+    output_modalities: list[Literal["text", "audio"]] | None = Field(
+        default=None,
+        max_length=1,
+    )
 
 
 class ClearThread(AgentThreadMessage):
@@ -194,6 +220,7 @@ class AgentModelInfo(BaseModel):
     description: str | None = None
     context_window: int | None = None
     pricing: dict[str, float] | None = None
+    modalities: list[Literal["text", "audio"]] = Field(default_factory=lambda: ["text"])
     active: bool = False
 
 
@@ -230,6 +257,10 @@ class AgentModelChanged(AgentThreadMessage):
     source_message_id: str | None = None
     provider: str
     model: str
+    output_modalities: list[Literal["text", "audio"]] = Field(
+        default_factory=lambda: ["text"],
+        max_length=1,
+    )
 
 
 class ThreadCleared(AgentThreadMessage):
@@ -556,7 +587,7 @@ class AgentAudioGenerationDelta(AgentLLMMessage):
     item_id: str
     response_id: str | None = None
     content_index: int | None = None
-    delta: str
+    data: bytes = b""
     mime_type: str | None = None
     status_detail: str | None = None
 
@@ -664,6 +695,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_TURN_START: TurnStart,
     AGENT_MESSAGE_TURN_STEER: TurnSteer,
     AGENT_MESSAGE_TURN_INTERRUPT: TurnInterrupt,
+    AGENT_MESSAGE_REALTIME_AUDIO_CHUNK: AgentRealtimeAudioChunk,
     AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,

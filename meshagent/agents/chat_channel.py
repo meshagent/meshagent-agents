@@ -19,6 +19,7 @@ from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
@@ -30,6 +31,7 @@ from .messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_OPEN,
@@ -40,7 +42,9 @@ from .messages import (
     AgentFileContentDelta,
     AgentFileContentEnded,
     AgentFileContentStarted,
+    AgentAudioGenerationDelta,
     AgentMessage,
+    AgentRealtimeAudioChunk,
     AgentTextContent,
     AgentThreadMessage,
     CloseThread,
@@ -179,6 +183,7 @@ class ChatChannel(ThreadedChannel):
     def _publish_agent_event_to_open_participants(self, *, message: Message) -> None:
         self._track_agent_event(message=message)
         payload = self._outbound_agent_message_payload(message=message)
+        attachment = self._outbound_agent_message_attachment(message=message)
         data = message.data
         if isinstance(data, AgentThreadMessage):
             if self._should_buffer_agent_event(payload=payload):
@@ -192,13 +197,24 @@ class ChatChannel(ThreadedChannel):
         for participant in participants:
             if participant.id == self.room.local_participant.id:
                 continue
-            self._send_agent_payload_nowait(participant=participant, payload=payload)
+            self._send_agent_payload_nowait(
+                participant=participant,
+                payload=payload,
+                attachment=attachment,
+            )
 
     def _outbound_agent_message_payload(self, *, message: Message) -> dict[str, Any]:
-        payload = message.data.model_dump(mode="json")
-        if message.data.type == AGENT_EVENT_TURN_STARTED:
+        data = message.data
+        if isinstance(data, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)):
+            data = data.model_copy(update={"data": b""})
+        payload = data.model_dump(mode="json", exclude_none=True)
+        if isinstance(
+            message.data, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)
+        ):
+            payload.pop("data", None)
+        if data.type == AGENT_EVENT_TURN_STARTED:
             source_message_id = self._coerce_message(
-                data=message.data, model=TurnStarted
+                data=data, model=TurnStarted
             ).source_message_id
             return self._outbound_turn_input_payload(
                 payload=payload,
@@ -206,9 +222,9 @@ class ChatChannel(ThreadedChannel):
                 remove=True,
             )
 
-        if message.data.type == AGENT_EVENT_TURN_STEERED:
+        if data.type == AGENT_EVENT_TURN_STEERED:
             source_message_id = self._coerce_message(
-                data=message.data, model=TurnSteered
+                data=data, model=TurnSteered
             ).source_message_id
             return self._outbound_turn_input_payload(
                 payload=payload,
@@ -217,6 +233,13 @@ class ChatChannel(ThreadedChannel):
             )
 
         return payload
+
+    @staticmethod
+    def _outbound_agent_message_attachment(*, message: Message) -> bytes | None:
+        data = message.data
+        if isinstance(data, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)):
+            return data.data
+        return None
 
     def _outbound_turn_input_payload(
         self,
@@ -255,12 +278,14 @@ class ChatChannel(ThreadedChannel):
         *,
         participant: Participant,
         payload: dict[str, Any],
+        attachment: bytes | None = None,
     ) -> None:
         try:
             self.room.messaging.send_message_nowait(
                 to=participant,
                 type="agent-message",
                 message={"payload": payload},
+                attachment=attachment,
             )
         except Exception:
             logger.debug(
@@ -326,6 +351,7 @@ class ChatChannel(ThreadedChannel):
             return False
 
         return message_type not in {
+            AGENT_EVENT_AUDIO_GENERATION_DELTA,
             AGENT_EVENT_THREAD_CLEARED,
             AGENT_EVENT_TURN_ENDED,
         }
@@ -432,6 +458,17 @@ class ChatChannel(ThreadedChannel):
 
         self._track_inbound_agent_message(message=agent_message, sender=sender)
         self._broadcast_inbound_turn_input(message=agent_message, sender=sender)
+        if (
+            isinstance(agent_message, AgentRealtimeAudioChunk)
+            and agent_message.final
+            and agent_message.thread_id in self._pending_thread_list_paths
+        ):
+            self._schedule_pending_thread_list_entry(
+                path=agent_message.thread_id,
+                message_text="Audio message",
+                attachments=[],
+                on_behalf_of=sender,
+            )
         self.emit(sender=sender, payload=agent_message)
 
     def _track_inbound_agent_message(
@@ -567,6 +604,7 @@ class ChatChannel(ThreadedChannel):
             sender_name=start_thread.sender_name,
             provider=start_thread.provider,
             model=start_thread.model,
+            output_modalities=start_thread.output_modalities,
             instructions=start_thread.instructions,
             toolkits=start_thread.toolkits,
             tool_choice=start_thread.tool_choice,
@@ -586,6 +624,17 @@ class ChatChannel(ThreadedChannel):
 
         self._begin_pending_thread_list_entry(path=path)
         self._register_open_participant(thread_id=path, participant_id=sender.id)
+        if len(start_thread.content) == 0:
+            self._send_agent_payload_nowait(
+                participant=sender,
+                payload=ThreadStarted(
+                    type=AGENT_EVENT_THREAD_STARTED,
+                    source_message_id=start_thread.message_id,
+                    thread_id=path,
+                ).model_dump(mode="json"),
+            )
+            return
+
         self._track_turn_input_payload(
             message=turn_start,
             sender_name=start_thread.sender_name or sender.get_attribute("name"),
@@ -946,6 +995,11 @@ class ChatChannel(ThreadedChannel):
         message_type = payload.get("type")
         if not isinstance(message_type, str):
             raise ValueError("agent-message payload must include a string type")
+
+        if message_type == AGENT_MESSAGE_REALTIME_AUDIO_CHUNK:
+            payload["data"] = message.attachment or b""
+        elif message_type == AGENT_EVENT_AUDIO_GENERATION_DELTA:
+            payload["data"] = message.attachment or b""
 
         return parse_agent_message(payload)
 
