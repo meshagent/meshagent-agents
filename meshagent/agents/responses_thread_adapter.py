@@ -1404,7 +1404,6 @@ class ResponsesThreadAdapter(ThreadAdapter):
         *,
         item_id: str,
         state: str,
-        headline: str,
         width: Optional[int] = None,
         height: Optional[int] = None,
     ) -> None:
@@ -1418,7 +1417,6 @@ class ResponsesThreadAdapter(ThreadAdapter):
             height=height,
             created_by=created_by,
             status=_image_status_from_state(state=state),
-            status_detail=headline,
         )
 
     async def _emit_image_status_event(
@@ -1465,7 +1463,6 @@ class ResponsesThreadAdapter(ThreadAdapter):
         self._upsert_image_status(
             item_id=item_id,
             state=state,
-            headline=headline,
             width=width,
             height=height,
         )
@@ -1558,7 +1555,6 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 width=width,
                 height=height,
                 status=_image_status_from_state(state="completed"),
-                status_detail="Image saved",
             )
         except Exception as ex:
             logger.error("failed to attach saved image to thread", exc_info=ex)

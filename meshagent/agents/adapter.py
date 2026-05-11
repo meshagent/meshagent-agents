@@ -63,6 +63,7 @@ class LLMModelInfo:
     default_output_voice: str | None = None
     input_format: LLMAudioFormat | None = None
     output_format: LLMAudioFormat | None = None
+    turn_detection: Literal["none", "automatic"] | None = None
 
 
 def llm_model_pricing(*, provider: str, model: str) -> dict[str, float] | None:
@@ -291,6 +292,24 @@ class LLMAdapter(Generic[TEvent]):
         del context
         del event_handler
         return None
+
+    async def start_realtime_session(
+        self,
+        *,
+        context: AgentSessionContext,
+        event_handler: Callable[[TEvent], None] | None = None,
+        caller: Participant | None = None,
+        toolkits: list[Toolkit] | None = None,
+        tool_choice: ToolChoice | None = None,
+        model: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        del caller
+        del toolkits
+        del tool_choice
+        del model
+        del options
+        await self.start_session(context=context, event_handler=event_handler)
 
     async def stop_session(
         self,

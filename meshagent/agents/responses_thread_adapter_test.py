@@ -879,7 +879,6 @@ async def test_emit_image_status_event_updates_image_element_state():
     assert len(writes) == 1
     assert writes[0]["message_id"] == "img-item-1"
     assert writes[0]["status"] == "generating"
-    assert writes[0]["status_detail"] == "Generating image"
     assert writes[0]["width"] == 1024
     assert writes[0]["height"] == 768
 

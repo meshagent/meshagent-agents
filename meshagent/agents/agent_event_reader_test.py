@@ -91,7 +91,6 @@ class _TestAgentEventReader(AccumulatingAgentEventReader):
         arguments: dict[str, Any] | None,
         images: list[dict[str, Any]],
         status: str,
-        status_detail: str | None,
     ) -> None:
         self._emit_context_message(
             {
@@ -105,7 +104,6 @@ class _TestAgentEventReader(AccumulatingAgentEventReader):
                     "arguments": arguments,
                     "images": images,
                     "status": status,
-                    "status_detail": status_detail,
                 },
             }
         )

@@ -2086,7 +2086,6 @@ class MeshagentPackage(PythonPackage):
                                         "width": width,
                                         "height": height,
                                         "status": "completed",
-                                        "status_detail": "Screenshot saved",
                                     },
                                 )
                             )

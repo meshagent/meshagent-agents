@@ -13,6 +13,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
@@ -26,6 +27,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_START_REJECTED,
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
+    AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_CAPABILITIES_REQUEST,
@@ -46,6 +48,7 @@ from meshagent.agents.messages import (
     AgentFileContentEnded,
     AgentFileContentStarted,
     AgentAudioGenerationDelta,
+    AgentAudioInputSpeechStarted,
     AgentError,
     AgentTextContent,
     AgentTextContentDelta,
@@ -69,6 +72,7 @@ from meshagent.agents.messages import (
     ModelsResponse,
     ThreadCleared,
     TurnEnded,
+    TurnInterrupted,
     TurnInterrupt,
     TurnSteered,
     TurnStart,
@@ -246,13 +250,19 @@ class _RecordingSupervisor(AgentSupervisor):
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[Message] = []
+        self.validated_turn_starts: list[TurnStart] = []
 
     def send(self, message: Message) -> None:
         self.sent.append(message)
 
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        self.validated_turn_starts.append(turn_start)
+        return None
+
 
 class _RejectingStartSupervisor(_RecordingSupervisor):
     async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        self.validated_turn_starts.append(turn_start)
         return AgentError(message="unknown model", code="unknown_model")
 
 
@@ -509,7 +519,8 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
                         "message_id": "start-thread-1",
                         "provider": "openai",
                         "model": "gpt-realtime",
-                        "content": [],
+                        "content": None,
+                        "name": "Audio message",
                     }
                 },
             )
@@ -517,12 +528,17 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
         await _drain_background_tasks()
 
         assert supervisor.sent == []
+        assert supervisor.validated_turn_starts == []
         assert len(room.messaging.sent_messages) == 1
         response_payload = room.messaging.sent_messages[0]["message"]
         assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
         result_path = response_payload["thread_id"]
         assert isinstance(result_path, str)
         assert channel._open_participant_ids_by_thread == {result_path: {caller.id}}
+        entries = sync.document.root.get_children()
+        assert len(entries) == 1
+        assert entries[0].get_attribute("path") == result_path
+        assert entries[0].get_attribute("name") == "Audio message"
 
         room.messaging.emit_message(
             RoomMessage(
@@ -533,8 +549,7 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
                         "type": AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
                         "thread_id": result_path,
                         "message_id": "audio-chunk-1",
-                        "mime_type": "audio/pcm",
-                        "sample_rate": 24000,
+                        "format": {"type": "audio/pcm", "sample_rate": 24000},
                     }
                 },
                 attachment=b"\x01\x02\x03\x04",
@@ -549,7 +564,6 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
         assert isinstance(chunk, AgentRealtimeAudioChunk)
         assert chunk.thread_id == result_path
         assert chunk.data == b"\x01\x02\x03\x04"
-        assert chunk.final is False
 
         room.messaging.emit_message(
             RoomMessage(
@@ -559,7 +573,7 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
                     "type": AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
                     "thread_id": result_path,
                     "message_id": "audio-commit-1",
-                    "output_modalities": ["text"],
+                    "turn_id": "turn-1",
                 },
             )
         )
@@ -571,7 +585,7 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
         commit = sent.data
         assert isinstance(commit, AgentRealtimeAudioCommit)
         assert commit.thread_id == result_path
-        assert commit.output_modalities == ["text"]
+        assert commit.turn_id == "turn-1"
 
         await channel._wait_for_thread_list_background_tasks()
         await _drain_background_tasks()
@@ -1650,6 +1664,68 @@ async def test_chat_channel_sends_usage_updates_to_open_participants() -> None:
                 "compaction_threshold": 64000,
             },
         }
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_forwards_realtime_speech_and_interruption_events_to_open_participants() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                    }
+                },
+            )
+        )
+
+        await channel.on_message(
+            Message(
+                data=AgentAudioInputSpeechStarted(
+                    type=AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    item_id="input-audio-1",
+                    audio_start_ms=120,
+                )
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=TurnInterrupted(
+                    type=AGENT_EVENT_TURN_INTERRUPTED,
+                    thread_id="/threads/test.thread",
+                    turn_id="turn-1",
+                    source_message_id="interrupt-1",
+                )
+            )
+        )
+
+        payloads = [
+            sent["message"]
+            for sent in room.messaging.sent_messages
+            if sent["type"] == "agent-message"
+        ]
+        assert [payload["type"] for payload in payloads] == [
+            AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED,
+            AGENT_EVENT_TURN_INTERRUPTED,
+        ]
+        assert payloads[0]["item_id"] == "input-audio-1"
+        assert payloads[0]["audio_start_ms"] == 120
+        assert payloads[1]["source_message_id"] == "interrupt-1"
     finally:
         await channel.stop(supervisor)
 

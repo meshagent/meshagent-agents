@@ -666,16 +666,6 @@ def _agent_audio_format_from_llm_audio_format(
     )
 
 
-def _chunk_declared_input_format(chunk: AgentRealtimeAudioChunk) -> AgentAudioFormat:
-    if chunk.input_format is not None:
-        return chunk.input_format
-    return AgentAudioFormat(
-        type=chunk.mime_type,
-        sample_rate=chunk.sample_rate,
-        bitrate=chunk.bitrate,
-    )
-
-
 def _audio_format_mismatch(
     *,
     declared: AgentAudioFormat,
@@ -718,6 +708,7 @@ def agent_model_info(
         output_format=_agent_audio_format_from_llm_audio_format(
             model_info.output_format
         ),
+        turn_detection=model_info.turn_detection,
         active=provider.name == current_provider and model_info.name == current_model,
     )
 
@@ -1579,6 +1570,12 @@ class _QueuedTurnMessage:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+@dataclass(slots=True)
+class _PendingRealtimeAudioChunk:
+    data: bytes
+    format: AgentAudioFormat
+
+
 class LLMAgentProcess(AgentProcess):
     def __init__(
         self,
@@ -1659,7 +1656,13 @@ class LLMAgentProcess(AgentProcess):
         self._pending_tool_call_approvals: dict[str, asyncio.Future[bool]] = {}
         self._active_turn_sender: Participant | None = None
         self._pending_status_messages: list[_QueuedTurnMessage] = []
-        self._pending_realtime_audio_commit_message_ids: set[str] = set()
+        self._pending_realtime_audio_chunks: list[_PendingRealtimeAudioChunk] = []
+        self._pending_realtime_audio_chunks_by_turn_id: dict[
+            str, list[_PendingRealtimeAudioChunk]
+        ] = {}
+        self._pending_realtime_audio_events_by_turn_id: dict[
+            str, list[dict[str, Any]]
+        ] = {}
         self._pending_realtime_audio_status_active = False
         self._interrupt_requested_turn_id: str | None = None
         self._interrupt_source_message_id: str | None = None
@@ -1898,6 +1901,9 @@ class LLMAgentProcess(AgentProcess):
                 if model_info is not None
                 else None
             ),
+            turn_detection=model_info.turn_detection
+            if model_info is not None
+            else None,
             output_modalities=list(self._current_model_changed_output_modalities()),
         )
 
@@ -2907,19 +2913,6 @@ class LLMAgentProcess(AgentProcess):
     def _has_pending_turns(self) -> bool:
         return self._priority_turn is not None or not self._pending_turns.empty()
 
-    def _consume_realtime_audio_commit_request(
-        self,
-        *,
-        queued_messages: list[_QueuedTurnMessage],
-    ) -> bool:
-        commit_realtime_audio = False
-        for queued_message in queued_messages:
-            message_id = queued_message.request.message_id
-            if message_id in self._pending_realtime_audio_commit_message_ids:
-                self._pending_realtime_audio_commit_message_ids.remove(message_id)
-                commit_realtime_audio = True
-        return commit_realtime_audio
-
     async def _next_pending_turn(self) -> _QueuedTurn:
         if self._priority_turn is not None:
             queued_turn = self._priority_turn
@@ -3037,7 +3030,6 @@ class LLMAgentProcess(AgentProcess):
         tool_choice: ToolChoice | None,
         model: str,
         response_options: dict[str, Any] | None = None,
-        commit_realtime_audio: bool = False,
     ) -> None:
         turn_id = self._turn_id
         thread_id = self.thread_id
@@ -3335,9 +3327,23 @@ class LLMAgentProcess(AgentProcess):
                     context=session,
                     event_handler=handle_event,
                 )
-                if commit_realtime_audio:
+                pending_audio_chunks = (
+                    self._pending_realtime_audio_chunks_by_turn_id.pop(turn_id, None)
+                )
+                if pending_audio_chunks is not None:
+                    for audio_chunk in pending_audio_chunks:
+                        await session.append_realtime_audio_chunk(
+                            mime_type=audio_chunk.format.type,
+                            data=audio_chunk.data,
+                            sample_rate=audio_chunk.format.sample_rate,
+                            bitrate=audio_chunk.format.bitrate,
+                        )
                     await session.commit_realtime_audio()
                     self._pending_realtime_audio_status_active = False
+                for event in self._pending_realtime_audio_events_by_turn_id.pop(
+                    turn_id, []
+                ):
+                    handle_event(event)
                 next_task = asyncio.create_task(
                     self.llm_adapter.create_response(
                         context=session,
@@ -3431,9 +3437,6 @@ class LLMAgentProcess(AgentProcess):
         response_options = self._resolve_turn_response_options(
             turns=[queued_message.request for queued_message in queued_messages],
         )
-        commit_realtime_audio = self._consume_realtime_audio_commit_request(
-            queued_messages=queued_messages
-        )
         await self._run_adapter_next(
             session=session,
             sender=sender,
@@ -3441,7 +3444,6 @@ class LLMAgentProcess(AgentProcess):
             tool_choice=tool_choice,
             model=model,
             response_options=response_options,
-            commit_realtime_audio=commit_realtime_audio,
         )
 
     async def _handle_interrupt(
@@ -4084,30 +4086,19 @@ class LLMAgentProcess(AgentProcess):
 
     async def on_realtime_audio_chunk(self, message: Message) -> None:
         chunk = _coerce_message_data(message.data, AgentRealtimeAudioChunk)
-        try:
-            provider = self._resolve_llm_provider(chunk.provider)
-            model = self._resolve_llm_model(provider=provider, model=chunk.model)
-        except ValueError:
-            logger.exception(
-                "ignoring realtime audio chunk with unavailable model selection"
-            )
-            return
-
-        await self._switch_llm_provider_if_needed(
-            provider=provider,
-            model=model,
-            turn_id=self._turn_id,
-        )
         if "audio" not in self._current_model_modalities():
             return
 
         model_info = self._current_model_info()
+        automatic_turn_detection = (
+            model_info is not None and model_info.turn_detection == "automatic"
+        )
         expected_input_format = (
             _agent_audio_format_from_llm_audio_format(model_info.input_format)
             if model_info is not None
             else None
         )
-        declared_input_format = _chunk_declared_input_format(chunk)
+        declared_input_format = chunk.format
         mismatch = _audio_format_mismatch(
             declared=declared_input_format,
             expected=expected_input_format,
@@ -4120,71 +4111,181 @@ class LLMAgentProcess(AgentProcess):
         if not session.supports_realtime_audio:
             return
 
-        await self.llm_adapter.start_session(context=session)
+        if automatic_turn_detection:
+            automatic_turn_id = self._turn_id
+            publisher: Callable[[dict[str, Any]], None] | None = None
 
-        thread_status_publisher = self.thread_status_publisher
-        if chunk.data != b"":
-            await session.append_realtime_audio_chunk(
-                mime_type=chunk.mime_type,
-                data=chunk.data,
-                sample_rate=chunk.sample_rate,
-                bitrate=chunk.bitrate,
-            )
-            if (
-                thread_status_publisher is not None
-                and not self._pending_realtime_audio_status_active
-            ):
-                self._pending_realtime_audio_status_active = True
-                await thread_status_publisher.set_thread_status(
-                    status="Receiving audio",
-                    mode="busy",
+            def ensure_automatic_publisher() -> None:
+                nonlocal publisher
+                if automatic_turn_id is None or publisher is not None:
+                    return
+                publisher = self.llm_adapter.make_agent_event_publisher(
+                    turn_id=automatic_turn_id,
+                    thread_id=chunk.thread_id,
+                    callback=lambda payload: self.emit(
+                        sender=message.sender, payload=payload
+                    ),
                 )
 
-        if not chunk.final:
+            def start_automatic_turn() -> None:
+                nonlocal automatic_turn_id, publisher
+                automatic_turn_id = str(uuid.uuid4())
+                self._turn_id = automatic_turn_id
+                session.metadata["thread_id"] = chunk.thread_id
+                session.metadata["turn_id"] = automatic_turn_id
+                self.emit(
+                    sender=message.sender,
+                    payload=TurnStarted(
+                        type=AGENT_EVENT_TURN_STARTED,
+                        thread_id=chunk.thread_id,
+                        turn_id=automatic_turn_id,
+                        source_message_id=chunk.message_id,
+                    ),
+                )
+                publisher = None
+                ensure_automatic_publisher()
+
+            def end_automatic_turn(*, error: AgentError | None = None) -> None:
+                nonlocal automatic_turn_id, publisher
+                if automatic_turn_id is None:
+                    return
+                self.emit(
+                    sender=message.sender,
+                    payload=TurnEnded(
+                        type=AGENT_EVENT_TURN_ENDED,
+                        thread_id=chunk.thread_id,
+                        turn_id=automatic_turn_id,
+                        error=error,
+                    ),
+                )
+                if self._turn_id == automatic_turn_id:
+                    self._turn_id = None
+                automatic_turn_id = None
+                publisher = None
+
+            def handle_automatic_realtime_event(event: dict[str, Any]) -> None:
+                nonlocal publisher
+                event_type = event.get("type")
+                if event_type == "input_audio_buffer.speech_started":
+                    if automatic_turn_id is not None:
+                        self.emit(
+                            sender=message.sender,
+                            payload=TurnInterrupted(
+                                type=AGENT_EVENT_TURN_INTERRUPTED,
+                                thread_id=chunk.thread_id,
+                                turn_id=automatic_turn_id,
+                                source_message_id=chunk.message_id,
+                            ),
+                        )
+                        end_automatic_turn(
+                            error=AgentError(
+                                message="turn interrupted by input speech",
+                                code="interrupted",
+                            )
+                        )
+                    start_automatic_turn()
+                elif automatic_turn_id is None:
+                    start_automatic_turn()
+
+                ensure_automatic_publisher()
+                if publisher is not None:
+                    publisher(event)
+                if event_type in {
+                    "response.done",
+                    "response.completed",
+                    "response.failed",
+                    "response.incomplete",
+                }:
+                    end_automatic_turn()
+
+            combined_toolkits = await self._build_turn_toolkits(
+                model=self._current_model,
+                turns=[],
+                sender=message.sender,
+                toolkit_client_options={},
+            )
+            await self.llm_adapter.start_realtime_session(
+                context=session,
+                event_handler=handle_automatic_realtime_event,
+                caller=message.sender or self._participant,
+                toolkits=combined_toolkits,
+                model=self._current_model,
+            )
+
+            thread_status_publisher = self.thread_status_publisher
+            if chunk.data != b"":
+                await session.append_realtime_audio_chunk(
+                    mime_type=declared_input_format.type,
+                    data=chunk.data,
+                    sample_rate=declared_input_format.sample_rate,
+                    bitrate=declared_input_format.bitrate,
+                )
+                if (
+                    thread_status_publisher is not None
+                    and not self._pending_realtime_audio_status_active
+                ):
+                    self._pending_realtime_audio_status_active = True
+                    await thread_status_publisher.set_thread_status(
+                        status="Listening",
+                        mode="busy",
+                    )
             return
 
-        await self.on_realtime_audio_commit(
-            Message(
-                data=AgentRealtimeAudioCommit(
-                    type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
-                    message_id=chunk.message_id,
-                    thread_id=chunk.thread_id,
-                    turn_id=chunk.turn_id,
-                    sender_name=chunk.sender_name,
-                    provider=chunk.provider,
-                    model=chunk.model,
-                    voice=chunk.voice,
-                    output_modalities=chunk.output_modalities,
-                ),
-                sender=message.sender,
-                source=message.source,
-            )
+        if chunk.data == b"":
+            return
+
+        self._pending_realtime_audio_chunks.append(
+            _PendingRealtimeAudioChunk(data=chunk.data, format=declared_input_format)
         )
+        thread_status_publisher = self.thread_status_publisher
+        if (
+            thread_status_publisher is not None
+            and not self._pending_realtime_audio_status_active
+        ):
+            self._pending_realtime_audio_status_active = True
+            await thread_status_publisher.set_thread_status(
+                status="Listening",
+                mode="busy",
+            )
 
     async def on_realtime_audio_commit(self, message: Message) -> None:
         commit = _coerce_message_data(message.data, AgentRealtimeAudioCommit)
-        try:
-            provider = self._resolve_llm_provider(commit.provider)
-            model = self._resolve_llm_model(provider=provider, model=commit.model)
-        except ValueError:
-            logger.exception(
-                "ignoring realtime audio commit with unavailable model selection"
-            )
-            return
-
-        await self._switch_llm_provider_if_needed(
-            provider=provider,
-            model=model,
-            turn_id=self._turn_id,
-        )
         if "audio" not in self._current_model_modalities():
             return
 
         session = await self.ensure_session_context(turn_id=self._turn_id)
         if not session.supports_realtime_audio:
             return
+        turn_id = commit.turn_id or self._turn_id
+        if turn_id is None:
+            return
 
-        await self.llm_adapter.start_session(context=session)
+        model_info = self._current_model_info()
+        automatic_turn_detection = (
+            model_info is not None and model_info.turn_detection == "automatic"
+        )
+        if not automatic_turn_detection:
+            self._pending_realtime_audio_chunks_by_turn_id[turn_id] = [
+                *self._pending_realtime_audio_chunks
+            ]
+            self._pending_realtime_audio_chunks.clear()
+            thread_status_publisher = self.thread_status_publisher
+            if thread_status_publisher is not None:
+                await thread_status_publisher.set_thread_status(
+                    status="Processing audio",
+                    mode="busy",
+                )
+            return
+
+        event_handler = None
+        pending_events = self._pending_realtime_audio_events_by_turn_id.setdefault(
+            turn_id, []
+        )
+
+        def buffer_realtime_audio_event(event: dict[str, Any]) -> None:
+            pending_events.append(event)
+
+        event_handler = buffer_realtime_audio_event
 
         thread_status_publisher = self.thread_status_publisher
         if thread_status_publisher is not None:
@@ -4193,39 +4294,30 @@ class LLMAgentProcess(AgentProcess):
                 mode="busy",
             )
 
-        turn_id = commit.turn_id or str(uuid.uuid4())
-        output_modalities = self._current_output_modalities
-        if commit.output_modalities is not None:
-            output_modalities = self._supported_output_modalities(
-                output_modalities=tuple(commit.output_modalities),
-                supported_modalities=self._current_model_modalities(),
+        had_thread_id = "thread_id" in session.metadata
+        previous_thread_id = session.metadata.get("thread_id")
+        had_turn_id = "turn_id" in session.metadata
+        previous_turn_id = session.metadata.get("turn_id")
+        session.metadata["thread_id"] = commit.thread_id
+        if turn_id is not None:
+            session.metadata["turn_id"] = turn_id
+        try:
+            await self.llm_adapter.start_session(
+                context=session,
+                event_handler=event_handler,
             )
-        turn_start = TurnStart(
-            type=AGENT_MESSAGE_TURN_START,
-            message_id=commit.message_id,
-            thread_id=commit.thread_id,
-            turn_id=turn_id,
-            content=[],
-            sender_name=commit.sender_name,
-            provider=self._current_provider.name,
-            model=self._current_model,
-            voice=commit.voice,
-            output_modalities=list(output_modalities),
-        )
-        self._pending_realtime_audio_commit_message_ids.add(turn_start.message_id)
-        await self._pending_turns.put(
-            _QueuedTurn(sender=message.sender, request=turn_start)
-        )
-        self.emit(
-            sender=message.sender,
-            payload=TurnStartAccepted(
-                type=AGENT_EVENT_TURN_START_ACCEPTED,
-                thread_id=turn_start.thread_id,
-                turn_id=turn_id,
-                source_message_id=turn_start.message_id,
-            ),
-        )
-        self._schedule_next_turn()
+            await session.commit_realtime_audio()
+            self._pending_realtime_audio_status_active = False
+        finally:
+            if had_thread_id:
+                session.metadata["thread_id"] = previous_thread_id
+            else:
+                session.metadata.pop("thread_id", None)
+
+            if had_turn_id:
+                session.metadata["turn_id"] = previous_turn_id
+            else:
+                session.metadata.pop("turn_id", None)
 
     async def on_tool_call_approve(self, message: Message) -> None:
         approval = _coerce_message_data(message.data, ApproveAgentToolCall)
@@ -4260,7 +4352,9 @@ class LLMAgentProcess(AgentProcess):
         self._active_turn_sender = None
         self._interrupt_requested_turn_id = None
         self._interrupt_source_message_id = None
-        self._pending_realtime_audio_commit_message_ids.clear()
+        self._pending_realtime_audio_chunks.clear()
+        self._pending_realtime_audio_chunks_by_turn_id.clear()
+        self._pending_realtime_audio_events_by_turn_id.clear()
         self._pending_realtime_audio_status_active = False
         self._cancel_pending_tool_call_approvals()
         await self._clear_pending_status_messages()

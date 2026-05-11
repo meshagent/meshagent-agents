@@ -82,6 +82,8 @@ AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED = (
     "meshagent.agent.audio_transcription.completed"
 )
 AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED = "meshagent.agent.audio_transcription.failed"
+AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED = "meshagent.agent.audio_input.speech_started"
+AGENT_EVENT_AUDIO_INPUT_SPEECH_ENDED = "meshagent.agent.audio_input.speech_ended"
 AGENT_EVENT_CONTEXT_COMPACTED = "meshagent.agent.context.compacted"
 AGENT_EVENT_USAGE_UPDATED = "meshagent.agent.usage.updated"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
@@ -114,7 +116,8 @@ class TurnToolkitConfig(BaseModel):
 
 class StartThread(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_START]
-    content: list[AgentInputContent]
+    content: list[AgentInputContent] | None = None
+    name: str | None = None
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -131,7 +134,7 @@ class StartThread(AgentMessage):
 class TurnStart(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_START]
     turn_id: str | None = None
-    content: list[AgentInputContent]
+    content: list[AgentInputContent] = Field(default_factory=list)
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -165,36 +168,16 @@ class AgentAudioFormat(BaseModel):
 
 class AgentRealtimeAudioChunk(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_REALTIME_AUDIO_CHUNK]
-    turn_id: str | None = None
-    provider: str | None = None
-    model: str | None = None
-    voice: str | None = None
     data: bytes = b""
-    mime_type: str = "audio/pcm"
-    sample_rate: int = 24000
-    bitrate: int | None = None
-    input_format: "AgentAudioFormat | None" = None
-    final: bool = False
-    output_modalities: list[Literal["text", "audio"]] | None = Field(
-        default=None,
-        max_length=1,
-    )
+    format: AgentAudioFormat = Field(default_factory=AgentAudioFormat)
 
 
 class AgentRealtimeAudioCommit(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_REALTIME_AUDIO_COMMIT]
     turn_id: str | None = None
-    provider: str | None = None
-    model: str | None = None
-    voice: str | None = None
     text: str | None = None
     status: Literal["in_progress", "completed", "cancelled", "failed"] | None = None
-    status_detail: str | None = None
     transcription_item_id: str | None = None
-    output_modalities: list[Literal["text", "audio"]] | None = Field(
-        default=None,
-        max_length=1,
-    )
 
 
 class ClearThread(AgentThreadMessage):
@@ -253,6 +236,7 @@ class AgentModelInfo(BaseModel):
     default_output_voice: str | None = None
     input_format: "AgentAudioFormat | None" = None
     output_format: "AgentAudioFormat | None" = None
+    turn_detection: Literal["none", "automatic"] | None = None
     active: bool = False
 
 
@@ -293,6 +277,7 @@ class AgentModelChanged(AgentThreadMessage):
     voice: str | None = None
     input_format: "AgentAudioFormat | None" = None
     output_format: "AgentAudioFormat | None" = None
+    turn_detection: Literal["none", "automatic"] | None = None
     output_modalities: list[Literal["text", "audio"]] = Field(
         default_factory=lambda: ["text"],
         max_length=1,
@@ -547,7 +532,6 @@ class AgentGeneratedImage(BaseModel):
     width: int | float | None = None
     height: int | float | None = None
     status: str | None = None
-    status_detail: str | None = None
 
 
 class AgentImageGenerationStarted(AgentLLMMessage):
@@ -558,7 +542,6 @@ class AgentImageGenerationStarted(AgentLLMMessage):
     toolkit: str = "image_generation"
     tool: str = "image_generation"
     arguments: Optional[dict[str, Any]] = None
-    status_detail: str | None = None
 
 
 class AgentImageGenerationPartial(AgentLLMMessage):
@@ -571,7 +554,6 @@ class AgentImageGenerationPartial(AgentLLMMessage):
     arguments: Optional[dict[str, Any]] = None
     image: AgentGeneratedImage | None = None
     partial_index: int | None = None
-    status_detail: str | None = None
 
 
 class AgentImageGenerationCompleted(AgentLLMMessage):
@@ -583,7 +565,6 @@ class AgentImageGenerationCompleted(AgentLLMMessage):
     tool: str = "image_generation"
     arguments: Optional[dict[str, Any]] = None
     images: list[AgentGeneratedImage] = Field(default_factory=list)
-    status_detail: str | None = None
 
 
 class AgentImageGenerationFailed(AgentLLMMessage):
@@ -595,7 +576,6 @@ class AgentImageGenerationFailed(AgentLLMMessage):
     tool: str = "image_generation"
     arguments: Optional[dict[str, Any]] = None
     error: AgentError | None = None
-    status_detail: str | None = None
 
 
 class AgentGeneratedAudio(BaseModel):
@@ -604,7 +584,6 @@ class AgentGeneratedAudio(BaseModel):
     created_at: str | None = None
     created_by: str | None = None
     status: str | None = None
-    status_detail: str | None = None
     transcript: str | None = None
 
 
@@ -614,7 +593,6 @@ class AgentAudioGenerationStarted(AgentLLMMessage):
     item_id: str
     response_id: str | None = None
     content_index: int | None = None
-    status_detail: str | None = None
 
 
 class AgentAudioGenerationDelta(AgentLLMMessage):
@@ -626,7 +604,6 @@ class AgentAudioGenerationDelta(AgentLLMMessage):
     data: bytes = b""
     mime_type: str | None = None
     output_format: AgentAudioFormat | None = None
-    status_detail: str | None = None
 
 
 class AgentAudioGenerationCompleted(AgentLLMMessage):
@@ -637,7 +614,6 @@ class AgentAudioGenerationCompleted(AgentLLMMessage):
     content_index: int | None = None
     audio: AgentGeneratedAudio | None = None
     output_format: AgentAudioFormat | None = None
-    status_detail: str | None = None
 
 
 class AgentAudioGenerationFailed(AgentLLMMessage):
@@ -647,7 +623,6 @@ class AgentAudioGenerationFailed(AgentLLMMessage):
     response_id: str | None = None
     content_index: int | None = None
     error: AgentError | None = None
-    status_detail: str | None = None
 
 
 class AgentAudioTranscriptionStarted(AgentLLMMessage):
@@ -657,7 +632,6 @@ class AgentAudioTranscriptionStarted(AgentLLMMessage):
     response_id: str | None = None
     content_index: int | None = None
     role: str | None = None
-    status_detail: str | None = None
 
 
 class AgentAudioTranscriptionDelta(AgentLLMMessage):
@@ -668,7 +642,6 @@ class AgentAudioTranscriptionDelta(AgentLLMMessage):
     content_index: int | None = None
     role: str | None = None
     text: str
-    status_detail: str | None = None
 
 
 class AgentAudioTranscriptionCompleted(AgentLLMMessage):
@@ -679,7 +652,6 @@ class AgentAudioTranscriptionCompleted(AgentLLMMessage):
     content_index: int | None = None
     role: str | None = None
     text: str | None = None
-    status_detail: str | None = None
 
 
 class AgentAudioTranscriptionFailed(AgentLLMMessage):
@@ -690,7 +662,20 @@ class AgentAudioTranscriptionFailed(AgentLLMMessage):
     content_index: int | None = None
     role: str | None = None
     error: AgentError | None = None
-    status_detail: str | None = None
+
+
+class AgentAudioInputSpeechStarted(AgentThreadMessage):
+    type: Literal[AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED]
+    turn_id: str
+    item_id: str | None = None
+    audio_start_ms: int | None = None
+
+
+class AgentAudioInputSpeechEnded(AgentThreadMessage):
+    type: Literal[AGENT_EVENT_AUDIO_INPUT_SPEECH_ENDED]
+    turn_id: str
+    item_id: str | None = None
+    audio_end_ms: int | None = None
 
 
 class AgentContextCompacted(AgentThreadMessage):
@@ -785,6 +770,8 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA: AgentAudioTranscriptionDelta,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED: AgentAudioTranscriptionCompleted,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED: AgentAudioTranscriptionFailed,
+    AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED: AgentAudioInputSpeechStarted,
+    AGENT_EVENT_AUDIO_INPUT_SPEECH_ENDED: AgentAudioInputSpeechEnded,
     AGENT_EVENT_CONTEXT_COMPACTED: AgentContextCompacted,
     AGENT_EVENT_USAGE_UPDATED: AgentUsageUpdated,
     AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,

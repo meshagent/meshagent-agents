@@ -39,8 +39,12 @@ from .messages import (
     AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED,
+    AGENT_EVENT_AUDIO_INPUT_SPEECH_ENDED,
+    AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED,
     AgentError,
     AgentAudioFormat,
+    AgentAudioInputSpeechEnded,
+    AgentAudioInputSpeechStarted,
     AgentAudioGenerationCompleted,
     AgentAudioGenerationDelta,
     AgentAudioGenerationFailed,
@@ -442,7 +446,6 @@ def _generated_image_from_value(value: Any) -> AgentGeneratedImage | None:
         if isinstance(value.get("height"), (int, float))
         else None,
         status=_as_str(value.get("status")),
-        status_detail=_as_str(value.get("status_detail")),
     )
 
 
@@ -1120,7 +1123,6 @@ class _AgentMessageEmitter:
                 item_id=item_id,
                 response_id=response_id,
                 content_index=content_index,
-                status_detail="Generating audio",
             )
         )
 
@@ -1153,7 +1155,6 @@ class _AgentMessageEmitter:
                 data=data,
                 mime_type=mime_type,
                 output_format=output_format,
-                status_detail="Generating audio",
             )
         )
 
@@ -1185,7 +1186,6 @@ class _AgentMessageEmitter:
                 content_index=content_index,
                 audio=audio,
                 output_format=output_format,
-                status_detail="Audio generated",
             )
         )
 
@@ -1206,7 +1206,6 @@ class _AgentMessageEmitter:
                 response_id=response_id,
                 content_index=content_index,
                 error=error,
-                status_detail=error.message if error is not None else None,
             )
         )
 
@@ -1231,7 +1230,6 @@ class _AgentMessageEmitter:
                 response_id=response_id,
                 content_index=content_index,
                 role=role,
-                status_detail="Transcribing audio",
             )
         )
 
@@ -1265,7 +1263,6 @@ class _AgentMessageEmitter:
                 content_index=content_index,
                 role=role,
                 text=text,
-                status_detail="Transcribing audio",
             )
         )
 
@@ -1298,7 +1295,6 @@ class _AgentMessageEmitter:
                 content_index=content_index,
                 role=role,
                 text=text,
-                status_detail="Audio transcribed",
             )
         )
 
@@ -1321,7 +1317,6 @@ class _AgentMessageEmitter:
                 content_index=content_index,
                 role=role,
                 error=error,
-                status_detail=error.message if error is not None else None,
             )
         )
 
@@ -1674,7 +1669,6 @@ class _OpenAIAgentEventPublisher:
                 toolkit=info.toolkit,
                 tool=info.tool,
                 arguments=info.arguments or _image_generation_arguments(item),
-                status_detail="Generating image",
             )
         )
 
@@ -1709,7 +1703,6 @@ class _OpenAIAgentEventPublisher:
                 arguments=info.arguments or _image_generation_arguments(event),
                 image=image,
                 partial_index=_as_int(event.get("partial_image_index")),
-                status_detail="Generating image",
             )
         )
 
@@ -1732,7 +1725,6 @@ class _OpenAIAgentEventPublisher:
                     tool=info.tool,
                     arguments=info.arguments or _image_generation_arguments(item),
                     error=info.error,
-                    status_detail=info.error.message,
                 )
             )
             return
@@ -1749,7 +1741,6 @@ class _OpenAIAgentEventPublisher:
                 tool=info.tool,
                 arguments=info.arguments or _image_generation_arguments(item),
                 images=images,
-                status_detail="Image saved" if len(images) > 0 else None,
             )
         )
 
@@ -1943,6 +1934,28 @@ class _OpenAIAgentEventPublisher:
             error=AgentError(message=message, code=code),
         )
 
+    def _on_audio_input_speech_started(self, *, event: dict[str, Any]) -> None:
+        self.emitter.callback(
+            AgentAudioInputSpeechStarted(
+                type=AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED,
+                thread_id=self.emitter.thread_id,
+                turn_id=self.emitter.turn_id,
+                item_id=_as_str(event.get("item_id")),
+                audio_start_ms=_as_int(event.get("audio_start_ms")),
+            )
+        )
+
+    def _on_audio_input_speech_ended(self, *, event: dict[str, Any]) -> None:
+        self.emitter.callback(
+            AgentAudioInputSpeechEnded(
+                type=AGENT_EVENT_AUDIO_INPUT_SPEECH_ENDED,
+                thread_id=self.emitter.thread_id,
+                turn_id=self.emitter.turn_id,
+                item_id=_as_str(event.get("item_id")),
+                audio_end_ms=_as_int(event.get("audio_end_ms")),
+            )
+        )
+
     def __call__(self, event: dict[str, Any]) -> None:
         event_type = _as_str(event.get("type"))
         if event_type is None:
@@ -2047,6 +2060,17 @@ class _OpenAIAgentEventPublisher:
 
         if event_type == "conversation.item.input_audio_transcription.failed":
             self._on_audio_transcript_failed(event=event, role="user")
+            return
+
+        if event_type == "input_audio_buffer.speech_started":
+            self._on_audio_input_speech_started(event=event)
+            return
+
+        if event_type in {
+            "input_audio_buffer.speech_stopped",
+            "input_audio_buffer.speech_ended",
+        }:
+            self._on_audio_input_speech_ended(event=event)
             return
 
         if event_type in {

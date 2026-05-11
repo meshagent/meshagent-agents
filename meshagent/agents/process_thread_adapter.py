@@ -979,8 +979,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 width=None if first_image is None else first_image.width,
                 height=None if first_image is None else first_image.height,
                 status="completed",
-                status_detail=message.status_detail
-                or (None if first_image is None else first_image.status_detail),
             )
             return
         elif isinstance(message, AgentImageGenerationFailed):
@@ -988,8 +986,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 message_id=message.item_id,
                 turn_id=message.turn_id,
                 status="failed",
-                status_detail=message.status_detail
-                or (message.error.message if message.error is not None else None),
             )
             return
         elif isinstance(
@@ -999,7 +995,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 message_id=message.item_id,
                 turn_id=message.turn_id,
                 status="in_progress",
-                status_detail=message.status_detail or "Generating image",
             )
             return
 
@@ -1378,7 +1373,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
         width: int | float | None = None,
         height: int | float | None = None,
         status: str | None = None,
-        status_detail: str | None = None,
     ) -> str:
         if self._thread is None:
             raise RoomException("thread was not opened")
@@ -1460,8 +1454,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
             image_attributes["height"] = normalized_height
         if isinstance(status, str) and status.strip() != "":
             image_attributes["status"] = status.strip()
-        if isinstance(status_detail, str) and status_detail.strip() != "":
-            image_attributes["status_detail"] = status_detail.strip()
 
         if image is None:
             message.append_child(tag_name="image", attributes=image_attributes)
@@ -1859,7 +1851,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 width=width,
                 height=height,
                 status="completed",
-                status_detail="Image saved",
             )
         except Exception as ex:
             logger.error(

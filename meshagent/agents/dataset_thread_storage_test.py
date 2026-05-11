@@ -343,7 +343,6 @@ class _DatasetStorageTestReader(AccumulatingAgentEventReader):
         arguments: dict[str, Any] | None,
         images: list[dict[str, Any]],
         status: str,
-        status_detail: str | None,
     ) -> None:
         self._emit_context_message(
             {
@@ -359,7 +358,6 @@ class _DatasetStorageTestReader(AccumulatingAgentEventReader):
                         "arguments": arguments,
                         "images": images,
                         "status": status,
-                        "status_detail": status_detail,
                     }
                 ],
             }
@@ -623,7 +621,6 @@ async def test_dataset_thread_storage_persists_binary_agent_message_attachment()
             thread_id="dataset://threads/demo",
             message_id="audio-input-1",
             data=b"\xf7\x00\x01",
-            final=True,
         )
     )
     storage.push_message(

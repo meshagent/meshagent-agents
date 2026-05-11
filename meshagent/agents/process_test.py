@@ -69,6 +69,7 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_TURN_STEER,
     ApproveAgentToolCall,
     AgentError,
+    AgentAudioFormat,
     AgentAudioTranscriptionCompleted,
     AgentContextCompacted,
     AgentContextWindowUsage,
@@ -706,6 +707,7 @@ class _RealtimeAudioRecordingSession(_LifecycleSession):
         super().__init__()
         self.audio_chunk_calls: list[dict[str, Any]] = []
         self.commit_calls = 0
+        self.operation_order: list[str] = []
         self.event_handler = None
 
     @property
@@ -720,6 +722,7 @@ class _RealtimeAudioRecordingSession(_LifecycleSession):
         sample_rate: int | None = None,
         bitrate: int | None = None,
     ) -> None:
+        self.operation_order.append("append")
         self.audio_chunk_calls.append(
             {
                 "mime_type": mime_type,
@@ -730,6 +733,7 @@ class _RealtimeAudioRecordingSession(_LifecycleSession):
         )
 
     async def commit_realtime_audio(self) -> None:
+        self.operation_order.append("commit")
         self.commit_calls += 1
         if self.event_handler is not None:
             self.event_handler(
@@ -746,6 +750,7 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         self.session = session if session is not None else _LifecycleSession()
         self.calls: list[dict[str, Any]] = []
         self.start_session_calls: list[dict[str, Any]] = []
+        self.realtime_session_calls: list[dict[str, Any]] = []
         self.stop_session_calls: list[dict[str, Any]] = []
         self.call_order: list[str] = []
         self.call_event = asyncio.Event()
@@ -777,6 +782,29 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
             }
         )
         self.start_session_event.set()
+
+    async def start_realtime_session(
+        self,
+        *,
+        context: AgentSessionContext,
+        event_handler=None,
+        caller=None,
+        toolkits: list[Toolkit] | None = None,
+        tool_choice: ToolChoice | None = None,
+        model: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        self.realtime_session_calls.append(
+            {
+                "context": context,
+                "caller": caller,
+                "toolkits": [toolkit.name for toolkit in toolkits or []],
+                "tool_choice": tool_choice,
+                "model": model,
+                "options": options,
+            }
+        )
+        await self.start_session(context=context, event_handler=event_handler)
 
     async def stop_session(
         self,
@@ -864,6 +892,17 @@ class _AudioRecordingLLMAdapter(_RecordingLLMAdapter):
                 )
 
         return publish
+
+
+class _AutomaticAudioRecordingLLMAdapter(_AudioRecordingLLMAdapter):
+    def list_models(self) -> list[LLMModelInfo]:
+        return [
+            LLMModelInfo(
+                name=self.default_model(),
+                modalities=("text", "audio"),
+                turn_detection="automatic",
+            )
+        ]
 
 
 class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
@@ -3163,6 +3202,30 @@ def test_tool_call_approval_messages_require_thread_id(
         )
 
 
+def test_realtime_audio_chunk_protocol_only_carries_audio_data_and_format() -> None:
+    chunk = AgentRealtimeAudioChunk(
+        type=AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+        thread_id="thread-1",
+        message_id="audio-chunk-1",
+        data=b"pcm",
+        format=AgentAudioFormat(type="audio/pcm", sample_rate=24000),
+    )
+
+    payload = chunk.model_dump(mode="json")
+    assert payload["format"] == {
+        "type": "audio/pcm",
+        "sample_rate": 24000,
+        "bitrate": None,
+    }
+    assert "provider" not in payload
+    assert "model" not in payload
+    assert "voice" not in payload
+    assert "output_modalities" not in payload
+    assert "final" not in payload
+    assert "input_format" not in payload
+    assert "status_detail" not in payload
+
+
 def test_agent_tool_call_ended_serializes_result_and_error() -> None:
     event = AgentToolCallEnded(
         type=AGENT_EVENT_TOOL_CALL_ENDED,
@@ -3516,6 +3579,7 @@ async def test_llm_agent_process_publishes_usage_updates_on_open_and_after_adapt
         room=_DownloadRecordingRoom(),
         thread_id="thread-1",
         llm_adapter=adapter,
+        toolkits=[Toolkit(name="storage", tools=[])],
     )
 
     await process.start(supervisor)
@@ -3749,6 +3813,7 @@ async def test_llm_agent_process_publishes_usage_without_context_counting() -> N
         room=_DownloadRecordingRoom(),
         thread_id="thread-1",
         llm_adapter=adapter,
+        toolkits=[Toolkit(name="storage", tools=[])],
     )
 
     await process.start(supervisor)
@@ -5238,7 +5303,9 @@ async def test_llm_agent_process_handles_audio_file_attachments_as_files() -> No
 
 
 @pytest.mark.asyncio
-async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None:
+async def test_llm_agent_process_realtime_audio_commit_then_turn_start_runs_one_turn() -> (
+    None
+):
     session = _RealtimeAudioRecordingSession()
     adapter = _AudioRecordingLLMAdapter(session=session)
     supervisor = _RecordingSupervisor()
@@ -5259,8 +5326,7 @@ async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None
                     thread_id="thread-1",
                     message_id="audio-chunk-1",
                     data=b"pcm-bytes",
-                    mime_type="audio/pcm",
-                    sample_rate=24000,
+                    format=AgentAudioFormat(type="audio/pcm", sample_rate=24000),
                 ),
             )
         )
@@ -5270,6 +5336,17 @@ async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None
                     type=AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
                     thread_id="thread-1",
                     message_id="audio-commit-1",
+                    turn_id="turn-1",
+                ),
+            )
+        )
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    message_id="audio-turn-start-1",
+                    turn_id="turn-1",
                     output_modalities=["text"],
                 ),
             )
@@ -5290,19 +5367,19 @@ async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None
             "bitrate": None,
         }
     ]
+    assert session.operation_order == ["append", "commit"]
     assert session.commit_calls == 1
     assert len(adapter.calls) == 1
     assert adapter.calls[0]["options"] == {"output_modalities": ["text"]}
-    assert len(adapter.start_session_calls) == 3
-    assert adapter.start_session_calls[0]["event_handler"] is None
-    assert adapter.start_session_calls[1]["event_handler"] is None
-    assert callable(adapter.start_session_calls[2]["event_handler"])
+    assert len(adapter.start_session_calls) == 1
+    assert callable(adapter.start_session_calls[0]["event_handler"])
+    assert adapter.start_session_calls[0]["metadata"]["turn_id"] == "turn-1"
     assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_START_ACCEPTED)) == 1
     assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)) == 1
     assert len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     assert thread_status_publisher.statuses[:3] == [
         {
-            "status": "Receiving audio",
+            "status": "Listening",
             "mode": "busy",
             "pending_item_id": None,
             "total_bytes": None,
@@ -5339,7 +5416,6 @@ async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None
             "response_id": None,
             "role": "user",
             "sender_name": "assistant",
-            "status_detail": None,
             "text": "hello from audio",
             "thread_id": "thread-1",
             "turn_id": supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)[0][
@@ -5358,6 +5434,68 @@ async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None
     assert emitted_types.index(AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED) < (
         emitted_types.index(AGENT_EVENT_TURN_ENDED)
     )
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_automatic_realtime_audio_turn_starts_on_speech() -> (
+    None
+):
+    session = _RealtimeAudioRecordingSession()
+    adapter = _AutomaticAudioRecordingLLMAdapter(session=session)
+    supervisor = _RecordingSupervisor()
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        toolkits=[Toolkit(name="storage", tools=[])],
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=AgentRealtimeAudioChunk(
+                    type=AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+                    thread_id="thread-1",
+                    message_id="audio-chunk-1",
+                    data=b"pcm-bytes",
+                    format=AgentAudioFormat(type="audio/pcm", sample_rate=24000),
+                ),
+            )
+        )
+
+        await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+        assert adapter.realtime_session_calls == [
+            {
+                "context": adapter.session,
+                "caller": room.local_participant,
+                "toolkits": ["storage"],
+                "tool_choice": None,
+                "model": "default-model",
+                "options": None,
+            }
+        ]
+        assert supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED) == []
+        assert callable(session.event_handler)
+
+        session.event_handler(
+            {
+                "type": "input_audio_buffer.speech_started",
+                "item_id": "user-audio-1",
+                "audio_start_ms": 10,
+            }
+        )
+        started_payloads = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)
+        assert len(started_payloads) == 1
+        assert started_payloads[0]["source_message_id"] == "audio-chunk-1"
+
+        session.event_handler({"type": "response.done", "response": {"output": []}})
+        ended_payloads = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)
+        assert len(ended_payloads) == 1
+        assert ended_payloads[0]["turn_id"] == started_payloads[0]["turn_id"]
+    finally:
+        await process.stop(supervisor)
 
 
 def test_llm_agent_process_accepts_generic_thread_adapter() -> None:
@@ -8877,7 +9015,6 @@ async def test_agent_process_thread_adapter_persists_generated_images(
         assert image.get_attribute("width") == 1024
         assert image.get_attribute("height") == 1024
         assert image.get_attribute("status") == "completed"
-        assert image.get_attribute("status_detail") == "Image saved"
 
         image_id = image.get_attribute("id")
         assert isinstance(image_id, str) and image_id != ""

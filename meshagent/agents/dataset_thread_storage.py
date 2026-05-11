@@ -331,7 +331,6 @@ class _ActiveAudioTranscription:
     content_index: int | None = None
     sender_name: str | None = None
     status: Literal["in_progress", "completed", "cancelled", "failed"] = "in_progress"
-    status_detail: str | None = None
     parts: list[str] = field(default_factory=list)
     error: AgentError | None = None
 
@@ -1318,7 +1317,6 @@ class DatasetThreadStorage(ThreadStorage):
                 provider=active_tool_call.provider,
                 model=active_tool_call.model,
                 error=message.error,
-                status_detail=message.error.message,
             )
             await self._append_message_row(message=failed_message)
             return True
@@ -1453,7 +1451,6 @@ class DatasetThreadStorage(ThreadStorage):
                 response_id=message.response_id,
                 content_index=message.content_index,
                 sender_name=message.sender_name,
-                status_detail=message.status_detail,
             )
             self._active_audio_transcriptions_by_item_id[message.item_id] = active
 
@@ -1470,8 +1467,6 @@ class DatasetThreadStorage(ThreadStorage):
             active.content_index = message.content_index
         if active.sender_name is None:
             active.sender_name = message.sender_name
-        if message.status_detail is not None:
-            active.status_detail = message.status_detail
 
         if isinstance(message, AgentAudioTranscriptionDelta):
             active.parts = [
@@ -1526,14 +1521,12 @@ class DatasetThreadStorage(ThreadStorage):
             if part != ""
         )
         status: Literal["completed", "cancelled", "failed"]
-        status_detail: str | None = None
         transcription_item_id: str | None = None
         if any(active.status == "failed" for active in user_transcriptions):
             status = "failed"
             failed = next(
                 active for active in user_transcriptions if active.status == "failed"
             )
-            status_detail = failed.status_detail
             transcription_item_id = failed.item_id
         elif reason == "cancelled":
             status = "cancelled"
@@ -1545,7 +1538,6 @@ class DatasetThreadStorage(ThreadStorage):
             row=commit_row,
             text=text,
             status=status,
-            status_detail=status_detail,
             transcription_item_id=transcription_item_id,
         )
 
@@ -1568,7 +1560,6 @@ class DatasetThreadStorage(ThreadStorage):
                 row=row,
                 text="",
                 status=status,
-                status_detail="Audio turn did not complete",
                 transcription_item_id=None,
             )
 
@@ -1581,9 +1572,6 @@ class DatasetThreadStorage(ThreadStorage):
         text = "".join(active.parts)
         if text.strip() == "" and active.status != "failed":
             return
-        status_detail = active.status_detail
-        if reason == "cancelled" and active.status != "completed":
-            status_detail = status_detail or "Audio transcription cancelled"
         if active.status == "failed":
             await self._append_message_row(
                 message=AgentAudioTranscriptionFailed(
@@ -1599,7 +1587,6 @@ class DatasetThreadStorage(ThreadStorage):
                     model=active.model,
                     sender_name=active.sender_name,
                     error=active.error,
-                    status_detail=status_detail,
                 )
             )
             return
@@ -1617,7 +1604,6 @@ class DatasetThreadStorage(ThreadStorage):
                 model=active.model,
                 sender_name=active.sender_name,
                 text=text,
-                status_detail=status_detail,
             )
         )
 
@@ -1838,14 +1824,12 @@ class DatasetThreadStorage(ThreadStorage):
         row: _StoredThreadRow,
         text: str,
         status: Literal["completed", "cancelled", "failed"],
-        status_detail: str | None,
         transcription_item_id: str | None,
     ) -> None:
         row.data = {
             **row.data,
             "text": text,
             "status": status,
-            "status_detail": status_detail,
             "transcription_item_id": transcription_item_id,
         }
         if row not in self._pending_insert_rows:

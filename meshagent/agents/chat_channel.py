@@ -486,13 +486,7 @@ class ChatChannel(ThreadedChannel):
         self._track_inbound_agent_message(message=agent_message, sender=sender)
         self._broadcast_inbound_turn_input(message=agent_message, sender=sender)
         if (
-            isinstance(
-                agent_message, (AgentRealtimeAudioChunk, AgentRealtimeAudioCommit)
-            )
-            and (
-                not isinstance(agent_message, AgentRealtimeAudioChunk)
-                or agent_message.final
-            )
+            isinstance(agent_message, AgentRealtimeAudioCommit)
             and agent_message.thread_id in self._pending_thread_list_paths
         ):
             self._schedule_pending_thread_list_entry(
@@ -630,12 +624,32 @@ class ChatChannel(ThreadedChannel):
             return
 
         path = await self._new_thread_path()
+        content = start_thread.content
+        if content is None:
+            self._begin_pending_thread_list_entry(path=path)
+            self._register_open_participant(thread_id=path, participant_id=sender.id)
+            self.bump_thread(
+                path=path,
+                name=self._sanitize_thread_name(
+                    value=start_thread.name or self._default_thread_name()
+                ),
+            )
+            self._send_agent_payload_nowait(
+                participant=sender,
+                payload=ThreadStarted(
+                    type=AGENT_EVENT_THREAD_STARTED,
+                    source_message_id=start_thread.message_id,
+                    thread_id=path,
+                ).model_dump(mode="json"),
+            )
+            return
+
         turn_start = TurnStart(
             type=AGENT_MESSAGE_TURN_START,
             message_id=start_thread.message_id,
             thread_id=path,
             turn_id=str(uuid.uuid4()),
-            content=start_thread.content,
+            content=content,
             sender_name=start_thread.sender_name,
             provider=start_thread.provider,
             model=start_thread.model,
@@ -660,17 +674,6 @@ class ChatChannel(ThreadedChannel):
 
         self._begin_pending_thread_list_entry(path=path)
         self._register_open_participant(thread_id=path, participant_id=sender.id)
-        if len(start_thread.content) == 0:
-            self._send_agent_payload_nowait(
-                participant=sender,
-                payload=ThreadStarted(
-                    type=AGENT_EVENT_THREAD_STARTED,
-                    source_message_id=start_thread.message_id,
-                    thread_id=path,
-                ).model_dump(mode="json"),
-            )
-            return
-
         self._track_turn_input_payload(
             message=turn_start,
             sender_name=start_thread.sender_name or sender.get_attribute("name"),
@@ -698,7 +701,7 @@ class ChatChannel(ThreadedChannel):
             Message(sender=sender, source=self, data=turn_start)
         )
         message_text, attachments = self._text_and_attachments_from_content(
-            content=start_thread.content
+            content=content
         )
         self._schedule_pending_thread_list_entry(
             path=path,

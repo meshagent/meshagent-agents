@@ -290,7 +290,6 @@ class AccumulatingAgentEventReader(ABC):
                 if isinstance(message, AgentImageGenerationCompleted)
                 else [],
                 status=_image_generation_status(message=message),
-                status_detail=message.status_detail,
             )
             return
 
@@ -482,7 +481,6 @@ class AccumulatingAgentEventReader(ABC):
         arguments: dict[str, Any] | None,
         images: list[dict[str, Any]],
         status: str,
-        status_detail: str | None,
     ) -> None:
         raise NotImplementedError
 

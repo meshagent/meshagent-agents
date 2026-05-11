@@ -454,7 +454,6 @@ class ThreadAdapter(ABC):
         width: Optional[int | float] = None,
         height: Optional[int | float] = None,
         status: Optional[str] = None,
-        status_detail: Optional[str] = None,
     ) -> str:
         if self._thread is None:
             raise RoomException("thread was not opened")
@@ -539,8 +538,6 @@ class ThreadAdapter(ABC):
             image_attributes["height"] = normalized_height
         if isinstance(status, str) and status.strip() != "":
             image_attributes["status"] = status.strip()
-        if isinstance(status_detail, str) and status_detail.strip() != "":
-            image_attributes["status_detail"] = status_detail.strip()
 
         if image is None:
             message.append_child(tag_name="image", attributes=image_attributes)

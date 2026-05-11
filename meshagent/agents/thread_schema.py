@@ -125,11 +125,6 @@ thread_schema = MeshSchema(
                     type="string",
                 ),
                 ValueProperty(
-                    name="status_detail",
-                    description="optional human-readable status text for image generation",
-                    type="string",
-                ),
-                ValueProperty(
                     name="width",
                     description="the pixel width of the generated image when known",
                     type="number",
