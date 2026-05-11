@@ -648,6 +648,33 @@ async def test_dataset_thread_storage_persists_binary_agent_message_attachment()
 
 
 @pytest.mark.asyncio
+async def test_dataset_thread_storage_restores_realtime_audio_chunk_with_llm_reader() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/demo",
+        persist_audio_input=True,
+    )
+    await storage.start()
+
+    storage.push_message(
+        message=AgentRealtimeAudioChunk(
+            type=AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
+            thread_id="dataset://threads/demo",
+            message_id="audio-input-1",
+            data=b"\xff\x00\x01",
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    assert "agent_events" not in context.metadata
+
+
+@pytest.mark.asyncio
 async def test_dataset_thread_storage_skips_realtime_audio_chunks_by_default() -> None:
     room = _FakeRoom()
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
@@ -1197,10 +1224,7 @@ async def test_dataset_thread_storage_restores_streamed_text_as_single_message()
     storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
 
     assert context.messages == [{"role": "assistant", "content": "Hi there"}]
-    assert [event["type"] for event in context.metadata["agent_events"]] == [
-        AGENT_EVENT_TEXT_CONTENT_DELTA,
-        AGENT_EVENT_TEXT_CONTENT_ENDED,
-    ]
+    assert "agent_events" not in context.metadata
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2038,7 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
 
 
 @pytest.mark.asyncio
-async def test_dataset_thread_storage_restores_agent_events_with_llm_reader() -> None:
+async def test_dataset_thread_storage_restores_context_with_llm_reader() -> None:
     room = _FakeRoom()
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
     await storage.start()
@@ -2133,14 +2157,4 @@ async def test_dataset_thread_storage_restores_agent_events_with_llm_reader() ->
         "through_sequence": 4,
         "created_at": "2026-05-05T00:00:00Z",
     }
-    assert [event["type"] for event in context.metadata["agent_events"]] == [
-        AGENT_MESSAGE_TURN_START,
-        AGENT_EVENT_TURN_START_ACCEPTED,
-        AGENT_EVENT_TEXT_CONTENT_DELTA,
-        AGENT_EVENT_TEXT_CONTENT_ENDED,
-        AGENT_EVENT_TOOL_CALL_STARTED,
-        AGENT_EVENT_TOOL_CALL_LOG_DELTA,
-        AGENT_EVENT_TOOL_CALL_ENDED,
-        AGENT_EVENT_THREAD_EVENT,
-        AGENT_EVENT_CONTEXT_COMPACTED,
-    ]
+    assert "agent_events" not in context.metadata

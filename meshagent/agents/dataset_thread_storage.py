@@ -1969,13 +1969,6 @@ class DatasetThreadStorage(ThreadStorage):
         context: AgentSessionContext,
         restored_messages: list[dict[str, Any]],
     ) -> AgentEventReaderCallbacks:
-        def record_event(message: AgentThreadMessage) -> None:
-            events = context.metadata.setdefault("agent_events", [])
-            if not isinstance(events, list):
-                events = []
-                context.metadata["agent_events"] = events
-            events.append(message.model_dump(mode="json"))
-
         def update_usage(usage: dict[str, float]) -> None:
             context.usage.clear()
             context.usage.update(usage)
@@ -1995,7 +1988,7 @@ class DatasetThreadStorage(ThreadStorage):
             context.previous_response_id = None
 
         return AgentEventReaderCallbacks(
-            record_event=record_event,
+            record_event=lambda message: None,
             update_usage=update_usage,
             restore_compacted_context=restore_compacted_context,
         )
