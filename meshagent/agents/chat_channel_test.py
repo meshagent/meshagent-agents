@@ -67,9 +67,11 @@ from meshagent.agents.messages import (
     AgentProviderInfo,
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
+    AgentRealtimeConnectionInfo,
     OpenThread,
     ModelsRequest,
     ModelsResponse,
+    StartThread,
     ThreadCleared,
     TurnEnded,
     TurnInterrupted,
@@ -264,6 +266,35 @@ class _RejectingStartSupervisor(_RecordingSupervisor):
     async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
         self.validated_turn_starts.append(turn_start)
         return AgentError(message="unknown model", code="unknown_model")
+
+
+class _RealtimeConnectionSupervisor(_RecordingSupervisor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.realtime_connection_requests: list[dict[str, object]] = []
+
+    async def create_realtime_connection(
+        self,
+        *,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> AgentRealtimeConnectionInfo:
+        self.realtime_connection_requests.append(
+            {
+                "thread_id": thread_id,
+                "protocol": start_thread.realtime_protocol,
+                "provider": start_thread.provider,
+                "model": start_thread.model,
+                "sender": sender,
+            }
+        )
+        return AgentRealtimeConnectionInfo(
+            protocol="webrtc",
+            url="https://api.openai.test/v1/realtime/calls?model=gpt-realtime",
+            headers={"Authorization": "Bearer test"},
+            web_only_protocol="openai-realtime",
+        )
 
 
 class _FakeThreadNameAdapter(LLMAdapter):
@@ -593,6 +624,56 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
         assert entries[0].get_attribute("name") == "Audio message"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_start_thread_message_returns_realtime_connection() -> None:
+    caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = ChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RealtimeConnectionSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "type": AGENT_MESSAGE_THREAD_START,
+                    "message_id": "start-thread-1",
+                    "provider": "openai-realtime",
+                    "model": "gpt-realtime",
+                    "content": None,
+                    "name": "Audio message",
+                    "realtime_protocol": "webrtc",
+                },
+            )
+        )
+        await _drain_background_tasks()
+
+        assert len(supervisor.realtime_connection_requests) == 1
+        request = supervisor.realtime_connection_requests[0]
+        assert request["protocol"] == "webrtc"
+        assert request["provider"] == "openai-realtime"
+        assert request["model"] == "gpt-realtime"
+        assert request["sender"] is caller
+        assert len(room.messaging.sent_messages) == 1
+        response_payload = room.messaging.sent_messages[0]["message"]
+        assert response_payload["type"] == AGENT_EVENT_THREAD_STARTED
+        assert response_payload["source_message_id"] == "start-thread-1"
+        assert response_payload["realtime_connection"] == {
+            "protocol": "webrtc",
+            "url": "https://api.openai.test/v1/realtime/calls?model=gpt-realtime",
+            "headers": {"Authorization": "Bearer test"},
+            "web_only_protocol": "openai-realtime",
+        }
     finally:
         await channel.stop(supervisor)
 

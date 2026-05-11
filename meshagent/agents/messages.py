@@ -118,6 +118,7 @@ class StartThread(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_START]
     content: list[AgentInputContent] | None = None
     name: str | None = None
+    realtime_protocol: Literal["websocket", "webrtc"] | None = None
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -237,6 +238,9 @@ class AgentModelInfo(BaseModel):
     input_format: "AgentAudioFormat | None" = None
     output_format: "AgentAudioFormat | None" = None
     turn_detection: Literal["none", "automatic"] | None = None
+    realtime_protocols: list[Literal["websocket", "webrtc"]] = Field(
+        default_factory=list
+    )
     active: bool = False
 
 
@@ -281,6 +285,9 @@ class AgentModelChanged(AgentThreadMessage):
     output_modalities: list[Literal["text", "audio"]] = Field(
         default_factory=lambda: ["text"],
         max_length=1,
+    )
+    realtime_protocols: list[Literal["websocket", "webrtc"]] = Field(
+        default_factory=list
     )
 
 
@@ -352,6 +359,14 @@ class ThreadStarted(AgentMessage):
     type: Literal[AGENT_EVENT_THREAD_STARTED]
     source_message_id: str
     thread_id: str
+    realtime_connection: "AgentRealtimeConnectionInfo | None" = None
+
+
+class AgentRealtimeConnectionInfo(BaseModel):
+    protocol: Literal["websocket", "webrtc"]
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    web_only_protocol: str | None = None
 
 
 class AgentReasoningContentStarted(AgentLLMMessage):

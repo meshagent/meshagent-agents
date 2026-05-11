@@ -38,6 +38,7 @@ from .messages import (
     AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
+    AgentError,
     AgentFileContent,
     AgentFileContentDelta,
     AgentFileContentEnded,
@@ -46,6 +47,7 @@ from .messages import (
     AgentMessage,
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
+    AgentRealtimeConnectionInfo,
     AgentTextContent,
     AgentThreadMessage,
     CloseThread,
@@ -626,6 +628,30 @@ class ChatChannel(ThreadedChannel):
         path = await self._new_thread_path()
         content = start_thread.content
         if content is None:
+            realtime_connection = None
+            if start_thread.realtime_protocol is not None:
+                try:
+                    realtime_connection = (
+                        await self.supervisor.create_realtime_connection(
+                            thread_id=path,
+                            start_thread=start_thread,
+                            sender=sender,
+                        )
+                    )
+                except Exception as exc:
+                    self._send_agent_payload_nowait(
+                        participant=sender,
+                        payload=TurnStartRejected(
+                            type=AGENT_EVENT_TURN_START_REJECTED,
+                            thread_id=path,
+                            source_message_id=start_thread.message_id,
+                            error=AgentError(
+                                message=str(exc),
+                                code="realtime_connection_failed",
+                            ),
+                        ).model_dump(mode="json"),
+                    )
+                    return
             self._begin_pending_thread_list_entry(path=path)
             self._register_open_participant(thread_id=path, participant_id=sender.id)
             self.bump_thread(
@@ -640,6 +666,11 @@ class ChatChannel(ThreadedChannel):
                     type=AGENT_EVENT_THREAD_STARTED,
                     source_message_id=start_thread.message_id,
                     thread_id=path,
+                    realtime_connection=(
+                        AgentRealtimeConnectionInfo.model_validate(realtime_connection)
+                        if realtime_connection is not None
+                        else None
+                    ),
                 ).model_dump(mode="json"),
             )
             return

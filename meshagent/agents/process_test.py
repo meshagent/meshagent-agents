@@ -5453,6 +5453,7 @@ async def test_llm_agent_process_automatic_realtime_audio_turn_starts_on_speech(
 
     await process.start(supervisor)
     try:
+        caller = _ThreadParticipant(name="caller", participant_id="caller-id")
         process.send(
             Message(
                 data=AgentRealtimeAudioChunk(
@@ -5462,6 +5463,7 @@ async def test_llm_agent_process_automatic_realtime_audio_turn_starts_on_speech(
                     data=b"pcm-bytes",
                     format=AgentAudioFormat(type="audio/pcm", sample_rate=24000),
                 ),
+                sender=caller,
             )
         )
 
@@ -5469,7 +5471,7 @@ async def test_llm_agent_process_automatic_realtime_audio_turn_starts_on_speech(
         assert adapter.realtime_session_calls == [
             {
                 "context": adapter.session,
-                "caller": room.local_participant,
+                "caller": caller,
                 "toolkits": ["storage"],
                 "tool_choice": None,
                 "model": "default-model",
@@ -5489,6 +5491,20 @@ async def test_llm_agent_process_automatic_realtime_audio_turn_starts_on_speech(
         started_payloads = supervisor.payloads(message_type=AGENT_EVENT_TURN_STARTED)
         assert len(started_payloads) == 1
         assert started_payloads[0]["source_message_id"] == "audio-chunk-1"
+
+        session.event_handler(
+            {
+                "type": "input_audio_transcription.completed",
+                "item_id": "user-audio-1",
+                "text": "hello from audio",
+            }
+        )
+        audio_transcriptions = supervisor.payloads(
+            message_type=AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED
+        )
+        assert len(audio_transcriptions) == 1
+        assert audio_transcriptions[0]["role"] == "user"
+        assert audio_transcriptions[0]["sender_name"] == "caller"
 
         session.event_handler({"type": "response.done", "response": {"output": []}})
         ended_payloads = supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)

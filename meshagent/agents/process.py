@@ -112,6 +112,7 @@ from .messages import (
     ModelsResponse,
     OpenThread,
     RejectAgentToolCall,
+    StartThread,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
     ToolChoice,
@@ -709,6 +710,7 @@ def agent_model_info(
             model_info.output_format
         ),
         turn_detection=model_info.turn_detection,
+        realtime_protocols=list(model_info.realtime_protocols),
         active=provider.name == current_provider and model_info.name == current_model,
     )
 
@@ -922,6 +924,18 @@ class AgentSupervisor:
 
     async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
         del turn_start
+        return None
+
+    async def create_realtime_connection(
+        self,
+        *,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ):
+        del thread_id
+        del start_thread
+        del sender
         return None
 
     async def route(self, message: Message) -> None:
@@ -1905,6 +1919,9 @@ class LLMAgentProcess(AgentProcess):
             if model_info is not None
             else None,
             output_modalities=list(self._current_model_changed_output_modalities()),
+            realtime_protocols=(
+                list(model_info.realtime_protocols) if model_info is not None else []
+            ),
         )
 
     def _restore_current_model_from_thread_storage(self) -> bool:
@@ -4119,12 +4136,38 @@ class LLMAgentProcess(AgentProcess):
                 nonlocal publisher
                 if automatic_turn_id is None or publisher is not None:
                     return
+
+                def publish_automatic_payload(payload: AgentMessage) -> None:
+                    participant_name = self._sender_name(message.sender)
+                    updates: dict[str, str] = {}
+                    if isinstance(payload, AgentLLMMessage):
+                        if payload.provider is None:
+                            updates["provider"] = self._current_provider.name
+                        if payload.model is None:
+                            updates["model"] = self._current_model
+                    if (
+                        isinstance(
+                            payload,
+                            (
+                                AgentAudioTranscriptionCompleted,
+                                AgentAudioTranscriptionDelta,
+                                AgentAudioTranscriptionFailed,
+                                AgentAudioTranscriptionStarted,
+                            ),
+                        )
+                        and payload.role == "user"
+                        and payload.sender_name is None
+                        and participant_name is not None
+                    ):
+                        updates["sender_name"] = participant_name
+                    if len(updates) > 0:
+                        payload = payload.model_copy(update=updates)
+                    self.emit(sender=message.sender, payload=payload)
+
                 publisher = self.llm_adapter.make_agent_event_publisher(
                     turn_id=automatic_turn_id,
                     thread_id=chunk.thread_id,
-                    callback=lambda payload: self.emit(
-                        sender=message.sender, payload=payload
-                    ),
+                    callback=publish_automatic_payload,
                 )
 
             def start_automatic_turn() -> None:

@@ -52,6 +52,14 @@ class LLMAudioFormat:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMRealtimeConnectionInfo:
+    protocol: Literal["websocket", "webrtc"]
+    url: str
+    headers: dict[str, str]
+    web_only_protocol: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LLMModelInfo:
     name: str
     friendly_name: str | None = None
@@ -64,6 +72,7 @@ class LLMModelInfo:
     input_format: LLMAudioFormat | None = None
     output_format: LLMAudioFormat | None = None
     turn_detection: Literal["none", "automatic"] | None = None
+    realtime_protocols: tuple[Literal["websocket", "webrtc"], ...] = ()
 
 
 def llm_model_pricing(*, provider: str, model: str) -> dict[str, float] | None:
@@ -282,6 +291,20 @@ class LLMAdapter(Generic[TEvent]):
     def with_runtime_api_key(self, *, api_key: str | None) -> "LLMAdapter[TEvent]":
         del api_key
         return self
+
+    async def create_realtime_connection(
+        self,
+        *,
+        protocol: Literal["websocket", "webrtc"],
+        model: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> LLMRealtimeConnectionInfo:
+        del protocol
+        del model
+        del options
+        raise RoomException(
+            f"{self.provider_friendly_name()} does not support client realtime connections"
+        )
 
     async def start_session(
         self,
