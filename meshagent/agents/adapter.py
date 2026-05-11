@@ -12,6 +12,7 @@ from meshagent.api import Participant, RoomException
 from meshagent.tools import Content, ToolContext, Toolkit
 
 from .agent import AgentSessionContext
+from .context import SessionUsageCallback
 from .agent_event_reader import AgentEventReader, AgentEventReaderCallbacks
 from .messages import AgentMessage, ToolChoice
 
@@ -239,8 +240,10 @@ class LLMAdapter(Generic[TEvent]):
             )
         ]
 
-    def create_session(self) -> AgentSessionContext:
-        return AgentSessionContext()
+    def create_session(
+        self, *, usage_callback: SessionUsageCallback | None = None
+    ) -> AgentSessionContext:
+        return AgentSessionContext(usage_callback=usage_callback)
 
     def get_additional_instructions(self) -> str | None:
         return None
@@ -428,8 +431,10 @@ class MessageStreamLLMAdapter(LLMAdapter[AgentMessage | dict[str, Any]]):
     def provider_description(self) -> str | None:
         return "Delegates turns to a remote MeshAgent participant."
 
-    def create_session(self) -> AgentSessionContext:
-        return AgentSessionContext()
+    def create_session(
+        self, *, usage_callback: SessionUsageCallback | None = None
+    ) -> AgentSessionContext:
+        return AgentSessionContext(usage_callback=usage_callback)
 
     async def check_for_termination(self, *, context: AgentSessionContext):
         return True

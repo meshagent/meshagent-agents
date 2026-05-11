@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional
 from copy import deepcopy
 from meshagent.api import RoomException
@@ -6,6 +8,17 @@ from meshagent.tools import Toolkit
 from meshagent.api.participant import Participant
 
 import uuid
+
+
+@dataclass(frozen=True, slots=True)
+class SessionUsage:
+    model: str
+    usage: dict[str, float]
+    context_window_used: int | None = None
+    context_window_size: int | None = None
+
+
+SessionUsageCallback = Callable[[SessionUsage], None]
 
 
 class AgentSessionContext:
@@ -19,7 +32,8 @@ class AgentSessionContext:
         instructions: Optional[str] = None,
         metadata: Optional[dict] = None,
         turn_count: Optional[float] = None,
-        usage: Optional[dict[str, float]] = None,
+        last_usage: SessionUsage | None = None,
+        usage_callback: SessionUsageCallback | None = None,
     ):
         self.id = str(uuid.uuid4())
         if messages is None:
@@ -37,13 +51,23 @@ class AgentSessionContext:
         self.instructions = instructions
 
         self.turn_count = turn_count or 0
-        self.usage = usage or dict[str, float]()
+        self.last_usage = last_usage
+        self._usage_callback = usage_callback
 
     async def start(self) -> None:
         return None
 
     async def close(self) -> None:
         return None
+
+    def set_usage_callback(self, callback: SessionUsageCallback | None) -> None:
+        self._usage_callback = callback
+
+    def emit_usage_updated(self, usage: SessionUsage) -> None:
+        self.last_usage = usage
+        callback = self._usage_callback
+        if callback is not None:
+            callback(usage)
 
     async def __aenter__(self) -> "AgentSessionContext":
         await self.start()
@@ -222,7 +246,8 @@ class AgentSessionContext:
             messages=deepcopy(self.messages),
             system_role=self._system_role,
             turn_count=self.turn_count,
-            usage=deepcopy(self.usage),
+            last_usage=deepcopy(self.last_usage),
+            usage_callback=self._usage_callback,
         )
 
     def to_json(self) -> dict:

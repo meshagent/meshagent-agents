@@ -7,7 +7,7 @@ from meshagent.agents.agent_event_reader import (
     AgentEventReaderCallbacks,
     _BufferedToolCall,
 )
-from meshagent.agents.context import AgentSessionContext
+from meshagent.agents.context import AgentSessionContext, SessionUsage
 from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -19,6 +19,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_MESSAGE_TURN_START,
     AgentContextCompacted,
+    AgentUsageUpdated,
     AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
@@ -132,9 +133,13 @@ def _reader_for_context(context: AgentSessionContext) -> _TestAgentEventReader:
             message.model_dump(mode="json")
         )
 
-    def update_usage(usage: dict[str, float]) -> None:
-        context.usage.clear()
-        context.usage.update(usage)
+    def update_usage(message: AgentUsageUpdated) -> None:
+        context.last_usage = SessionUsage(
+            model="",
+            usage=dict(message.usage),
+            context_window_used=message.context_window.used_tokens,
+            context_window_size=message.context_window.total_tokens,
+        )
 
     def restore_compacted_context(message: AgentContextCompacted) -> None:
         context.metadata["last_compaction"] = {

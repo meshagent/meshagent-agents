@@ -33,7 +33,7 @@ from meshagent.agents.adapter import (
     LLMProvider,
     ToolCallApprovalRequest,
 )
-from meshagent.agents.context import AgentSessionContext
+from meshagent.agents.context import AgentSessionContext, SessionUsage
 from meshagent.tools import ToolContext, Toolkit
 from opentelemetry import trace
 from pydantic_core import from_json as pydantic_core_from_json
@@ -1669,6 +1669,8 @@ class LLMAgentProcess(AgentProcess):
         self._content_schemes: list[ContentScheme] = []
         self._pending_tool_call_approvals: dict[str, asyncio.Future[bool]] = {}
         self._active_turn_sender: Participant | None = None
+        self._active_turn_toolkits: list[Toolkit] | None = None
+        self._usage_emitted_turn_ids: set[str] = set()
         self._pending_status_messages: list[_QueuedTurnMessage] = []
         self._pending_realtime_audio_chunks: list[_PendingRealtimeAudioChunk] = []
         self._pending_realtime_audio_chunks_by_turn_id: dict[
@@ -1995,7 +1997,9 @@ class LLMAgentProcess(AgentProcess):
         self, *, turn_id: str | None
     ) -> AgentSessionContext:
         restore_turn_id = turn_id or ""
-        self._session_context = self.llm_adapter.create_session()
+        self._session_context = self.llm_adapter.create_session(
+            usage_callback=self._on_session_usage_updated
+        )
 
         with tracer.start_as_current_span("agent.turn.context.initialize"):
             await self.on_session_context_created()
@@ -2131,26 +2135,6 @@ class LLMAgentProcess(AgentProcess):
             return None
         return max(0, int(value))
 
-    @staticmethod
-    def _last_response_usage(usage: object) -> dict[str, float]:
-        if not isinstance(usage, dict):
-            return {}
-        out: dict[str, float] = {}
-        for key, value in usage.items():
-            if (
-                isinstance(key, str)
-                and isinstance(value, int | float)
-                and math.isfinite(value)
-            ):
-                out[key] = float(value)
-        return out
-
-    @staticmethod
-    def _last_response_context_used_tokens(value: object) -> int:
-        if isinstance(value, int | float) and math.isfinite(value):
-            return max(0, int(value))
-        return 0
-
     def _cached_usage_update(
         self,
         *,
@@ -2160,6 +2144,69 @@ class LLMAgentProcess(AgentProcess):
         if last_usage_update is None:
             return None
         return last_usage_update.model_copy(update={"turn_id": turn_id})
+
+    def _on_session_usage_updated(self, usage: SessionUsage) -> None:
+        turn_id = self._turn_id
+        sender = self._active_turn_sender
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._emit_session_usage_update(
+                usage=usage,
+                turn_id=turn_id,
+                sender=sender,
+            )
+        )
+
+        def done_callback(done_task: asyncio.Task[None]) -> None:
+            try:
+                done_task.result()
+            except Exception:
+                logger.debug("failed to publish session usage update", exc_info=True)
+
+        task.add_done_callback(done_callback)
+        if turn_id is not None:
+            self._usage_emitted_turn_ids.add(turn_id)
+
+    async def _emit_session_usage_update(
+        self,
+        *,
+        usage: SessionUsage,
+        turn_id: str | None,
+        sender: Participant | None,
+    ) -> None:
+        thread_id = self.thread_id
+        if thread_id is None:
+            return
+        try:
+            context_management_mode = self.llm_adapter.context_management_mode()
+        except Exception:
+            logger.debug("failed to read context management mode", exc_info=True)
+            context_management_mode = None
+        try:
+            configured_compaction_threshold = self.llm_adapter.compaction_threshold(
+                usage.model
+            )
+        except Exception:
+            logger.debug("failed to read compaction threshold", exc_info=True)
+            configured_compaction_threshold = None
+
+        usage_update = AgentUsageUpdated(
+            type=AGENT_EVENT_USAGE_UPDATED,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            usage=usage.usage,
+            context_window=AgentContextWindowUsage(
+                used_tokens=usage.context_window_used or 0,
+                total_tokens=usage.context_window_size,
+                compaction_mode=context_management_mode,
+                compaction_threshold=configured_compaction_threshold,
+            ),
+        )
+        self._last_usage_update = usage_update
+        self.emit(sender=sender, payload=usage_update)
 
     async def _build_usage_update(
         self,
@@ -2175,13 +2222,6 @@ class LLMAgentProcess(AgentProcess):
         if thread_id is None:
             raise RuntimeError("usage update requested without an active thread")
 
-        usage = (
-            self._last_response_usage(
-                session.metadata.get("last_response_flattened_usage")
-            )
-            if include_usage
-            else {}
-        )
         context = session
         restored_context_from_storage = False
         if restore_context_from_storage:
@@ -2198,9 +2238,15 @@ class LLMAgentProcess(AgentProcess):
                 )
                 restored_context_from_storage = True
 
-        used_tokens = self._last_response_context_used_tokens(
-            session.metadata.get("last_response_context_used_tokens")
-        )
+        session_usage = context.last_usage
+        usage = {}
+        if include_usage and session_usage is not None:
+            usage = session_usage.usage
+
+        if session_usage is not None and session_usage.context_window_used is not None:
+            used_tokens = session_usage.context_window_used
+        else:
+            used_tokens = 0
         count_missing_restored_usage = (
             restored_context_from_storage
             and include_usage
@@ -2220,16 +2266,14 @@ class LLMAgentProcess(AgentProcess):
                 )
             except Exception:
                 logger.debug("failed to compute context window usage", exc_info=True)
-        compaction_threshold = session.metadata.get(
-            "last_response_compaction_threshold"
-        )
-        if isinstance(compaction_threshold, int):
-            used_tokens = min(used_tokens, compaction_threshold)
-        try:
-            context_window_size = self.llm_adapter.context_window_size(model)
-        except Exception:
-            logger.debug("failed to compute context window size", exc_info=True)
-            context_window_size = float("inf")
+        if session_usage is not None and session_usage.context_window_size is not None:
+            context_window_size = float(session_usage.context_window_size)
+        else:
+            try:
+                context_window_size = self.llm_adapter.context_window_size(model)
+            except Exception:
+                logger.debug("failed to compute context window size", exc_info=True)
+                context_window_size = float("inf")
         try:
             context_management_mode = self.llm_adapter.context_management_mode()
         except Exception:
@@ -3315,6 +3359,7 @@ class LLMAgentProcess(AgentProcess):
         )
 
         self._active_turn_sender = sender
+        self._active_turn_toolkits = combined_toolkits
         had_thread_id = "thread_id" in session.metadata
         previous_thread_id = session.metadata.get("thread_id")
         had_turn_id = "turn_id" in session.metadata
@@ -3380,15 +3425,17 @@ class LLMAgentProcess(AgentProcess):
                 await next_task
                 completed = self._interrupt_requested_turn_id != turn_id
         finally:
-            await self._emit_usage_update(
-                session=session,
-                model=model,
-                toolkits=combined_toolkits,
-                turn_id=turn_id,
-                sender=sender,
-                include_usage=completed,
-                restore_context_from_storage=not completed,
-            )
+            usage_already_emitted = turn_id in self._usage_emitted_turn_ids
+            if not (completed and usage_already_emitted):
+                await self._emit_usage_update(
+                    session=session,
+                    model=model,
+                    toolkits=combined_toolkits,
+                    turn_id=turn_id,
+                    sender=sender,
+                    include_usage=completed,
+                    restore_context_from_storage=not completed,
+                )
             if had_thread_id:
                 session.metadata["thread_id"] = previous_thread_id
             else:
@@ -3404,6 +3451,8 @@ class LLMAgentProcess(AgentProcess):
                 session.metadata.pop("voice", None)
             self._active_next_task = None
             self._active_turn_sender = None
+            self._active_turn_toolkits = None
+            self._usage_emitted_turn_ids.discard(turn_id)
 
     async def _continue_interrupted_turn(
         self,

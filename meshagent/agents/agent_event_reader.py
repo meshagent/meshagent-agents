@@ -60,7 +60,7 @@ class AgentEventReader(Protocol):
 @dataclass(frozen=True, slots=True)
 class AgentEventReaderCallbacks:
     record_event: Callable[[AgentMessage], None]
-    update_usage: Callable[[dict[str, float]], None]
+    update_usage: Callable[[AgentUsageUpdated], None]
     restore_compacted_context: Callable[[AgentContextCompacted], None]
 
 
@@ -111,7 +111,7 @@ def _image_generation_status(
 def _noop_agent_event_reader_callbacks() -> AgentEventReaderCallbacks:
     return AgentEventReaderCallbacks(
         record_event=lambda message: None,
-        update_usage=lambda usage: None,
+        update_usage=lambda message: None,
         restore_compacted_context=lambda message: None,
     )
 
@@ -330,7 +330,7 @@ class AccumulatingAgentEventReader(ABC):
             return
 
         if isinstance(message, AgentUsageUpdated):
-            self._callbacks.update_usage(message.usage)
+            self._callbacks.update_usage(message)
             return
 
     def finalize(self) -> None:

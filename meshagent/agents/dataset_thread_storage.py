@@ -27,7 +27,7 @@ from meshagent.api.messaging import TextContent
 from meshagent.tools import Toolkit, tool
 
 from .agent_event_reader import AgentEventReaderCallbacks
-from .context import AgentSessionContext
+from .context import AgentSessionContext, SessionUsage
 from .images_dataset import ImagesDataset
 from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -103,6 +103,20 @@ logger = logging.getLogger("agent.dataset_thread_storage")
 
 _DATASET_THREAD_URL_PREFIX = "dataset://"
 _IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+
+
+def _infer_usage_model(usage: dict[str, float]) -> str:
+    models: set[str] = set()
+    for key in usage:
+        if "." not in key:
+            continue
+        model, metric = key.rsplit(".", 1)
+        if model != "" and metric != "":
+            models.add(model)
+    if len(models) == 1:
+        return next(iter(models))
+    return ""
+
 
 _TERMINAL_REASON_TO_STATUS = {
     "completed": "completed",
@@ -1969,9 +1983,13 @@ class DatasetThreadStorage(ThreadStorage):
         context: AgentSessionContext,
         restored_messages: list[dict[str, Any]],
     ) -> AgentEventReaderCallbacks:
-        def update_usage(usage: dict[str, float]) -> None:
-            context.usage.clear()
-            context.usage.update(usage)
+        def update_usage(message: AgentUsageUpdated) -> None:
+            context.last_usage = SessionUsage(
+                model=_infer_usage_model(message.usage),
+                usage=dict(message.usage),
+                context_window_used=message.context_window.used_tokens,
+                context_window_size=message.context_window.total_tokens,
+            )
 
         def restore_compacted_context(message: AgentContextCompacted) -> None:
             context.metadata["last_compaction"] = {

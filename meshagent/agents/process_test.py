@@ -25,7 +25,7 @@ from meshagent.agents.adapter import (
     LLMProvider,
     ToolCallApprovalRequest,
 )
-from meshagent.agents.context import AgentSessionContext
+from meshagent.agents.context import AgentSessionContext, SessionUsage
 from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
@@ -763,7 +763,8 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def provider_name(self) -> str | None:
         return "test-provider"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
+        self.session.set_usage_callback(usage_callback)
         return self.session
 
     async def start_session(
@@ -930,14 +931,32 @@ class _UsageRecordingLLMAdapter(_RecordingLLMAdapter):
 
     async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
-        context.usage["gpt-test.input_tokens"] = 1000
-        context.usage["gpt-test.output_tokens"] = 250
-        context.metadata["last_response_flattened_usage"] = {
-            "gpt-test.input_tokens": 1000.0,
-            "gpt-test.output_tokens": 250.0,
-        }
-        context.metadata["last_response_context_used_tokens"] = 1250
+        context.last_usage = SessionUsage(
+            model="gpt-test",
+            usage={
+                "gpt-test.input_tokens": 1000.0,
+                "gpt-test.output_tokens": 250.0,
+            },
+            context_window_used=1250,
+        )
         return await super().create_response(**kwargs)
+
+
+class _SessionUsageCallbackLLMAdapter(_UsageRecordingLLMAdapter):
+    async def create_response(self, **kwargs) -> Any:
+        context = kwargs["context"]
+        context.emit_usage_updated(
+            SessionUsage(
+                model="gpt-test",
+                usage={
+                    "gpt-test.input_tokens": 1000.0,
+                    "gpt-test.output_tokens": 250.0,
+                },
+                context_window_used=1250,
+                context_window_size=4096,
+            )
+        )
+        return await _RecordingLLMAdapter.create_response(self, **kwargs)
 
 
 class _UsageCountingFailingLLMAdapter(_UsageRecordingLLMAdapter):
@@ -959,27 +978,30 @@ class _UsageCountingFailingLLMAdapter(_UsageRecordingLLMAdapter):
 
 class _CompactedUsageLLMAdapter(_UsageRecordingLLMAdapter):
     async def create_response(self, **kwargs) -> Any:
+        await _RecordingLLMAdapter.create_response(self, **kwargs)
         context = kwargs["context"]
-        context.metadata["last_response_compaction_threshold"] = 250
-        return await super().create_response(**kwargs)
+        context.last_usage = SessionUsage(
+            model="gpt-test",
+            usage={
+                "gpt-test.input_tokens": 1000.0,
+                "gpt-test.output_tokens": 250.0,
+            },
+            context_window_used=250,
+        )
+        return {}
 
 
 class _OpenAIStyleUsageLLMAdapter(_UsageRecordingLLMAdapter):
     async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
-        previous_input = float(context.usage.get("gpt-test.input_tokens", 0.0))
-        previous_output = float(context.usage.get("gpt-test.output_tokens", 0.0))
-        context.usage["gpt-test.input_tokens"] = previous_input + 300000.0
-        context.usage["gpt-test.output_tokens"] = previous_output + 1200.0
-        context.metadata["last_response_usage"] = {
-            "input_tokens": 64000,
-            "output_tokens": 1200,
-        }
-        context.metadata["last_response_flattened_usage"] = {
-            "gpt-test.input_tokens": 64000.0,
-            "gpt-test.output_tokens": 1200.0,
-        }
-        context.metadata["last_response_context_used_tokens"] = 65200
+        context.last_usage = SessionUsage(
+            model="gpt-test",
+            usage={
+                "gpt-test.input_tokens": 64000.0,
+                "gpt-test.output_tokens": 1200.0,
+            },
+            context_window_used=65200,
+        )
         return await _RecordingLLMAdapter.create_response(self, **kwargs)
 
 
@@ -1064,14 +1086,11 @@ class _ThresholdManualCompactionLLMAdapter(_RecordingLLMAdapter):
 
     async def create_response(self, **kwargs) -> Any:
         context = kwargs["context"]
-        context.usage["gpt-test.input_tokens"] = float(
-            context.metadata.get("token_count", 0)
-        )
-        context.metadata["last_response_flattened_usage"] = {
-            "gpt-test.input_tokens": float(context.metadata.get("token_count", 0))
-        }
-        context.metadata["last_response_context_used_tokens"] = int(
-            context.metadata.get("token_count", 0)
+        token_count = int(context.metadata.get("token_count", 0))
+        context.last_usage = SessionUsage(
+            model="gpt-test",
+            usage={"gpt-test.input_tokens": float(token_count)},
+            context_window_used=token_count,
         )
         return await super().create_response(**kwargs)
 
@@ -1136,14 +1155,11 @@ class _ThresholdAutoCompactionLLMAdapter(_RecordingLLMAdapter):
                         messages=[context.messages[0]],
                     )
                 )
-        context.usage["gpt-test.input_tokens"] = float(
-            context.metadata.get("token_count", 0)
-        )
-        context.metadata["last_response_flattened_usage"] = {
-            "gpt-test.input_tokens": float(context.metadata.get("token_count", 0))
-        }
-        context.metadata["last_response_context_used_tokens"] = int(
-            context.metadata.get("token_count", 0)
+        token_count = int(context.metadata.get("token_count", 0))
+        context.last_usage = SessionUsage(
+            model="gpt-test",
+            usage={"gpt-test.input_tokens": float(token_count)},
+            context_window_used=token_count,
         )
         return await super().create_response(**kwargs)
 
@@ -1158,8 +1174,10 @@ class _CancellationUsageLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "gpt-test"
 
-    def create_session(self) -> AgentSessionContext:
-        return _LifecycleSession()
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
+        session = _LifecycleSession()
+        session.set_usage_callback(usage_callback)
+        return session
 
     def context_window_size(self, model: str) -> float:
         assert model == "gpt-test"
@@ -1207,7 +1225,11 @@ class _CancellationUsageLLMAdapter(LLMAdapter[dict[str, Any]]):
         del tool_choice
         assert model == "gpt-test"
 
-        context.usage["gpt-test.input_tokens"] = 999
+        context.last_usage = SessionUsage(
+            model="gpt-test",
+            usage={"gpt-test.input_tokens": 999.0},
+            context_window_used=999,
+        )
         if event_handler is not None:
             event_handler(
                 AgentTextContentDelta(
@@ -1236,7 +1258,7 @@ class _CustomEventLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     async def create_response(
@@ -1305,7 +1327,7 @@ class _ImageGenerationStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -1394,7 +1416,7 @@ class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -1477,7 +1499,7 @@ class _ToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -1564,7 +1586,7 @@ class _PartialToolArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -1641,7 +1663,7 @@ class _ToolEventArgumentDeltaStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -1721,7 +1743,7 @@ class _PublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def provider_name(self) -> str | None:
         return "test-provider"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -1800,7 +1822,7 @@ class _QueuedSteerLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     async def create_response(
@@ -1864,7 +1886,7 @@ class _ToolBoundarySteeringLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     async def create_response(
@@ -1915,7 +1937,7 @@ class _ToolBoundaryThreadOrderingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -2332,7 +2354,7 @@ class _ApprovalCapableLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def set_tool_call_approval_handler(self, handler) -> None:
@@ -2407,7 +2429,7 @@ class _ThreadPublishingLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     def make_agent_event_publisher(
@@ -2506,7 +2528,7 @@ class _CancellationIgnoringLLMAdapter(LLMAdapter[dict[str, Any]]):
     def default_model(self) -> str:
         return "default-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return self.session
 
     async def create_response(
@@ -3727,6 +3749,59 @@ async def test_llm_agent_process_adds_participant_name_to_agent_messages() -> No
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_publishes_session_usage_callback_without_duplicate_final_update() -> (
+    None
+):
+    adapter = _SessionUsageCallbackLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)) == 1
+    )
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                model="gpt-test",
+                content=[{"type": "text", "text": "hello"}],
+            )
+        )
+    )
+
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+    await asyncio.sleep(0)
+
+    usage_payloads = supervisor.payloads(message_type=AGENT_EVENT_USAGE_UPDATED)
+    assert len(usage_payloads) == 2
+    assert usage_payloads[1]["context_window"]["used_tokens"] == 1250
+    assert usage_payloads[1]["usage"] == {
+        "gpt-test.input_tokens": 1000.0,
+        "gpt-test.output_tokens": 250.0,
+    }
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_thread_open_usage_replies_to_source_without_storage_or_broadcast() -> (
     None
 ):
@@ -3880,15 +3955,6 @@ async def test_llm_agent_process_uses_last_flattened_usage_not_cumulative_usage(
     assert usage_payload["context_window"]["total_tokens"] == 128000
 
     await process.stop(supervisor)
-
-
-def test_llm_agent_process_context_window_usage_uses_adapter_context_used_value() -> (
-    None
-):
-    assert LLMAgentProcess._last_response_context_used_tokens(330.0) == 330
-    assert (
-        LLMAgentProcess._last_response_context_used_tokens({"input_tokens": 330}) == 0
-    )
 
 
 @pytest.mark.asyncio

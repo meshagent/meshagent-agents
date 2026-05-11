@@ -321,7 +321,7 @@ class _SessionRequiredThreadNameAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "thread-name-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         return _SessionRequiredContext(system_role=None)
 
     async def create_response(

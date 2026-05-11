@@ -15,7 +15,7 @@ from meshagent.agents.agent_event_reader import (
     AgentEventReaderCallbacks,
     _BufferedToolCall,
 )
-from meshagent.agents.context import AgentSessionContext
+from meshagent.agents.context import AgentSessionContext, SessionUsage
 from meshagent.agents.dataset_thread_storage import DatasetThreadStorage
 from meshagent.agents.images_dataset import ImagesDataset
 from meshagent.agents.messages import (
@@ -954,10 +954,12 @@ async def test_dataset_thread_storage_restores_usage_updates() -> None:
     context = AgentSessionContext(system_role=None)
     storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
 
-    assert context.usage == {
-        "gpt-test.input_tokens": 120.0,
-        "gpt-test.output_tokens": 30.0,
-    }
+    assert context.last_usage == SessionUsage(
+        model="gpt-test",
+        usage={"gpt-test.input_tokens": 120.0, "gpt-test.output_tokens": 30.0},
+        context_window_used=120,
+        context_window_size=128000,
+    )
 
 
 @pytest.mark.asyncio

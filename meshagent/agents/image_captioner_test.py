@@ -40,7 +40,7 @@ class _FakeAdapter(LLMAdapter):
     def default_model(self) -> str:
         return "test-model"
 
-    def create_session(self) -> AgentSessionContext:
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
         if self._image_supported:
             return _ImageCapableContext(system_role=None)
         return AgentSessionContext(system_role=None)
