@@ -45,6 +45,13 @@ class LLMProvider:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMAudioFormat:
+    type: str = "audio/pcm"
+    sample_rate: int | None = 24000
+    bitrate: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LLMModelInfo:
     name: str
     friendly_name: str | None = None
@@ -52,6 +59,10 @@ class LLMModelInfo:
     context_window: int | None = None
     pricing: dict[str, float] | None = None
     modalities: tuple[Literal["text", "audio"], ...] = ("text",)
+    available_voices: tuple[str, ...] = ()
+    default_output_voice: str | None = None
+    input_format: LLMAudioFormat | None = None
+    output_format: LLMAudioFormat | None = None
 
 
 def llm_model_pricing(*, provider: str, model: str) -> dict[str, float] | None:

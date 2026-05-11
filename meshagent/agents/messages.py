@@ -118,6 +118,7 @@ class StartThread(AgentMessage):
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    voice: str | None = None
     output_modalities: list[Literal["text", "audio"]] | None = Field(
         default=None,
         max_length=1,
@@ -134,6 +135,7 @@ class TurnStart(AgentThreadMessage):
     sender_name: str | None = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    voice: str | None = None
     output_modalities: list[Literal["text", "audio"]] | None = Field(
         default=None,
         max_length=1,
@@ -155,14 +157,23 @@ class TurnInterrupt(AgentThreadMessage):
     turn_id: str
 
 
+class AgentAudioFormat(BaseModel):
+    type: str = "audio/pcm"
+    sample_rate: int | None = 24000
+    bitrate: int | None = None
+
+
 class AgentRealtimeAudioChunk(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_REALTIME_AUDIO_CHUNK]
     turn_id: str | None = None
     provider: str | None = None
     model: str | None = None
+    voice: str | None = None
     data: bytes = b""
     mime_type: str = "audio/pcm"
     sample_rate: int = 24000
+    bitrate: int | None = None
+    input_format: "AgentAudioFormat | None" = None
     final: bool = False
     output_modalities: list[Literal["text", "audio"]] | None = Field(
         default=None,
@@ -175,6 +186,7 @@ class AgentRealtimeAudioCommit(AgentThreadMessage):
     turn_id: str | None = None
     provider: str | None = None
     model: str | None = None
+    voice: str | None = None
     text: str | None = None
     status: Literal["in_progress", "completed", "cancelled", "failed"] | None = None
     status_detail: str | None = None
@@ -237,6 +249,10 @@ class AgentModelInfo(BaseModel):
     context_window: int | None = None
     pricing: dict[str, float] | None = None
     modalities: list[Literal["text", "audio"]] = Field(default_factory=lambda: ["text"])
+    available_voices: list[str] = Field(default_factory=list)
+    default_output_voice: str | None = None
+    input_format: "AgentAudioFormat | None" = None
+    output_format: "AgentAudioFormat | None" = None
     active: bool = False
 
 
@@ -266,6 +282,7 @@ class ChangeModel(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_MODEL_CHANGE]
     provider: str | None = None
     model: str | None = None
+    voice: str | None = None
 
 
 class AgentModelChanged(AgentThreadMessage):
@@ -273,6 +290,9 @@ class AgentModelChanged(AgentThreadMessage):
     source_message_id: str | None = None
     provider: str
     model: str
+    voice: str | None = None
+    input_format: "AgentAudioFormat | None" = None
+    output_format: "AgentAudioFormat | None" = None
     output_modalities: list[Literal["text", "audio"]] = Field(
         default_factory=lambda: ["text"],
         max_length=1,
@@ -605,6 +625,7 @@ class AgentAudioGenerationDelta(AgentLLMMessage):
     content_index: int | None = None
     data: bytes = b""
     mime_type: str | None = None
+    output_format: AgentAudioFormat | None = None
     status_detail: str | None = None
 
 
@@ -615,6 +636,7 @@ class AgentAudioGenerationCompleted(AgentLLMMessage):
     response_id: str | None = None
     content_index: int | None = None
     audio: AgentGeneratedAudio | None = None
+    output_format: AgentAudioFormat | None = None
     status_detail: str | None = None
 
 

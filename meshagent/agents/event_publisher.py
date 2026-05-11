@@ -40,6 +40,7 @@ from .messages import (
     AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_STARTED,
     AgentError,
+    AgentAudioFormat,
     AgentAudioGenerationCompleted,
     AgentAudioGenerationDelta,
     AgentAudioGenerationFailed,
@@ -326,13 +327,23 @@ def _mime_type_from_image_output_format(output_format: Any) -> str:
     normalized = _as_str(output_format)
     if normalized is None:
         return "image/png"
-
     normalized = normalized.lower().lstrip(".")
     if normalized == "jpg":
         normalized = "jpeg"
     if normalized == "":
         return "image/png"
     return f"image/{normalized}"
+
+
+def _audio_format_from_event(event: dict[str, Any]) -> AgentAudioFormat | None:
+    mime_type = _as_str(event.get("mime_type")) or _as_str(event.get("media_type"))
+    if mime_type is None:
+        return None
+    return AgentAudioFormat(
+        type=mime_type,
+        sample_rate=_as_int(event.get("sample_rate") or event.get("rate")),
+        bitrate=_as_int(event.get("bitrate")),
+    )
 
 
 def _content_from_image_generation_item(item: dict[str, Any]) -> BinaryContent | None:
@@ -1121,6 +1132,7 @@ class _AgentMessageEmitter:
         response_id: str | None = None,
         content_index: int | None = None,
         mime_type: str | None = None,
+        output_format: AgentAudioFormat | None = None,
     ) -> None:
         if data == b"":
             return
@@ -1140,6 +1152,7 @@ class _AgentMessageEmitter:
                 content_index=content_index,
                 data=data,
                 mime_type=mime_type,
+                output_format=output_format,
                 status_detail="Generating audio",
             )
         )
@@ -1151,6 +1164,7 @@ class _AgentMessageEmitter:
         response_id: str | None = None,
         content_index: int | None = None,
         audio: AgentGeneratedAudio | None = None,
+        output_format: AgentAudioFormat | None = None,
     ) -> None:
         key = self._audio_key(kind="generation", item_id=item_id)
         if key in self._ended_audio:
@@ -1170,6 +1184,7 @@ class _AgentMessageEmitter:
                 response_id=response_id,
                 content_index=content_index,
                 audio=audio,
+                output_format=output_format,
                 status_detail="Audio generated",
             )
         )
@@ -1850,6 +1865,7 @@ class _OpenAIAgentEventPublisher:
             content_index=self._content_index_from_event(event=event),
             data=_base64_bytes(event.get("delta")),
             mime_type=_as_str(event.get("mime_type")),
+            output_format=_audio_format_from_event(event),
         )
 
     def _on_audio_done(self, *, event: dict[str, Any]) -> None:
@@ -1868,6 +1884,7 @@ class _OpenAIAgentEventPublisher:
             response_id=self._response_id_from_event(event=event),
             content_index=self._content_index_from_event(event=event),
             audio=audio,
+            output_format=_audio_format_from_event(event),
         )
 
     def _on_audio_transcript_delta(

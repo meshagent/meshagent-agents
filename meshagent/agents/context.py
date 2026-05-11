@@ -133,11 +133,17 @@ class AgentSessionContext:
         raise RoomException("this chat context does not support file URL inputs")
 
     async def append_realtime_audio_chunk(
-        self, *, mime_type: str, data: bytes, sample_rate: int | None = None
+        self,
+        *,
+        mime_type: str,
+        data: bytes,
+        sample_rate: int | None = None,
+        bitrate: int | None = None,
     ) -> None:
         del mime_type
         del data
         del sample_rate
+        del bitrate
         raise RoomException("this chat context does not support realtime audio inputs")
 
     async def commit_realtime_audio(self) -> None:

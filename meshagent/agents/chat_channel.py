@@ -639,6 +639,7 @@ class ChatChannel(ThreadedChannel):
             sender_name=start_thread.sender_name,
             provider=start_thread.provider,
             model=start_thread.model,
+            voice=start_thread.voice,
             output_modalities=start_thread.output_modalities,
             instructions=start_thread.instructions,
             toolkits=start_thread.toolkits,

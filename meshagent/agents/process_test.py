@@ -713,13 +713,19 @@ class _RealtimeAudioRecordingSession(_LifecycleSession):
         return True
 
     async def append_realtime_audio_chunk(
-        self, *, mime_type: str, data: bytes, sample_rate: int | None = None
+        self,
+        *,
+        mime_type: str,
+        data: bytes,
+        sample_rate: int | None = None,
+        bitrate: int | None = None,
     ) -> None:
         self.audio_chunk_calls.append(
             {
                 "mime_type": mime_type,
                 "data": data,
                 "sample_rate": sample_rate,
+                "bitrate": bitrate,
             }
         )
 
@@ -5281,6 +5287,7 @@ async def test_llm_agent_process_realtime_audio_commit_starts_one_turn() -> None
             "mime_type": "audio/pcm",
             "data": b"pcm-bytes",
             "sample_rate": 24000,
+            "bitrate": None,
         }
     ]
     assert session.commit_calls == 1

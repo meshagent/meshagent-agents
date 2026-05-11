@@ -28,6 +28,7 @@ from meshagent.api import Participant
 from meshagent.api.messaging import FileContent
 from meshagent.agents.adapter import (
     LLMAdapter,
+    LLMAudioFormat,
     LLMModelInfo,
     LLMProvider,
     ToolCallApprovalRequest,
@@ -76,6 +77,7 @@ from .messages import (
     AgentContextCompacted,
     AgentLLMMessage,
     AgentMessage,
+    AgentAudioFormat,
     AgentTextContent,
     AgentToolCallArgumentsDelta,
     AgentToolCallApprovalRequested,
@@ -652,6 +654,50 @@ def _coerce_message_data(data: AgentMessage, model: type[_MessageT]) -> _Message
     return model.model_validate(data.model_dump(mode="python"))
 
 
+def _agent_audio_format_from_llm_audio_format(
+    audio_format: LLMAudioFormat | None,
+) -> AgentAudioFormat | None:
+    if audio_format is None:
+        return None
+    return AgentAudioFormat(
+        type=audio_format.type,
+        sample_rate=audio_format.sample_rate,
+        bitrate=audio_format.bitrate,
+    )
+
+
+def _chunk_declared_input_format(chunk: AgentRealtimeAudioChunk) -> AgentAudioFormat:
+    if chunk.input_format is not None:
+        return chunk.input_format
+    return AgentAudioFormat(
+        type=chunk.mime_type,
+        sample_rate=chunk.sample_rate,
+        bitrate=chunk.bitrate,
+    )
+
+
+def _audio_format_mismatch(
+    *,
+    declared: AgentAudioFormat,
+    expected: AgentAudioFormat | None,
+) -> str | None:
+    if expected is None:
+        return None
+    if expected.type.strip().lower() != declared.type.strip().lower():
+        return f"expected audio type {expected.type!r}, got {declared.type!r}"
+    if (
+        expected.sample_rate is not None
+        and declared.sample_rate != expected.sample_rate
+    ):
+        return (
+            f"expected audio sample rate {expected.sample_rate}, "
+            f"got {declared.sample_rate}"
+        )
+    if expected.bitrate is not None and declared.bitrate != expected.bitrate:
+        return f"expected audio bitrate {expected.bitrate}, got {declared.bitrate}"
+    return None
+
+
 def agent_model_info(
     *,
     provider: LLMProvider,
@@ -666,6 +712,12 @@ def agent_model_info(
         context_window=model_info.context_window,
         pricing=model_info.pricing,
         modalities=list(model_info.modalities),
+        available_voices=list(model_info.available_voices),
+        default_output_voice=model_info.default_output_voice,
+        input_format=_agent_audio_format_from_llm_audio_format(model_info.input_format),
+        output_format=_agent_audio_format_from_llm_audio_format(
+            model_info.output_format
+        ),
         active=provider.name == current_provider and model_info.name == current_model,
     )
 
@@ -1569,6 +1621,12 @@ class LLMAgentProcess(AgentProcess):
         self._current_provider = self._default_provider
         self.llm_adapter = self._current_provider.adapter
         self._current_model = self.llm_adapter.default_model()
+        current_model_info = self._current_model_info()
+        self._current_voice = (
+            current_model_info.default_output_voice
+            if current_model_info is not None
+            else None
+        )
         self._current_output_modalities: tuple[Literal["text", "audio"], ...] = (
             "text",
         )
@@ -1712,13 +1770,19 @@ class LLMAgentProcess(AgentProcess):
     def _provider_models(provider: LLMProvider) -> list[LLMModelInfo]:
         return provider.adapter.list_models()
 
+    @staticmethod
+    def _adapter_uses_default_model_list(adapter: LLMAdapter) -> bool:
+        if not isinstance(adapter, LLMAdapter):
+            return True
+        return type(adapter).list_models is LLMAdapter.list_models
+
     def _resolve_llm_model(self, *, provider: LLMProvider, model: str | None) -> str:
         if model is None or model.strip() == "":
             if provider.name == self._current_provider.name:
                 return self._current_model
             return provider.adapter.default_model()
 
-        if type(provider.adapter).list_models is LLMAdapter.list_models:
+        if self._adapter_uses_default_model_list(provider.adapter):
             return model
 
         models = self._provider_models(provider)
@@ -1767,7 +1831,7 @@ class LLMAgentProcess(AgentProcess):
         )
 
     def _current_model_info(self) -> LLMModelInfo | None:
-        if type(self._current_provider.adapter).list_models is LLMAdapter.list_models:
+        if self._adapter_uses_default_model_list(self._current_provider.adapter):
             return LLMModelInfo(name=self._current_model)
         for model_info in self._provider_models(self._current_provider):
             if model_info.name == self._current_model:
@@ -1816,12 +1880,24 @@ class LLMAgentProcess(AgentProcess):
         thread_id: str,
         source_message_id: str | None,
     ) -> AgentModelChanged:
+        model_info = self._current_model_info()
         return AgentModelChanged(
             type=AGENT_EVENT_MODEL_CHANGED,
             thread_id=thread_id,
             source_message_id=source_message_id,
             provider=self._current_provider.name,
             model=self._current_model,
+            voice=self._current_voice,
+            input_format=(
+                _agent_audio_format_from_llm_audio_format(model_info.input_format)
+                if model_info is not None
+                else None
+            ),
+            output_format=(
+                _agent_audio_format_from_llm_audio_format(model_info.output_format)
+                if model_info is not None
+                else None
+            ),
             output_modalities=list(self._current_model_changed_output_modalities()),
         )
 
@@ -1834,6 +1910,7 @@ class LLMAgentProcess(AgentProcess):
 
         restored_provider: LLMProvider | None = None
         restored_model: str | None = None
+        restored_voice: str | None = None
         restored_output_modalities: tuple[Literal["text", "audio"], ...] = ("text",)
         for stored_message in thread_storage.agent_messages():
             if not isinstance(stored_message, AgentModelChanged):
@@ -1855,6 +1932,7 @@ class LLMAgentProcess(AgentProcess):
                 continue
             restored_provider = provider
             restored_model = model
+            restored_voice = stored_message.voice
             model_info = next(
                 (
                     candidate
@@ -1877,6 +1955,7 @@ class LLMAgentProcess(AgentProcess):
         if (
             restored_provider.name == self._current_provider.name
             and restored_model == self._current_model
+            and restored_voice == self._current_voice
             and restored_output_modalities == self._current_output_modalities
         ):
             return False
@@ -1884,6 +1963,7 @@ class LLMAgentProcess(AgentProcess):
         self._current_provider = restored_provider
         self.llm_adapter = restored_provider.adapter
         self._current_model = restored_model
+        self._current_voice = restored_voice
         self._current_output_modalities = restored_output_modalities
         self._session_context = None
         return True
@@ -1931,6 +2011,10 @@ class LLMAgentProcess(AgentProcess):
         self._current_provider = provider
         self.llm_adapter = provider.adapter
         self._current_model = model
+        model_info = self._current_model_info()
+        self._current_voice = (
+            model_info.default_output_voice if model_info is not None else None
+        )
         self._current_output_modalities = self._supported_output_modalities(
             output_modalities=self._current_output_modalities,
             supported_modalities=self._current_model_modalities(),
@@ -3226,8 +3310,14 @@ class LLMAgentProcess(AgentProcess):
         previous_thread_id = session.metadata.get("thread_id")
         had_turn_id = "turn_id" in session.metadata
         previous_turn_id = session.metadata.get("turn_id")
+        had_voice = "voice" in session.metadata
+        previous_voice = session.metadata.get("voice")
         session.metadata["thread_id"] = thread_id
         session.metadata["turn_id"] = turn_id
+        if self._current_voice is not None:
+            session.metadata["voice"] = self._current_voice
+        else:
+            session.metadata.pop("voice", None)
         try:
             completed = False
             with tracer.start_as_current_span("agent.turn.llm") as span:
@@ -3285,6 +3375,10 @@ class LLMAgentProcess(AgentProcess):
                 session.metadata["turn_id"] = previous_turn_id
             else:
                 session.metadata.pop("turn_id", None)
+            if had_voice:
+                session.metadata["voice"] = previous_voice
+            else:
+                session.metadata.pop("voice", None)
             self._active_next_task = None
             self._active_turn_sender = None
 
@@ -3446,12 +3540,18 @@ class LLMAgentProcess(AgentProcess):
             )
             if requested_output_modalities is not None:
                 self._current_output_modalities = tuple(requested_output_modalities)
+            requested_voice = queued_turn.request.voice
+            voice_changed = False
+            if requested_voice is not None:
+                normalized_voice = requested_voice.strip() or None
+                voice_changed = normalized_voice != self._current_voice
+                self._current_voice = normalized_voice
             changed_model = await self._switch_llm_provider_if_needed(
                 provider=provider,
                 model=model,
                 turn_id=turn_id,
             )
-            if changed_model or output_modalities_changed:
+            if changed_model or output_modalities_changed or voice_changed:
                 self.emit(
                     sender=queued_turn.sender,
                     payload=self._build_model_changed(
@@ -3879,6 +3979,36 @@ class LLMAgentProcess(AgentProcess):
             turn_id=self._turn_id,
         )
         del changed
+        if request.voice is not None:
+            requested_voice = request.voice.strip()
+            if requested_voice == "":
+                requested_voice = None
+            model_info = self._current_model_info()
+            if (
+                requested_voice is not None
+                and model_info is not None
+                and len(model_info.available_voices) > 0
+                and requested_voice not in model_info.available_voices
+            ):
+                self.emit(
+                    sender=message.sender,
+                    payload=AgentThreadEvent(
+                        type=AGENT_EVENT_THREAD_EVENT,
+                        thread_id=request.thread_id,
+                        provider=self._current_provider.name,
+                        model=self._current_model,
+                        event={
+                            "type": "model_change_rejected",
+                            "error": {
+                                "message": f"unknown voice {requested_voice!r}",
+                                "code": "unknown_voice",
+                            },
+                            "source_message_id": request.message_id,
+                        },
+                    ),
+                )
+                return
+            self._current_voice = requested_voice
         self.emit(
             sender=message.sender,
             payload=self._build_model_changed(
@@ -3971,6 +4101,21 @@ class LLMAgentProcess(AgentProcess):
         if "audio" not in self._current_model_modalities():
             return
 
+        model_info = self._current_model_info()
+        expected_input_format = (
+            _agent_audio_format_from_llm_audio_format(model_info.input_format)
+            if model_info is not None
+            else None
+        )
+        declared_input_format = _chunk_declared_input_format(chunk)
+        mismatch = _audio_format_mismatch(
+            declared=declared_input_format,
+            expected=expected_input_format,
+        )
+        if mismatch is not None:
+            logger.warning("rejecting realtime audio chunk: %s", mismatch)
+            return
+
         session = await self.ensure_session_context(turn_id=self._turn_id)
         if not session.supports_realtime_audio:
             return
@@ -3983,6 +4128,7 @@ class LLMAgentProcess(AgentProcess):
                 mime_type=chunk.mime_type,
                 data=chunk.data,
                 sample_rate=chunk.sample_rate,
+                bitrate=chunk.bitrate,
             )
             if (
                 thread_status_publisher is not None
@@ -4007,6 +4153,7 @@ class LLMAgentProcess(AgentProcess):
                     sender_name=chunk.sender_name,
                     provider=chunk.provider,
                     model=chunk.model,
+                    voice=chunk.voice,
                     output_modalities=chunk.output_modalities,
                 ),
                 sender=message.sender,
@@ -4062,6 +4209,7 @@ class LLMAgentProcess(AgentProcess):
             sender_name=commit.sender_name,
             provider=self._current_provider.name,
             model=self._current_model,
+            voice=commit.voice,
             output_modalities=list(output_modalities),
         )
         self._pending_realtime_audio_commit_message_ids.add(turn_start.message_id)
