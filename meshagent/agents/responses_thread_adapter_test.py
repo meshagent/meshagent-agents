@@ -71,6 +71,39 @@ def test_openai_event_publisher_preserves_commentary_message_phase() -> None:
     assert messages[2].phase == "commentary"
 
 
+def test_openai_event_publisher_applies_output_item_phase_to_text_delta() -> None:
+    messages: list[AgentMessage] = []
+    publisher = make_openai_agent_event_publisher(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        callback=messages.append,
+    )
+
+    publisher(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "message-1",
+                "type": "message",
+                "phase": "final_answer",
+            },
+        }
+    )
+    publisher(
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "answer",
+        }
+    )
+
+    assert isinstance(messages[0], AgentTextContentStarted)
+    assert messages[0].phase == "final_answer"
+    assert isinstance(messages[1], AgentTextContentDelta)
+    assert messages[1].phase == "final_answer"
+
+
 def test_openai_event_publisher_emits_tool_argument_delta() -> None:
     messages: list[AgentMessage] = []
     publisher = make_openai_agent_event_publisher(

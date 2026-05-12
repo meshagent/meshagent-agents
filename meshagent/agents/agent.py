@@ -10,6 +10,7 @@ from meshagent.api.room_server_client import (
     RequiredTable,
 )
 from meshagent.api import (
+    Participant,
     ToolContentSpec,
     ToolDescription,
     ToolkitDescription,
@@ -30,6 +31,15 @@ import warnings
 
 logger = logging.getLogger("agent")
 _legacy_init_chat_context_warned: set[type] = set()
+
+
+def _participant_error_label(participant: Participant) -> str:
+    parts = [f"id={participant.id}"]
+    participant_name = participant.get_attribute("name")
+    if isinstance(participant_name, str) and participant_name.strip() != "":
+        parts.append(f"name={participant_name.strip()}")
+
+    return f"participant({', '.join(parts)})"
 
 
 class AgentException(RoomException):
@@ -456,22 +466,34 @@ class SingleRoomAgent:
         if context.on_behalf_of is not None:
             tool_target = context.on_behalf_of
 
-        toolkits_by_name = dict[str, ToolkitDescription]()
+        toolkits_by_name = dict[str, tuple[ToolkitDescription, str | None]]()
         toolkits_by_participant = dict[str, list[ToolkitDescription]]()
         toolkits = list[Toolkit]()
 
-        visible_tools = await self._room.agents.list_toolkits(
-            participant_id=tool_target.id
-        )
+        visible_tools = await self._room.agents.list_toolkits()
 
         for toolkit_description in visible_tools:
-            toolkits_by_name[toolkit_description.name] = toolkit_description
+            toolkits_by_name[toolkit_description.name] = (toolkit_description, None)
+
+        if context.on_behalf_of is not None:
+            participant_tools = await self._room.agents.list_toolkits(
+                participant_id=tool_target.id
+            )
+
+            for toolkit_description in participant_tools:
+                toolkits_by_name[toolkit_description.name] = (
+                    toolkit_description,
+                    tool_target.id,
+                )
 
         for required_toolkit in self.requires:
             if isinstance(required_toolkit, RequiredToolkit):
                 toolkit = None
+                toolkit_participant_id = None
                 if required_toolkit.participant_name is None:
-                    toolkit = toolkits_by_name.get(required_toolkit.name, None)
+                    toolkit_match = toolkits_by_name.get(required_toolkit.name, None)
+                    if toolkit_match is not None:
+                        toolkit, toolkit_participant_id = toolkit_match
                 else:
                     if required_toolkit.participant_name not in toolkits_by_participant:
                         toolkits_by_participant[
@@ -485,16 +507,20 @@ class SingleRoomAgent:
                     ]:
                         if tk.name == required_toolkit.name:
                             toolkit = tk
+                            toolkit_participant_id = tk.participant_id
                             break
 
                 if toolkit is None:
                     if context.on_behalf_of is not None:
                         raise RoomException(
-                            f"unable to get toolkit {required_toolkit.name} on behalf of {context.on_behalf_of}"
+                            f"unable to get toolkit {required_toolkit.name} "
+                            f"on behalf of {_participant_error_label(context.on_behalf_of)} "
+                            f"for caller {_participant_error_label(context.caller)}"
                         )
                     else:
                         raise RoomException(
-                            f"unable to get toolkit {required_toolkit.name} for caller {context.caller.id}"
+                            f"unable to get toolkit {required_toolkit.name} "
+                            f"for caller {_participant_error_label(context.caller)}"
                         )
 
                 remote_room_tools = list[RemoteRoomTool]()
@@ -512,7 +538,7 @@ class SingleRoomAgent:
                             output_schema=tool_description.output_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=tool_target.id,
+                            participant_id=toolkit_participant_id,
                             defs=tool_description.defs,
                             pricing=tool_description.pricing,
                             strict=tool_description.strict,
@@ -542,7 +568,7 @@ class SingleRoomAgent:
                             output_schema=tool_description.output_schema,
                             title=tool_description.title,
                             thumbnail_url=tool_description.thumbnail_url,
-                            participant_id=tool_description.participant_id,
+                            participant_id=toolkit_participant_id,
                             defs=tool_description.defs,
                             pricing=tool_description.pricing,
                             strict=tool_description.strict,

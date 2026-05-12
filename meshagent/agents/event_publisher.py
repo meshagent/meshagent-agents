@@ -1329,6 +1329,7 @@ class _OpenAIAgentEventPublisher:
     custom_event_callback: Callable[[dict[str, Any]], None] | None = None
     _active_response_id: str | None = None
     _output_item_ids: dict[int, str] = field(default_factory=dict)
+    _output_item_phases: dict[str, _MessagePhase] = field(default_factory=dict)
     _pending_handler_tool_calls: dict[str, _ToolCallInfo] = field(default_factory=dict)
     _finished_handler_tool_call_ids: set[str] = field(default_factory=set)
     _started_image_generation_ids: set[str] = field(default_factory=set)
@@ -1360,6 +1361,7 @@ class _OpenAIAgentEventPublisher:
 
         self._active_response_id = response_id
         self._output_item_ids.clear()
+        self._output_item_phases.clear()
         self._emitted_compaction_ids.clear()
 
     def _response_id_from_event(self, *, event: dict[str, Any]) -> str | None:
@@ -1423,6 +1425,21 @@ class _OpenAIAgentEventPublisher:
         if output_index is None or item_id is None:
             return
         self._mapped_output_item_id(output_index=output_index, item_id=item_id)
+        phase = _message_phase_from_value(item.get("phase"))
+        if phase is not None:
+            self._output_item_phases[item_id] = phase
+
+    def _message_phase_for_event(
+        self, *, event: dict[str, Any]
+    ) -> _MessagePhase | None:
+        phase = _message_phase_from_event(event=event)
+        if phase is not None:
+            return phase
+
+        item_id = self._item_id_from_event(event=event)
+        if item_id is None:
+            return None
+        return self._output_item_phases.get(item_id)
 
     def _apply_patch_tool_call_info_from_event(
         self,
@@ -1546,7 +1563,7 @@ class _OpenAIAgentEventPublisher:
 
         item_type = _as_str(item.get("type"))
         item_id = self._item_id_from_event(event=event)
-        message_phase = _message_phase_from_event(event=event)
+        message_phase = self._message_phase_for_event(event=event)
         if item_type == "reasoning" and item_id is not None:
             if not completed:
                 self.emitter.emit_reasoning_started(item_id=item_id)
@@ -1751,7 +1768,7 @@ class _OpenAIAgentEventPublisher:
             return
 
         content_kind = _content_kind_from_part(part)
-        phase = _message_phase_from_event(event=event)
+        phase = self._message_phase_for_event(event=event)
         if content_kind == "text":
             self.emitter.emit_text_started(item_id=item_id, phase=phase)
             self.emitter.emit_text_delta(
@@ -1780,14 +1797,14 @@ class _OpenAIAgentEventPublisher:
         self._finish_part_from_snapshot(
             item_id=item_id,
             part=part,
-            phase=_message_phase_from_event(event=event),
+            phase=self._message_phase_for_event(event=event),
         )
 
     def _on_text_delta(self, *, event: dict[str, Any]) -> None:
         item_id = self._item_id_from_event(event=event)
         if item_id is None:
             return
-        phase = _message_phase_from_event(event=event)
+        phase = self._message_phase_for_event(event=event)
         self.emitter.emit_text_delta(
             item_id=item_id,
             text=_as_text(event.get("delta")) or "",
@@ -1799,7 +1816,7 @@ class _OpenAIAgentEventPublisher:
         if item_id is None:
             return
 
-        phase = _message_phase_from_event(event=event)
+        phase = self._message_phase_for_event(event=event)
         final_text = _as_text(event.get(field_name)) or ""
         if final_text != "" and not self.emitter.has_content_data(
             kind="text", item_id=item_id
