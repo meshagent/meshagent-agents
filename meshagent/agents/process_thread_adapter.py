@@ -40,6 +40,7 @@ from .messages import (
     AGENT_MESSAGE_TURN_START,
     AGENT_EVENT_TURN_INTERRUPTED,
     AgentError,
+    AgentAudioGenerationDelta,
     AgentFileContent,
     AgentFileContentDelta,
     AgentFileContentEnded,
@@ -1005,18 +1006,16 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 turn_id=message.turn_id if isinstance(message, TurnSteer) else None,
             )
         elif isinstance(message, AgentTextContentStarted):
-            accumulated = self._text_content_accumulator.upsert(
+            self._text_content_accumulator.upsert(
                 item_id=message.item_id,
                 turn_id=message.turn_id,
                 phase=message.phase,
             )
-            assistant_message = self._ensure_assistant_message(
+            self._ensure_assistant_message(
                 messages=messages,
                 key=self._content_message_key(kind="text", item_id=message.item_id),
                 turn_id=message.turn_id,
             )
-            if accumulated.phase is not None:
-                assistant_message.set_attribute("phase", accumulated.phase)
         elif isinstance(message, AgentTextContentDelta):
             accumulated = self._text_content_accumulator.append_delta(
                 item_id=message.item_id,
@@ -1031,18 +1030,16 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
             )
             assistant_message.set_attribute("text", accumulated.text)
-            if accumulated.phase is not None:
-                assistant_message.set_attribute("phase", accumulated.phase)
+            await self.set_thread_status(
+                status="Writing" if accumulated.phase == "final_answer" else "Planning"
+            )
         elif isinstance(message, AgentTextContentEnded):
             key = self._content_message_key(kind="text", item_id=message.item_id)
-            accumulated = self._text_content_accumulator.upsert(
+            self._text_content_accumulator.upsert(
                 item_id=message.item_id,
                 turn_id=message.turn_id,
                 phase=message.phase,
             )
-            assistant_message = self._active_message_elements_by_key.get(key)
-            if assistant_message is not None and accumulated.phase is not None:
-                assistant_message.set_attribute("phase", accumulated.phase)
             self._active_message_elements_by_key.pop(key, None)
             self._text_content_accumulator.complete(item_id=message.item_id)
             self._text_content_accumulator.remove(message.item_id)
@@ -1112,6 +1109,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 item_id=message.item_id,
                 lines=message.lines,
             )
+        elif isinstance(message, AgentAudioGenerationDelta):
+            await self.set_thread_status(status="Speaking")
         elif isinstance(message, AgentToolCallArgumentsDelta):
             delta_bytes = len(message.delta.encode("utf-8"))
             normalized_event = None

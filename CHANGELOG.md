@@ -1,3 +1,6 @@
+## [0.40.1]
+- Stability
+
 ## [0.40.0]
 - Breaking: Renamed the `LLMAdapter.next(...)` response creation hook to `LLMAdapter.create_response(...)`; custom adapters must implement the new method name.
 

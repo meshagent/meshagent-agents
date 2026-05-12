@@ -30,6 +30,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TOOL_CALL_PENDING,
@@ -70,6 +71,7 @@ from meshagent.agents.messages import (
     ApproveAgentToolCall,
     AgentError,
     AgentAudioFormat,
+    AgentAudioGenerationDelta,
     AgentAudioTranscriptionCompleted,
     AgentContextCompacted,
     AgentContextWindowUsage,
@@ -6989,7 +6991,7 @@ async def test_agent_process_thread_adapter_persists_turn_id_on_reasoning_messag
 
 
 @pytest.mark.asyncio
-async def test_agent_process_thread_adapter_persists_text_phase(
+async def test_agent_process_thread_adapter_does_not_persist_text_phase(
     monkeypatch,
 ) -> None:
     real_sleep = asyncio.sleep
@@ -7063,8 +7065,64 @@ async def test_agent_process_thread_adapter_persists_text_phase(
 
         commentary_message = room.sync.document.message_elements[0]
         final_answer_message = room.sync.document.message_elements[1]
-        assert commentary_message.get_attribute("phase") == "commentary"
-        assert final_answer_message.get_attribute("phase") == "final_answer"
+        assert commentary_message.get_attribute("text") == "checking"
+        assert final_answer_message.get_attribute("text") == "done"
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_sets_status_from_streaming_output_deltas() -> (
+    None
+):
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=AgentTextContentStarted(
+                type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="commentary-1",
+                phase="commentary",
+            ),
+        )
+        adapter.push_message(
+            message=AgentTextContentDelta(
+                type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="commentary-1",
+                text="checking",
+            ),
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Planning")
+
+        adapter.push_message(
+            message=AgentTextContentDelta(
+                type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="final-1",
+                text="done",
+                phase="final_answer",
+            ),
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Writing")
+
+        adapter.push_message(
+            message=AgentAudioGenerationDelta(
+                type=AGENT_EVENT_AUDIO_GENERATION_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="audio-1",
+                data=b"pcm",
+                mime_type="audio/pcm",
+            ),
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Speaking")
     finally:
         await adapter.stop()
 
