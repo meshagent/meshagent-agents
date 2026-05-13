@@ -194,6 +194,12 @@ class AsyncReadyThreadStorage(Protocol):
 
 
 @runtime_checkable
+class OpenStateThreadStorage(Protocol):
+    @property
+    def is_open(self) -> bool: ...
+
+
+@runtime_checkable
 class UnflushedAgentMessageThreadStorage(Protocol):
     def unflushed_agent_messages(self) -> list[AgentThreadMessage]: ...
 
@@ -4101,6 +4107,12 @@ class LLMAgentProcess(AgentProcess):
     async def on_thread_open(self, message: Message) -> None:
         request = _coerce_message_data(message.data, OpenThread)
         thread_storage = self.thread_storage
+        if (
+            isinstance(thread_storage, ThreadStorageLifecycle)
+            and isinstance(thread_storage, OpenStateThreadStorage)
+            and not thread_storage.is_open
+        ):
+            await thread_storage.start()
         if isinstance(thread_storage, AsyncReadyThreadStorage):
             await thread_storage.wait_until_ready()
         self._restore_current_model_from_thread_storage()

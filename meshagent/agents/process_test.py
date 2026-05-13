@@ -122,7 +122,7 @@ from meshagent.agents.process import (
     Message,
 )
 from meshagent.agents.thread_adapter import ThreadAdapter
-from meshagent.api import MeshDocument, Participant, RemoteParticipant
+from meshagent.api import MeshDocument, Participant, RemoteParticipant, RoomException
 from meshagent.api.messaging import BinaryContent, FileContent, JsonContent, TextContent
 from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
 
@@ -365,6 +365,54 @@ class _LifecycleThreadStorage:
 
     def make_toolkit(self) -> Toolkit:
         return Toolkit(name="thread-storage", tools=[])
+
+
+class _OpenStateLifecycleThreadStorage(_LifecycleThreadStorage):
+    def __init__(self, *, path: str) -> None:
+        super().__init__(path=path)
+        self._is_open = False
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    async def start(self) -> None:
+        await super().start()
+        self._is_open = True
+
+    async def stop(self) -> None:
+        await super().stop()
+        self._is_open = False
+
+    def agent_messages(self) -> list[AgentMessage]:
+        if not self._is_open:
+            raise RoomException("thread was not opened")
+        return super().agent_messages()
+
+
+class _BlockingOpenStateLifecycleThreadStorage(_OpenStateLifecycleThreadStorage):
+    def __init__(self, *, path: str) -> None:
+        super().__init__(path=path)
+        self.block_next_start = False
+        self.block_next_stop = False
+        self.start_entered = asyncio.Event()
+        self.stop_entered = asyncio.Event()
+        self.release_start = asyncio.Event()
+        self.release_stop = asyncio.Event()
+
+    async def start(self) -> None:
+        if self.block_next_start:
+            self.block_next_start = False
+            self.start_entered.set()
+            await self.release_start.wait()
+        await super().start()
+
+    async def stop(self) -> None:
+        if self.block_next_stop:
+            self.block_next_stop = False
+            self.stop_entered.set()
+            await self.release_stop.wait()
+        await super().stop()
 
 
 class _RestoringLifecycleThreadStorage(_LifecycleThreadStorage):
@@ -3686,6 +3734,180 @@ async def test_llm_agent_process_stops_adapter_session_on_thread_close() -> None
     assert adapter.call_order == ["start_session", "stop_session"]
     assert adapter.stop_session_calls == [{"context": adapter.session}]
     assert thread_storage.stopped == 1
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_reopens_thread_storage_on_thread_open_after_close() -> (
+    None
+):
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    thread_storage = _OpenStateLifecycleThreadStorage(path="thread-1")
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+
+    process.send(
+        Message(
+            data=CloseThread(
+                type=AGENT_MESSAGE_THREAD_CLOSE,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.stop_session_event.wait(), timeout=1)
+
+    adapter.start_session_event.clear()
+    adapter.stop_session_event.clear()
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+
+    assert thread_storage.started == 2
+    assert thread_storage.stopped == 1
+    assert len(adapter.start_session_calls) == 2
+    assert len(adapter.stop_session_calls) == 1
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_open_queued_while_thread_close_is_finishing() -> None:
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    thread_storage = _BlockingOpenStateLifecycleThreadStorage(path="thread-1")
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+
+    thread_storage.block_next_stop = True
+    process.send(
+        Message(
+            data=CloseThread(
+                type=AGENT_MESSAGE_THREAD_CLOSE,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(thread_storage.stop_entered.wait(), timeout=1)
+
+    adapter.start_session_event.clear()
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+
+    assert len(adapter.start_session_calls) == 1
+
+    thread_storage.release_stop.set()
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+
+    assert thread_storage.started == 2
+    assert thread_storage.stopped == 1
+    assert len(adapter.start_session_calls) == 2
+    assert len(adapter.stop_session_calls) == 1
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_close_queued_while_thread_open_is_finishing() -> None:
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    thread_storage = _BlockingOpenStateLifecycleThreadStorage(path="thread-1")
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=CloseThread(
+                type=AGENT_MESSAGE_THREAD_CLOSE,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await _wait_for(lambda: thread_storage.stopped == 1)
+
+    thread_storage.block_next_start = True
+    process.send(
+        Message(
+            data=OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="thread-1",
+            )
+        )
+    )
+    await asyncio.wait_for(thread_storage.start_entered.wait(), timeout=1)
+
+    process.send(
+        Message(
+            data=CloseThread(
+                type=AGENT_MESSAGE_THREAD_CLOSE,
+                thread_id="thread-1",
+            )
+        )
+    )
+
+    assert len(adapter.start_session_calls) == 0
+    assert len(adapter.stop_session_calls) == 0
+
+    thread_storage.release_start.set()
+    await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+    await asyncio.wait_for(adapter.stop_session_event.wait(), timeout=1)
+
+    assert thread_storage.started == 2
+    assert thread_storage.stopped == 2
+    assert len(adapter.start_session_calls) == 1
+    assert len(adapter.stop_session_calls) == 1
 
     await process.stop(supervisor)
 

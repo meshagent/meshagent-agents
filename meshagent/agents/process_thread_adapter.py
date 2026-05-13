@@ -875,6 +875,10 @@ class MeshDocumentThreadStorage(ThreadStorage):
         return self._thread
 
     @property
+    def is_open(self) -> bool:
+        return self._thread is not None
+
+    @property
     def path(self) -> str:
         return self._thread_path
 
