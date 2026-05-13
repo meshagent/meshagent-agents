@@ -281,6 +281,7 @@ class AccumulatingAgentEventReader(ABC):
         ):
             self._append_image_generation_event(
                 event_type=message.type,
+                turn_id=message.turn_id,
                 item_id=message.item_id,
                 call_id=message.call_id,
                 toolkit=message.toolkit,
@@ -474,6 +475,7 @@ class AccumulatingAgentEventReader(ABC):
         self,
         *,
         event_type: str,
+        turn_id: str,
         item_id: str,
         call_id: str | None,
         toolkit: str,

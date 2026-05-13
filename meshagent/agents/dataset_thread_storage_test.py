@@ -24,7 +24,6 @@ from meshagent.agents.messages import (
     AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
-    AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
@@ -336,6 +335,7 @@ class _DatasetStorageTestReader(AccumulatingAgentEventReader):
         self,
         *,
         event_type: str,
+        turn_id: str,
         item_id: str,
         call_id: str | None,
         toolkit: str,
@@ -351,6 +351,7 @@ class _DatasetStorageTestReader(AccumulatingAgentEventReader):
                     {
                         "type": "image_generation",
                         "event_type": event_type,
+                        "turn_id": turn_id,
                         "item_id": item_id,
                         "call_id": call_id,
                         "toolkit": toolkit,
@@ -1792,6 +1793,7 @@ async def test_dataset_thread_storage_async_restore_hydrates_image_dataset_uris(
 
     content = context.messages[0]["content"][0]
     assert content["type"] == "image_generation"
+    assert content["turn_id"] == "turn-1"
     assert content["images"][0]["uri"] == (
         "data:image/png;base64,ZmFrZSBpbWFnZSBieXRlcw=="
     )
@@ -1799,6 +1801,8 @@ async def test_dataset_thread_storage_async_restore_hydrates_image_dataset_uris(
     assert content["images"][0]["created_by"] == saved_image.created_by
 
     row = _row_data(room.datasets.rows[(("threads",), "demo")][0])
+    assert room.datasets.rows[(("threads",), "demo")][0]["turn_id"] == "turn-1"
+    assert row["turn_id"] == "turn-1"
     assert row["images"][0]["uri"] == "dataset://images?id=image-1"
 
 
@@ -1845,9 +1849,56 @@ async def test_dataset_thread_storage_skips_nonterminal_image_generation_events(
 
 
 @pytest.mark.asyncio
-async def test_dataset_thread_storage_flushes_latest_image_partial_on_cancellation() -> (
+async def test_dataset_thread_storage_fills_empty_image_completed_from_partial() -> (
     None
 ):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentImageGenerationPartial(
+            type="meshagent.agent.image_generation.partial",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            image=AgentGeneratedImage(
+                uri="dataset://images?id=image-1",
+                mime_type="image/png",
+                status="in_progress",
+            ),
+            partial_index=0,
+        )
+    )
+    storage.push_message(
+        message=AgentImageGenerationCompleted(
+            type="meshagent.agent.image_generation.completed",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            images=[],
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(thread_rows) == 1
+    completed = _row_data(thread_rows[0])
+    assert completed["type"] == AGENT_EVENT_IMAGE_GENERATION_COMPLETED
+    assert completed["images"][0]["uri"] == "dataset://images?id=image-1"
+    assert completed["images"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_flushes_image_failed_on_cancellation() -> None:
     room = _FakeRoom()
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
     await storage.start()
@@ -1913,16 +1964,15 @@ async def test_dataset_thread_storage_flushes_latest_image_partial_on_cancellati
     thread_rows = room.datasets.rows[(("threads",), "demo")]
     assert len(thread_rows) == 2
     assert thread_rows[0]["item_id"] == "image-started"
-    started = _row_data(thread_rows[0])
-    assert started["type"] == AGENT_EVENT_IMAGE_GENERATION_PARTIAL
-    assert started["partial_index"] == 1
-    assert started["image"]["uri"] == "data:image/png;base64,second"
+    failed = _row_data(thread_rows[0])
+    assert failed["type"] == "meshagent.agent.image_generation.failed"
+    assert failed["error"]["code"] == "cancelled"
     interrupted = _row_data(thread_rows[1])
     assert interrupted["type"] == AGENT_EVENT_TURN_INTERRUPTED
 
 
 @pytest.mark.asyncio
-async def test_dataset_thread_storage_flushes_image_partial_on_cancelled_tool_end() -> (
+async def test_dataset_thread_storage_flushes_image_failed_on_cancelled_tool_end() -> (
     None
 ):
     room = _FakeRoom()
@@ -1975,12 +2025,69 @@ async def test_dataset_thread_storage_flushes_image_partial_on_cancelled_tool_en
     await storage.stop()
 
     thread_rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(thread_rows) == 2
-    partial = _row_data(thread_rows[0])
-    assert partial["type"] == AGENT_EVENT_IMAGE_GENERATION_PARTIAL
-    assert partial["image"]["uri"] == "data:image/png;base64,partial"
-    failed = _row_data(thread_rows[1])
+    assert len(thread_rows) == 1
+    failed = _row_data(thread_rows[0])
     assert failed["type"] == "meshagent.agent.image_generation.failed"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_flushes_image_completed_from_partial() -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=AgentImageGenerationStarted(
+            type="meshagent.agent.image_generation.started",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+        )
+    )
+    storage.push_message(
+        message=AgentImageGenerationPartial(
+            type="meshagent.agent.image_generation.partial",
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="image-started",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            image=AgentGeneratedImage(
+                uri="dataset://images?id=image-1",
+                mime_type="image/png",
+                width=512,
+                height=512,
+                status="in_progress",
+            ),
+            partial_index=0,
+        )
+    )
+    storage.push_message(
+        message=TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            error=None,
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert len(thread_rows) == 2
+    assert thread_rows[0]["turn_id"] == "turn-1"
+    completed = _row_data(thread_rows[0])
+    assert completed["type"] == AGENT_EVENT_IMAGE_GENERATION_COMPLETED
+    assert completed["turn_id"] == "turn-1"
+    assert completed["images"][0]["uri"] == "dataset://images?id=image-1"
+    assert completed["images"][0]["status"] == "completed"
+    ended = _row_data(thread_rows[1])
+    assert ended["type"] == AGENT_EVENT_TURN_ENDED
 
 
 @pytest.mark.asyncio

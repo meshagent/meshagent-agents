@@ -295,19 +295,6 @@ def _image_generation_status(
     return "pending"
 
 
-def _is_cancellation_error(error: AgentError) -> bool:
-    normalized_code = error.code.strip().lower() if error.code is not None else ""
-    normalized_message = error.message.strip().lower()
-    return (
-        "cancel" in normalized_code
-        or "interrupt" in normalized_code
-        or "abort" in normalized_code
-        or "cancel" in normalized_message
-        or "interrupt" in normalized_message
-        or "abort" in normalized_message
-    )
-
-
 def _normalize_path_parts(*, path: str) -> list[str]:
     parts = [part for part in path.strip().split("/") if part != ""]
     if len(parts) == 0:
@@ -1294,13 +1281,27 @@ class DatasetThreadStorage(ThreadStorage):
                 message, (AgentImageGenerationStarted, AgentImageGenerationPartial)
             ):
                 self._record_image_generation_state(message=message)
+                await self._append_verbose_delta_row(message=message)
                 return
             if isinstance(
                 message,
                 (AgentImageGenerationCompleted, AgentImageGenerationFailed),
             ):
                 self._active_tool_calls_by_item_id.pop(message.item_id, None)
-                self._active_image_generations_by_item_id.pop(message.item_id, None)
+                active = self._active_image_generations_by_item_id.pop(
+                    message.item_id, None
+                )
+                if (
+                    isinstance(message, AgentImageGenerationCompleted)
+                    and len(message.images) == 0
+                    and active is not None
+                    and active.partial is not None
+                    and active.partial.image is not None
+                ):
+                    message = self._completed_image_generation_from_active(
+                        active=active,
+                        message_id=message.message_id,
+                    )
             await self._append_message_row(message=message)
             return
 
@@ -1612,15 +1613,9 @@ class DatasetThreadStorage(ThreadStorage):
         if active_tool_call.tool.strip().lower() != "image_generation":
             return False
         if message.error is not None:
-            if _is_cancellation_error(message.error):
-                await self._flush_image_generation(
-                    item_id=active_tool_call.item_id,
-                    reason="cancelled",
-                )
-            else:
-                self._active_image_generations_by_item_id.pop(
-                    active_tool_call.item_id, None
-                )
+            self._active_image_generations_by_item_id.pop(
+                active_tool_call.item_id, None
+            )
             failed_message = AgentImageGenerationFailed(
                 type="meshagent.agent.image_generation.failed",
                 thread_id=message.thread_id,
@@ -1931,9 +1926,74 @@ class DatasetThreadStorage(ThreadStorage):
         reason: Literal["completed", "cancelled", "failed"],
     ) -> None:
         active = self._active_image_generations_by_item_id.pop(item_id, None)
-        if active is None or reason != "cancelled" or active.partial is None:
+        if active is None:
             return
-        await self._append_message_row(message=active.partial)
+        if reason == "completed":
+            await self._append_message_row(
+                message=self._completed_image_generation_from_active(active=active)
+            )
+            return
+        await self._append_message_row(
+            message=self._failed_image_generation_from_active(
+                active=active,
+                reason=reason,
+            )
+        )
+
+    def _completed_image_generation_from_active(
+        self,
+        *,
+        active: _ActiveImageGeneration,
+        message_id: str | None = None,
+    ) -> AgentImageGenerationCompleted:
+        source = active.partial or active.started
+        image = active.partial.image if active.partial is not None else None
+        images = (
+            [image.model_copy(update={"status": "completed"})]
+            if image is not None
+            else []
+        )
+        return AgentImageGenerationCompleted(
+            type="meshagent.agent.image_generation.completed",
+            thread_id=self.path,
+            turn_id=active.turn_id,
+            item_id=active.item_id,
+            message_id=message_id or active.message_id,
+            call_id=None if source is None else source.call_id,
+            toolkit="image_generation" if source is None else source.toolkit,
+            tool="image_generation" if source is None else source.tool,
+            arguments=None if source is None else source.arguments,
+            provider=active.provider,
+            model=active.model,
+            images=images,
+        )
+
+    def _failed_image_generation_from_active(
+        self,
+        *,
+        active: _ActiveImageGeneration,
+        reason: Literal["cancelled", "failed"],
+    ) -> AgentImageGenerationFailed:
+        source = active.partial or active.started
+        return AgentImageGenerationFailed(
+            type="meshagent.agent.image_generation.failed",
+            thread_id=self.path,
+            turn_id=active.turn_id,
+            item_id=active.item_id,
+            message_id=active.message_id,
+            call_id=None if source is None else source.call_id,
+            toolkit="image_generation" if source is None else source.toolkit,
+            tool="image_generation" if source is None else source.tool,
+            arguments=None if source is None else source.arguments,
+            provider=active.provider,
+            model=active.model,
+            error=AgentError(
+                message="Image generation cancelled"
+                if reason == "cancelled"
+                else "Image generation failed",
+                code=reason,
+            ),
+        )
 
     async def _append_message_row(
         self,

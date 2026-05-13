@@ -86,6 +86,13 @@ def _to_text(value: Any) -> str:
     return str(value)
 
 
+def _turn_id_from_event(event: dict) -> Optional[str]:
+    turn_id = event.get("turn_id")
+    if isinstance(turn_id, str) and turn_id.strip() != "":
+        return turn_id.strip()
+    return None
+
+
 def _normalize_positive_dimension(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
@@ -857,7 +864,7 @@ def response_event_to_agent_event(event: dict) -> Optional[dict]:
     if len(data) > 8000:
         data = data[:8000] + "..."
 
-    return {
+    agent_event = {
         "type": "agent.event",
         "source": "openai",
         "name": event_type,
@@ -872,6 +879,10 @@ def response_event_to_agent_event(event: dict) -> Optional[dict]:
         "summary": headline,
         "data": data,
     }
+    turn_id = _turn_id_from_event(event)
+    if turn_id is not None:
+        agent_event["turn_id"] = turn_id
+    return agent_event
 
 
 class ResponsesThreadAdapter(ThreadAdapter):
@@ -1404,6 +1415,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
         *,
         item_id: str,
         state: str,
+        turn_id: Optional[str] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
     ) -> None:
@@ -1413,6 +1425,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
 
         self.write_image(
             message_id=item_id,
+            turn_id=turn_id,
             width=width,
             height=height,
             created_by=created_by,
@@ -1427,42 +1440,48 @@ class ResponsesThreadAdapter(ThreadAdapter):
         state: str,
         headline: str,
         details: Optional[list[str]] = None,
+        turn_id: Optional[str] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
     ) -> None:
         normalized_details = [line for line in (details or []) if isinstance(line, str)]
+        event_data = {
+            "item_id": item_id,
+            "state": state,
+            "headline": headline,
+            "details": normalized_details,
+            "width": width,
+            "height": height,
+        }
+        if turn_id is not None:
+            event_data["turn_id"] = turn_id
+        event = {
+            "type": "agent.event",
+            "source": "openai",
+            "name": "response.image_generation_call.partial_image",
+            "kind": "image",
+            "state": state,
+            "method": "response.image_generation_call.partial_image",
+            # Match response_event_to_agent_event correlation semantics so
+            # custom image status updates mutate the existing image event line.
+            "correlation_key": f"item:{item_id}",
+            "item_id": item_id,
+            "item_type": "image_generation_call",
+            "summary": headline,
+            "headline": headline,
+            "details": normalized_details,
+            "data": json.dumps(event_data),
+        }
+        if turn_id is not None:
+            event["turn_id"] = turn_id
         await self._handle_custom_event_for_messages(
             messages=messages,
-            event={
-                "type": "agent.event",
-                "source": "openai",
-                "name": "response.image_generation_call.partial_image",
-                "kind": "image",
-                "state": state,
-                "method": "response.image_generation_call.partial_image",
-                # Match response_event_to_agent_event correlation semantics so
-                # custom image status updates mutate the existing image event line.
-                "correlation_key": f"item:{item_id}",
-                "item_id": item_id,
-                "item_type": "image_generation_call",
-                "summary": headline,
-                "headline": headline,
-                "details": normalized_details,
-                "data": json.dumps(
-                    {
-                        "item_id": item_id,
-                        "state": state,
-                        "headline": headline,
-                        "details": normalized_details,
-                        "width": width,
-                        "height": height,
-                    }
-                ),
-            },
+            event=event,
         )
         self._upsert_image_status(
             item_id=item_id,
             state=state,
+            turn_id=turn_id,
             width=width,
             height=height,
         )
@@ -1476,6 +1495,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
         created_by: str,
         source: str,
         annotations: Optional[dict[str, str]] = None,
+        turn_id: Optional[str] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
     ) -> None:
@@ -1505,6 +1525,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             item_id=item_id,
             state="in_progress",
             headline=progress_headline,
+            turn_id=turn_id,
             width=width,
             height=height,
         )
@@ -1540,6 +1561,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 state="failed",
                 headline="Image save failed",
                 details=[str(ex)],
+                turn_id=turn_id,
                 width=width,
                 height=height,
             )
@@ -1548,6 +1570,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
         try:
             self.write_image(
                 message_id=item_id,
+                turn_id=turn_id,
                 image_id=saved_image.id,
                 mime_type=saved_image.mime_type,
                 created_at=saved_image.created_at,
@@ -1564,6 +1587,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 state="failed",
                 headline="Image attach failed",
                 details=[str(ex)],
+                turn_id=turn_id,
                 width=width,
                 height=height,
             )
@@ -1575,6 +1599,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 item_id=item_id,
                 state="completed",
                 headline="Image saved",
+                turn_id=turn_id,
                 width=width,
                 height=height,
             )
@@ -1588,6 +1613,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                     if existing_stage == _IMAGE_STAGE_PARTIAL
                     else "Image saved"
                 ),
+                turn_id=turn_id,
                 width=width,
                 height=height,
             )
@@ -1609,6 +1635,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             return
 
         item_id = self._resolve_image_item_id(event=event, item=item)
+        turn_id = _turn_id_from_event(event)
         width, height = _extract_image_dimensions(item=item, event=event)
 
         normalized_state = _normalize_status_value(item.get("status")) or "in_progress"
@@ -1628,6 +1655,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             item_id=item_id,
             state=normalized_state,
             headline=headline,
+            turn_id=turn_id,
             width=width,
             height=height,
         )
@@ -1646,6 +1674,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             return
 
         item_id = self._resolve_image_item_id(event=event, item=item)
+        turn_id = _turn_id_from_event(event)
         width, height = _extract_image_dimensions(item=item, event=event)
 
         image_bytes = _image_bytes_from_output_item(item=item)
@@ -1673,6 +1702,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         else "Image generation cancelled"
                     ),
                     details=details,
+                    turn_id=turn_id,
                     width=width,
                     height=height,
                 )
@@ -1686,6 +1716,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                         if normalized_state == "queued"
                         else "Generating image"
                     ),
+                    turn_id=turn_id,
                     width=width,
                     height=height,
                 )
@@ -1713,6 +1744,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             created_by=created_by,
             source=source,
             annotations=item_annotations,
+            turn_id=turn_id,
             width=width,
             height=height,
         )
@@ -1726,6 +1758,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             raise RoomException("thread was not opened")
 
         item_id = self._resolve_image_item_id(event=event)
+        turn_id = _turn_id_from_event(event)
         width, height = _extract_image_dimensions(event=event)
 
         image_bytes = _image_bytes_from_partial_image_event(event=event)
@@ -1752,6 +1785,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
                 created_by=created_by,
                 source=_PARTIAL_IMAGE_SOURCE,
                 annotations=partial_annotations,
+                turn_id=turn_id,
                 width=width,
                 height=height,
             )
@@ -1763,6 +1797,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
             item_id=item_id,
             state="in_progress",
             headline="Generating image",
+            turn_id=turn_id,
             width=width,
             height=height,
         )

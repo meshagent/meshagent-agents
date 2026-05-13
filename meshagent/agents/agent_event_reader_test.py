@@ -10,6 +10,7 @@ from meshagent.agents.agent_event_reader import (
 from meshagent.agents.context import AgentSessionContext, SessionUsage
 from meshagent.agents.messages import (
     AGENT_EVENT_CONTEXT_COMPACTED,
+    AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_THREAD_EVENT,
@@ -19,6 +20,8 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_MESSAGE_TURN_START,
     AgentContextCompacted,
+    AgentGeneratedImage,
+    AgentImageGenerationCompleted,
     AgentUsageUpdated,
     AgentTextContent,
     AgentTextContentDelta,
@@ -85,6 +88,7 @@ class _TestAgentEventReader(AccumulatingAgentEventReader):
         self,
         *,
         event_type: str,
+        turn_id: str,
         item_id: str,
         call_id: str | None,
         toolkit: str,
@@ -98,6 +102,7 @@ class _TestAgentEventReader(AccumulatingAgentEventReader):
                 "role": "assistant",
                 "image_generation": {
                     "event_type": event_type,
+                    "turn_id": turn_id,
                     "item_id": item_id,
                     "call_id": call_id,
                     "toolkit": toolkit,
@@ -159,6 +164,34 @@ def _reader_for_context(context: AgentSessionContext) -> _TestAgentEventReader:
             restore_compacted_context=restore_compacted_context,
         ),
     )
+
+
+def test_accumulating_agent_event_reader_preserves_image_generation_turn_id() -> None:
+    messages: list[dict[str, Any]] = []
+    reader = _TestAgentEventReader(emit_message=messages.append)
+
+    reader(
+        AgentImageGenerationCompleted(
+            type=AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            item_id="image-1",
+            call_id="call-image",
+            toolkit="openai",
+            tool="image_generation",
+            arguments={"size": "512x512"},
+            images=[
+                AgentGeneratedImage(
+                    uri="dataset://images?id=image-1",
+                    status="completed",
+                )
+            ],
+        )
+    )
+
+    image_generation = messages[0]["image_generation"]
+    assert image_generation["turn_id"] == "turn-1"
+    assert image_generation["item_id"] == "image-1"
 
 
 def test_accumulating_agent_event_reader_roundtrips_core_agent_messages() -> None:

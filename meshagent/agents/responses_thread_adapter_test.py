@@ -901,16 +901,19 @@ async def test_emit_image_status_event_updates_image_element_state():
         item_id="img-item-1",
         state="in_progress",
         headline="Generating image",
+        turn_id="turn-1",
         width=1024,
         height=768,
     )
 
     assert len(events) == 1
     assert events[0]["state"] == "in_progress"
+    assert events[0]["turn_id"] == "turn-1"
     assert events[0]["item_id"] == "img-item-1"
 
     assert len(writes) == 1
     assert writes[0]["message_id"] == "img-item-1"
+    assert writes[0]["turn_id"] == "turn-1"
     assert writes[0]["status"] == "generating"
     assert writes[0]["width"] == 1024
     assert writes[0]["height"] == 768
@@ -919,6 +922,7 @@ async def test_emit_image_status_event_updates_image_element_state():
 def test_computer_call_events_are_not_classified_as_exec():
     event = {
         "type": "response.output_item.added",
+        "turn_id": "turn-1",
         "item_id": "item_123",
         "item": {
             "id": "item_123",
@@ -930,6 +934,7 @@ def test_computer_call_events_are_not_classified_as_exec():
     normalized = response_event_to_agent_event(event)
     assert isinstance(normalized, dict)
     assert normalized["kind"] == "tool"
+    assert normalized["turn_id"] == "turn-1"
     assert normalized["headline"] == "Using computer"
 
 
