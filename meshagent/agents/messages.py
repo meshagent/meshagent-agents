@@ -31,6 +31,8 @@ AGENT_MESSAGE_THREAD_START = "meshagent.agent.thread.start"
 AGENT_MESSAGE_THREAD_CLEAR = "meshagent.agent.thread.clear"
 AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
 AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
+AGENT_MESSAGE_THREAD_DELETE = "meshagent.agent.thread.delete"
+AGENT_MESSAGE_THREAD_RENAME = "meshagent.agent.thread.rename"
 AGENT_MESSAGE_CAPABILITIES_REQUEST = "meshagent.agent.capabilities_request"
 AGENT_MESSAGE_CAPABILITIES_RESPONSE = "meshagent.agent.capabilities_response"
 AGENT_MESSAGE_MODELS_REQUEST = "meshagent.agent.models.request"
@@ -191,6 +193,15 @@ class OpenThread(AgentThreadMessage):
 
 class CloseThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLOSE]
+
+
+class DeleteThread(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_DELETE]
+
+
+class RenameThread(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_RENAME]
+    name: str
 
 
 class CapabilitiesRequest(AgentThreadMessage):
@@ -738,6 +749,8 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
+    AGENT_MESSAGE_THREAD_DELETE: DeleteThread,
+    AGENT_MESSAGE_THREAD_RENAME: RenameThread,
     AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
     AGENT_MESSAGE_CAPABILITIES_RESPONSE: CapabilitiesResponse,
     AGENT_MESSAGE_MODELS_REQUEST: ModelsRequest,

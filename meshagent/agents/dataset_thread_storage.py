@@ -10,7 +10,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal
 from urllib.parse import parse_qs, urlparse
 
 import pyarrow as pa
@@ -94,7 +94,12 @@ from .messages import (
 )
 from .stream_content_accumulator import accumulate_text_delta
 from .thread_adapter import default_format_message
-from .thread_storage import ThreadStorage
+from .thread_storage import (
+    ThreadListEntry,
+    ThreadListEvent,
+    ThreadListPage,
+    ThreadStorage,
+)
 
 if TYPE_CHECKING:
     from .adapter import LLMAdapter
@@ -127,6 +132,44 @@ _TERMINAL_REASON_TO_STATUS = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_thread_list_limit_offset(
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[int, int]:
+    return max(1, min(200, int(limit))), max(0, int(offset))
+
+
+def _parse_thread_list_datetime(*, value: str) -> datetime:
+    raw = value.strip()
+    if raw == "":
+        return datetime.min.replace(tzinfo=timezone.utc)
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _sort_thread_list_entries(entries: list[ThreadListEntry]) -> list[ThreadListEntry]:
+    return sorted(
+        entries,
+        key=lambda entry: (
+            _parse_thread_list_datetime(value=entry.modified_at),
+            _parse_thread_list_datetime(value=entry.created_at),
+            entry.path,
+        ),
+        reverse=True,
+    )
+
+
+def _dataset_sql_string_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _normalize_positive_dimension(value: Any) -> int | None:
@@ -378,6 +421,266 @@ class _ActiveImageGeneration:
 
 
 class DatasetThreadStorage(ThreadStorage):
+    @classmethod
+    def thread_list_path_for_dir(cls, *, thread_dir: str) -> str:
+        normalized = thread_dir.strip().rstrip("/")
+        if normalized.startswith(_DATASET_THREAD_URL_PREFIX):
+            normalized = normalized[len(_DATASET_THREAD_URL_PREFIX) :]
+        normalized = normalized.strip("/")
+        if normalized == "":
+            raise ValueError("dataset thread list directory is required")
+        return f"{_DATASET_THREAD_URL_PREFIX}{normalized}/index"
+
+    @classmethod
+    async def list_threads(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
+            limit=limit,
+            offset=offset,
+        )
+        entries = await cls._read_thread_list_entries(
+            room=room,
+            thread_dir=thread_dir,
+        )
+        sorted_entries = _sort_thread_list_entries(entries)
+        selected = sorted_entries[
+            normalized_offset : normalized_offset + normalized_limit
+        ]
+        return ThreadListPage(
+            threads=selected,
+            total=len(sorted_entries),
+            offset=normalized_offset,
+            limit=normalized_limit,
+        )
+
+    @classmethod
+    async def upsert_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> None:
+        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        now = _now_iso()
+        resolved_created_at = (
+            created_at.strip()
+            if isinstance(created_at, str) and created_at.strip() != ""
+            else now
+        )
+        resolved_modified_at = (
+            modified_at.strip()
+            if isinstance(modified_at, str) and modified_at.strip() != ""
+            else resolved_created_at
+        )
+        resolved_name = (
+            name.strip()
+            if isinstance(name, str) and name.strip() != ""
+            else cls._default_thread_name(path=path)
+        )
+        await room.datasets.merge(
+            table=table_name,
+            namespace=namespace,
+            on="path",
+            records=[
+                {
+                    "path": path,
+                    "name": resolved_name,
+                    "created_at": resolved_created_at,
+                    "modified_at": resolved_modified_at,
+                }
+            ],
+        )
+
+    @classmethod
+    async def delete_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        delete_storage: bool = True,
+    ) -> None:
+        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        await room.datasets.delete(
+            table=table_name,
+            namespace=namespace,
+            where=f"path = {_dataset_sql_string_literal(path)}",
+        )
+        if delete_storage:
+            normalized_path = _normalize_dataset_thread_storage_path(path=path)
+            path_parts = _normalize_path_parts(path=normalized_path.table_path)
+            thread_table = path_parts[-1]
+            thread_namespace = path_parts[:-1] if len(path_parts) > 1 else None
+            await room.datasets.drop_table(
+                name=thread_table,
+                namespace=thread_namespace,
+                ignore_missing=True,
+            )
+
+    @classmethod
+    async def rename_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        name: str,
+    ) -> None:
+        resolved_name = name.strip()
+        if resolved_name == "":
+            raise ValueError("thread name is required")
+        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        await room.datasets.update(
+            table=table_name,
+            namespace=namespace,
+            where=f"path = {_dataset_sql_string_literal(path)}",
+            values={"name": resolved_name, "modified_at": _now_iso()},
+        )
+
+    @classmethod
+    async def watch_threads(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        poll_interval: float = 1.0,
+    ) -> AsyncIterator[ThreadListEvent]:
+        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        previous: dict[str, ThreadListEntry] = {}
+        async for event in room.datasets.watch_table(
+            table=table_name,
+            namespace=namespace,
+            poll_interval_seconds=poll_interval,
+        ):
+            if event.kind == "ready":
+                continue
+            if event.table is None:
+                continue
+            entries = cls._entries_from_records(records=event.table.to_pylist())
+            if event.phase == "initial":
+                for entry in entries:
+                    previous[entry.path] = entry
+                continue
+
+            change_type = (event.change_type or "").casefold()
+            if change_type in {"deleted", "delete", "removed", "remove"}:
+                for entry in entries:
+                    prior = previous.pop(entry.path, entry)
+                    yield ThreadListEvent(
+                        type="deleted",
+                        path=entry.path,
+                        entry=prior,
+                    )
+                continue
+
+            for entry in entries:
+                path = entry.path
+                prior = previous.get(path)
+                if prior is None:
+                    yield ThreadListEvent(type="upserted", path=path, entry=entry)
+                elif prior.name != entry.name:
+                    yield ThreadListEvent(type="renamed", path=path, entry=entry)
+                elif prior != entry:
+                    yield ThreadListEvent(type="upserted", path=path, entry=entry)
+                previous[path] = entry
+
+    @classmethod
+    async def _read_thread_list_entries(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+    ) -> list[ThreadListEntry]:
+        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        rows = await room.datasets.search(table=table_name, namespace=namespace)
+        return cls._entries_from_records(records=rows.to_pylist())
+
+    @classmethod
+    async def _ensure_thread_list_table(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+    ) -> None:
+        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
+        schema = pa.schema(
+            [
+                pa.field("path", pa.string(), nullable=False),
+                pa.field("name", pa.string()),
+                pa.field("created_at", pa.string()),
+                pa.field("modified_at", pa.string()),
+            ]
+        )
+        try:
+            await room.datasets.inspect(table=table_name, namespace=namespace)
+        except Exception:
+            await room.datasets.create_table_with_schema(
+                name=table_name,
+                schema=schema,
+                mode="create_if_not_exists",
+                namespace=namespace,
+            )
+
+    @classmethod
+    def _thread_list_table(cls, *, thread_dir: str) -> tuple[str, list[str] | None]:
+        list_path = _normalize_dataset_thread_storage_path(
+            path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
+        )
+        path_parts = _normalize_path_parts(path=list_path.table_path)
+        table_name = path_parts[-1]
+        namespace = path_parts[:-1] if len(path_parts) > 1 else None
+        return table_name, namespace
+
+    @staticmethod
+    def _entries_from_records(
+        *, records: list[dict[str, Any]]
+    ) -> list[ThreadListEntry]:
+        entries: list[ThreadListEntry] = []
+        for record in records:
+            path = record.get("path")
+            if not isinstance(path, str) or path.strip() == "":
+                continue
+            name = record.get("name")
+            created_at = record.get("created_at")
+            modified_at = record.get("modified_at")
+            entries.append(
+                ThreadListEntry(
+                    name=name.strip() if isinstance(name, str) else "",
+                    path=path.strip(),
+                    created_at=created_at.strip()
+                    if isinstance(created_at, str)
+                    else "",
+                    modified_at=(
+                        modified_at.strip() if isinstance(modified_at, str) else ""
+                    ),
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _default_thread_name(*, path: str) -> str:
+        normalized_path = path.strip()
+        if normalized_path.startswith(_DATASET_THREAD_URL_PREFIX):
+            normalized_path = normalized_path[len(_DATASET_THREAD_URL_PREFIX) :]
+        filename = normalized_path.rstrip("/").rsplit("/", 1)[-1]
+        normalized = filename.replace("-", " ").replace("_", " ").strip()
+        return normalized.title() if normalized != "" else "New Chat"
+
     def __init__(
         self,
         *,

@@ -3,7 +3,15 @@ from __future__ import annotations
 import asyncio
 import posixpath
 import uuid
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Literal,
+    Protocol,
+    runtime_checkable,
+)
 
 from meshagent.api import Participant, RoomClient
 from meshagent.tools import Toolkit
@@ -15,6 +23,29 @@ if TYPE_CHECKING:
     from .adapter import LLMAdapter
 
 THREAD_PATH_EXISTS_TIMEOUT_SECONDS = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadListEntry:
+    name: str
+    path: str
+    created_at: str
+    modified_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadListPage:
+    threads: list[ThreadListEntry]
+    total: int
+    offset: int
+    limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadListEvent:
+    type: Literal["upserted", "renamed", "deleted"]
+    path: str
+    entry: ThreadListEntry | None = None
 
 
 @runtime_checkable
@@ -58,6 +89,60 @@ class ThreadStorage(Protocol):
         return posixpath.join(
             thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}{extension}"
         )
+
+    @classmethod
+    def thread_list_path_for_dir(cls, *, thread_dir: str) -> str: ...
+
+    @classmethod
+    async def list_threads(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage: ...
+
+    @classmethod
+    async def upsert_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> None: ...
+
+    @classmethod
+    async def delete_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        delete_storage: bool = True,
+    ) -> None: ...
+
+    @classmethod
+    async def rename_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        name: str,
+    ) -> None: ...
+
+    @classmethod
+    def watch_threads(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        poll_interval: float = 1.0,
+    ) -> AsyncIterator[ThreadListEvent]: ...
 
     @property
     def path(self) -> str: ...

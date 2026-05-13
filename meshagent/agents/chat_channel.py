@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import aiohttp
 import msgpack
 from aiohttp import web
-from meshagent.api import Element, Participant, RoomClient, RoomException, RoomMessage
+from meshagent.api import Participant, RoomClient, RoomException, RoomMessage
 from meshagent.api.messaging import JsonContent
 from pydantic import BaseModel, ValidationError
 from meshagent.tools import FunctionTool, ToolContext, Toolkit, tool
@@ -72,7 +72,7 @@ from .messages import (
     TurnSteer,
     parse_agent_message,
 )
-from .process import Message
+from .process import AgentSupervisor, Message
 from .threaded_channel import ThreadedChannel
 
 logger = logging.getLogger("chat-channel")
@@ -565,6 +565,12 @@ class BaseChatChannel(ThreadedChannel):
 
         control_message = model.model_validate(payload)
         if isinstance(control_message, StartThread):
+            if self._supervisor_handles_start_thread():
+                self.emit(
+                    sender=sender,
+                    payload=control_message,
+                )
+                return True
             task = asyncio.create_task(
                 self._handle_start_thread_message(
                     start_thread=control_message,
@@ -593,6 +599,12 @@ class BaseChatChannel(ThreadedChannel):
             return False
 
         return False
+
+    def _supervisor_handles_start_thread(self) -> bool:
+        supervisor = self.supervisor
+        if supervisor is None:
+            return False
+        return type(supervisor).create_thread_id is not AgentSupervisor.create_thread_id
 
     async def _handle_start_thread_message(
         self,
@@ -1082,24 +1094,27 @@ class BaseChatChannel(ThreadedChannel):
         )
         outer = self
 
-        def to_json_entry(entry: Element) -> dict[str, str]:
+        def to_json_entry(entry) -> dict[str, str]:
             return {
-                "name": str(entry.get_attribute("name") or ""),
-                "path": str(entry.get_attribute("path") or ""),
-                "modified_at": str(entry.get_attribute("modified_at") or ""),
-                "created_at": str(entry.get_attribute("created_at") or ""),
+                "name": str(entry.name),
+                "path": str(entry.path),
+                "modified_at": str(entry.modified_at),
+                "created_at": str(entry.created_at),
             }
 
         @tool(
             name="list_threads",
             description="lists recent threads sorted by last modified date (newest first). Use read_file with a thread path to read that thread's contents.",
         )
-        def list_threads(*, limit: int = 20, offset: int = 0) -> JsonContent:
+        async def list_threads(*, limit: int = 20, offset: int = 0) -> JsonContent:
             normalized_offset = max(0, int(offset))
             normalized_limit = max(1, min(200, int(limit)))
 
-            entries = outer._sorted_thread_list_entries()
-            if len(entries) == 0:
+            page = await outer.list_threads(
+                limit=normalized_limit,
+                offset=normalized_offset,
+            )
+            if page.total == 0:
                 return JsonContent(
                     json={
                         "threads": [],
@@ -1111,16 +1126,11 @@ class BaseChatChannel(ThreadedChannel):
                     }
                 )
 
-            selected = outer._thread_list_slice(
-                entries=entries,
-                limit=limit,
-                offset=offset,
-            )
-            if len(selected) == 0:
+            if len(page.threads) == 0:
                 return JsonContent(
                     json={
                         "threads": [],
-                        "total": len(entries),
+                        "total": page.total,
                         "offset": normalized_offset,
                         "limit": normalized_limit,
                         "message": "no threads were found for the requested limit/offset",
@@ -1130,8 +1140,8 @@ class BaseChatChannel(ThreadedChannel):
 
             return JsonContent(
                 json={
-                    "threads": [to_json_entry(entry) for entry in selected],
-                    "total": len(entries),
+                    "threads": [to_json_entry(entry) for entry in page.threads],
+                    "total": page.total,
                     "offset": normalized_offset,
                     "limit": normalized_limit,
                     "sort": "modified_at_desc",
@@ -1143,7 +1153,9 @@ class BaseChatChannel(ThreadedChannel):
             name="grep_thread_list",
             description="searches the thread list for matching thread names and paths. Use read_file with a thread path to read that thread's contents.",
         )
-        def grep_thread_list(*, pattern: str, ignore_case: bool = True) -> JsonContent:
+        async def grep_thread_list(
+            *, pattern: str, ignore_case: bool = True
+        ) -> JsonContent:
             needle = pattern.strip()
             if needle == "":
                 return JsonContent(
@@ -1174,12 +1186,12 @@ class BaseChatChannel(ThreadedChannel):
                 )
 
             matches: list[dict[str, str]] = []
-            for entry in outer._sorted_thread_list_entries():
-                name = entry.get_attribute("name")
-                path = entry.get_attribute("path")
-                created_at = entry.get_attribute("created_at")
-                modified_at = entry.get_attribute("modified_at")
-                haystack = f"{name}\n{path}\n{created_at}\n{modified_at}"
+            page = await outer.list_threads(limit=200, offset=0)
+            for entry in page.threads:
+                haystack = (
+                    f"{entry.name}\n{entry.path}\n"
+                    f"{entry.created_at}\n{entry.modified_at}"
+                )
                 if matcher.search(haystack) is None:
                     continue
                 matches.append(to_json_entry(entry))

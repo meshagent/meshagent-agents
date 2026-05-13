@@ -5,6 +5,7 @@ import base64
 import contextlib
 import json
 import logging
+import posixpath
 import re
 import shlex
 import uuid
@@ -12,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 from urllib.parse import parse_qs, urlparse
 
 from meshagent.api import (
@@ -81,8 +82,13 @@ from .thread_adapter import (
     _THREAD_SYNC_CLOSE_TIMEOUT_SEC,
     default_format_message,
 )
-from .thread_schema import thread_schema
-from .thread_storage import ThreadStorage
+from .thread_schema import thread_list_schema, thread_schema
+from .thread_storage import (
+    ThreadListEntry,
+    ThreadListEvent,
+    ThreadListPage,
+    ThreadStorage,
+)
 from .stream_content_accumulator import FileContentAccumulator, TextContentAccumulator
 from .tool_call_accumulator import ToolCallAccumulator
 
@@ -98,6 +104,44 @@ _APPLY_PATCH_PATH_RES = (
     re.compile(r"^(?:\+\+\+ b/|--- a/)(?P<path>.+)$", re.MULTILINE),
 )
 _IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_thread_list_limit_offset(
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[int, int]:
+    return max(1, min(200, int(limit))), max(0, int(offset))
+
+
+def _parse_thread_list_datetime(*, value: str) -> datetime:
+    raw = value.strip()
+    if raw == "":
+        return datetime.min.replace(tzinfo=timezone.utc)
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _sort_thread_list_entries(entries: list[ThreadListEntry]) -> list[ThreadListEntry]:
+    return sorted(
+        entries,
+        key=lambda entry: (
+            _parse_thread_list_datetime(value=entry.modified_at),
+            _parse_thread_list_datetime(value=entry.created_at),
+            entry.path,
+        ),
+        reverse=True,
+    )
 
 
 def _status_total_bytes(total_bytes: int) -> int | None:
@@ -499,6 +543,271 @@ def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
 
 
 class MeshDocumentThreadStorage(ThreadStorage):
+    @classmethod
+    def thread_list_path_for_dir(cls, *, thread_dir: str) -> str:
+        return posixpath.join(thread_dir.strip().rstrip("/"), "index.threadl")
+
+    @classmethod
+    async def list_threads(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
+            limit=limit,
+            offset=offset,
+        )
+        entries = await cls._read_thread_list_entries(
+            room=room,
+            thread_dir=thread_dir,
+        )
+        sorted_entries = _sort_thread_list_entries(entries)
+        selected = sorted_entries[
+            normalized_offset : normalized_offset + normalized_limit
+        ]
+        return ThreadListPage(
+            threads=selected,
+            total=len(sorted_entries),
+            offset=normalized_offset,
+            limit=normalized_limit,
+        )
+
+    @classmethod
+    async def upsert_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> None:
+        document = await room.sync.open(
+            path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
+            schema=thread_list_schema,
+        )
+        try:
+            cls._upsert_thread_list_document_entry(
+                document=document,
+                path=path,
+                name=name,
+                created_at=created_at,
+                modified_at=modified_at,
+            )
+        finally:
+            await room.sync.close(
+                path=cls.thread_list_path_for_dir(thread_dir=thread_dir)
+            )
+
+    @classmethod
+    async def delete_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        delete_storage: bool = True,
+    ) -> None:
+        document = await room.sync.open(
+            path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
+            schema=thread_list_schema,
+        )
+        try:
+            for child in document.root.get_children():
+                if child.tag_name == "thread" and child.get_attribute("path") == path:
+                    child.delete()
+                    break
+        finally:
+            await room.sync.close(
+                path=cls.thread_list_path_for_dir(thread_dir=thread_dir)
+            )
+
+        if delete_storage:
+            with contextlib.suppress(Exception):
+                await room.storage.delete(path=path)
+
+    @classmethod
+    async def rename_thread(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        path: str,
+        name: str,
+    ) -> None:
+        resolved_name = name.strip()
+        if resolved_name == "":
+            raise ValueError("thread name is required")
+        await cls.upsert_thread(
+            room=room,
+            thread_dir=thread_dir,
+            path=path,
+            name=resolved_name,
+            modified_at=_utc_now_iso(),
+        )
+
+    @classmethod
+    async def watch_threads(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+        poll_interval: float = 1.0,
+    ) -> AsyncIterator[ThreadListEvent]:
+        del poll_interval
+        index_path = cls.thread_list_path_for_dir(thread_dir=thread_dir)
+        document = await room.sync.open(path=index_path, schema=thread_list_schema)
+        mutation_queue: asyncio.Queue[None] = asyncio.Queue()
+
+        def queue_mutation(*args: object) -> None:
+            del args
+            mutation_queue.put_nowait(None)
+
+        document.on("inserted")(queue_mutation)
+        document.on("deleted")(queue_mutation)
+        document.on("updated")(queue_mutation)
+        previous = {
+            entry.path: entry
+            for entry in cls._entries_from_thread_list_document(document=document)
+        }
+        try:
+            while True:
+                await mutation_queue.get()
+                current = {
+                    entry.path: entry
+                    for entry in cls._entries_from_thread_list_document(
+                        document=document,
+                    )
+                }
+                for path, entry in current.items():
+                    prior = previous.get(path)
+                    if prior is None:
+                        yield ThreadListEvent(type="upserted", path=path, entry=entry)
+                    elif prior.name != entry.name:
+                        yield ThreadListEvent(type="renamed", path=path, entry=entry)
+                    elif prior != entry:
+                        yield ThreadListEvent(type="upserted", path=path, entry=entry)
+                for path, prior in previous.items():
+                    if path not in current:
+                        yield ThreadListEvent(type="deleted", path=path, entry=prior)
+                previous = current
+        finally:
+            await room.sync.close(path=index_path)
+
+    @classmethod
+    async def _read_thread_list_entries(
+        cls,
+        *,
+        room: RoomClient,
+        thread_dir: str,
+    ) -> list[ThreadListEntry]:
+        index_path = cls.thread_list_path_for_dir(thread_dir=thread_dir)
+        document = await room.sync.open(path=index_path, schema=thread_list_schema)
+        try:
+            return cls._entries_from_thread_list_document(document=document)
+        finally:
+            await room.sync.close(path=index_path)
+
+    @classmethod
+    def _entries_from_thread_list_document(
+        cls,
+        *,
+        document: MeshDocument,
+    ) -> list[ThreadListEntry]:
+        return [
+            entry
+            for entry in (
+                cls._entry_from_thread_element(element=child)
+                for child in document.root.get_children()
+                if child.tag_name == "thread"
+            )
+            if entry is not None
+        ]
+
+    @staticmethod
+    def _entry_from_thread_element(*, element: Element) -> ThreadListEntry | None:
+        path = element.get_attribute("path")
+        if not isinstance(path, str) or path.strip() == "":
+            return None
+        name = element.get_attribute("name")
+        created_at = element.get_attribute("created_at")
+        modified_at = element.get_attribute("modified_at")
+        return ThreadListEntry(
+            name=name.strip() if isinstance(name, str) else "",
+            path=path.strip(),
+            created_at=created_at.strip() if isinstance(created_at, str) else "",
+            modified_at=modified_at.strip() if isinstance(modified_at, str) else "",
+        )
+
+    @classmethod
+    def _upsert_thread_list_document_entry(
+        cls,
+        *,
+        document: MeshDocument,
+        path: str,
+        name: str | None,
+        created_at: str | None,
+        modified_at: str | None,
+    ) -> None:
+        now = _utc_now_iso()
+        provided_name = name.strip() if isinstance(name, str) else ""
+        existing: Element | None = None
+        for child in document.root.get_children():
+            if child.tag_name == "thread" and child.get_attribute("path") == path:
+                existing = child
+                break
+
+        resolved_created_at = (
+            created_at.strip()
+            if isinstance(created_at, str) and created_at.strip() != ""
+            else now
+        )
+        resolved_modified_at = (
+            modified_at.strip()
+            if isinstance(modified_at, str) and modified_at.strip() != ""
+            else resolved_created_at
+        )
+        resolved_name = (
+            provided_name
+            if provided_name != ""
+            else cls._default_thread_name(path=path)
+        )
+
+        if existing is None:
+            document.root.append_child(
+                tag_name="thread",
+                attributes={
+                    "name": resolved_name,
+                    "path": path,
+                    "created_at": resolved_created_at,
+                    "modified_at": resolved_modified_at,
+                },
+            )
+            return
+
+        existing.set_attribute("path", path)
+        if provided_name != "":
+            existing.set_attribute("name", provided_name)
+        elif not isinstance(existing.get_attribute("name"), str):
+            existing.set_attribute("name", resolved_name)
+        existing_created_at = existing.get_attribute("created_at")
+        if isinstance(existing_created_at, str) and existing_created_at.strip() != "":
+            resolved_created_at = existing_created_at.strip()
+        existing.set_attribute("created_at", resolved_created_at)
+        existing.set_attribute("modified_at", resolved_modified_at)
+
+    @staticmethod
+    def _default_thread_name(*, path: str) -> str:
+        filename = posixpath.basename(path.strip())
+        if filename.endswith(".thread"):
+            filename = filename[: -len(".thread")]
+        normalized = filename.replace("-", " ").replace("_", " ").strip()
+        return normalized.title() if normalized != "" else "New Chat"
+
     def __init__(
         self,
         *,

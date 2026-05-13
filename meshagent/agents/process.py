@@ -51,11 +51,15 @@ from .messages import (
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
     AGENT_MESSAGE_THREAD_CLOSE,
+    AGENT_MESSAGE_THREAD_DELETE,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_RENAME,
+    AGENT_MESSAGE_THREAD_START,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_THREAD_EVENT,
+    AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
@@ -108,11 +112,14 @@ from .messages import (
     ChangeModel,
     ClearThread,
     CloseThread,
+    DeleteThread,
     ModelsRequest,
     ModelsResponse,
     OpenThread,
     RejectAgentToolCall,
+    RenameThread,
     StartThread,
+    ThreadStarted,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
     ToolChoice,
@@ -149,7 +156,9 @@ _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
         AGENT_MESSAGE_MODEL_CHANGE,
         AGENT_EVENT_MODEL_CHANGED,
         AGENT_MESSAGE_THREAD_CLOSE,
+        AGENT_MESSAGE_THREAD_DELETE,
         AGENT_MESSAGE_THREAD_OPEN,
+        AGENT_MESSAGE_THREAD_RENAME,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
         AGENT_MESSAGE_TOOL_CALL_REJECT,
         AGENT_MESSAGE_TURN_INTERRUPT,
@@ -938,6 +947,47 @@ class AgentSupervisor:
         del sender
         return None
 
+    async def create_thread_id(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del start_thread
+        del sender
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement create_thread_id"
+        )
+
+    async def on_thread_started(
+        self,
+        *,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> None:
+        del thread_id
+        del start_thread
+        del sender
+
+    async def on_thread_deleted(
+        self,
+        *,
+        delete_thread: DeleteThread,
+        sender: Participant | None,
+    ) -> None:
+        del delete_thread
+        del sender
+
+    async def on_thread_renamed(
+        self,
+        *,
+        rename_thread: RenameThread,
+        sender: Participant | None,
+    ) -> None:
+        del rename_thread
+        del sender
+
     async def route(self, message: Message) -> None:
         if self._stop.is_set() or self._state == "stopping":
             logger.debug("dropping supervisor message during shutdown")
@@ -995,6 +1045,16 @@ class AgentSupervisor:
             if process.thread_id == thread_id:
                 return process
         return None
+
+    async def _stop_thread_process(self, *, thread_id: str) -> None:
+        process = self._process_for_thread(thread_id=thread_id)
+        if process is None:
+            return
+        if process in self.processes:
+            self.processes.remove(process)
+        if process.supervisor is self:
+            with contextlib.suppress(ValueError):
+                await process.stop(self)
 
     def _process_for_turn(self, *, turn_id: str) -> AgentProcess | None:
         for process in self.processes:
@@ -1110,6 +1170,46 @@ class AgentSupervisor:
             )
         )
 
+    def _emit_start_thread_rejected(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant | None,
+        thread_id: str,
+        error: AgentError,
+    ) -> None:
+        self._send_to_channels(
+            Message(
+                data=TurnStartRejected(
+                    type=AGENT_EVENT_TURN_START_REJECTED,
+                    thread_id=thread_id,
+                    source_message_id=start_thread.message_id,
+                    error=error,
+                ),
+                sender=sender,
+            )
+        )
+
+    def _emit_thread_started(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant | None,
+        thread_id: str,
+        realtime_connection: Any = None,
+    ) -> None:
+        self._send_to_channels(
+            Message(
+                data=ThreadStarted(
+                    type=AGENT_EVENT_THREAD_STARTED,
+                    source_message_id=start_thread.message_id,
+                    thread_id=thread_id,
+                    realtime_connection=realtime_connection,
+                ),
+                sender=sender,
+            )
+        )
+
     def _emit_turn_steer_rejected(
         self,
         *,
@@ -1134,7 +1234,107 @@ class AgentSupervisor:
         routed_message = message
         target_processes: list[AgentProcess] | None = None
         message_type = message.data.type
-        if message_type == AGENT_MESSAGE_TURN_START:
+        if message_type == AGENT_MESSAGE_THREAD_START:
+            start_thread = _coerce_message_data(message.data, StartThread)
+            try:
+                thread_id = await self.create_thread_id(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                )
+            except Exception as exc:
+                logger.exception("failed to create thread id; rejecting start thread")
+                self._emit_start_thread_rejected(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                    thread_id="",
+                    error=self._thread_process_creation_rejection(error=exc),
+                )
+                return
+
+            if start_thread.content is None:
+                try:
+                    realtime_connection = await self.create_realtime_connection(
+                        thread_id=thread_id,
+                        start_thread=start_thread,
+                        sender=message.sender,
+                    )
+                except Exception as exc:
+                    self._emit_start_thread_rejected(
+                        start_thread=start_thread,
+                        sender=message.sender,
+                        thread_id=thread_id,
+                        error=AgentError(
+                            message=str(exc),
+                            code="realtime_connection_failed",
+                        ),
+                    )
+                    return
+                await self.on_thread_started(
+                    thread_id=thread_id,
+                    start_thread=start_thread,
+                    sender=message.sender,
+                )
+                self._emit_thread_started(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                    thread_id=thread_id,
+                    realtime_connection=realtime_connection,
+                )
+                return
+
+            turn_start = TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                message_id=start_thread.message_id,
+                thread_id=thread_id,
+                turn_id=str(uuid.uuid4()),
+                content=start_thread.content,
+                sender_name=start_thread.sender_name,
+                provider=start_thread.provider,
+                model=start_thread.model,
+                voice=start_thread.voice,
+                output_modalities=start_thread.output_modalities,
+                instructions=start_thread.instructions,
+                toolkits=start_thread.toolkits,
+                tool_choice=start_thread.tool_choice,
+            )
+            error = await self.validate_turn_start(turn_start)
+            if error is not None:
+                self._emit_start_thread_rejected(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                    thread_id=thread_id,
+                    error=error,
+                )
+                return
+
+            process = self._process_for_thread(thread_id=thread_id)
+            if process is None:
+                process, rejection = self._create_thread_process_for_route(
+                    thread_id=thread_id
+                )
+                if process is None:
+                    if rejection is not None:
+                        self._emit_start_thread_rejected(
+                            start_thread=start_thread,
+                            sender=message.sender,
+                            thread_id=thread_id,
+                            error=rejection,
+                        )
+                    return
+            await self.on_thread_started(
+                thread_id=thread_id,
+                start_thread=start_thread,
+                sender=message.sender,
+            )
+            self._emit_thread_started(
+                start_thread=start_thread,
+                sender=message.sender,
+                thread_id=thread_id,
+            )
+            routed_message = self._copy_message(message, data=turn_start)
+            target_processes = [process]
+
+        elif message_type == AGENT_MESSAGE_TURN_START:
             turn_start = _coerce_message_data(message.data, TurnStart)
             process = self._process_for_thread(thread_id=turn_start.thread_id)
             if process is None:
@@ -1252,6 +1452,23 @@ class AgentSupervisor:
                 data=clear_thread,
             )
             target_processes = [process]
+
+        elif message_type == AGENT_MESSAGE_THREAD_DELETE:
+            delete_thread = _coerce_message_data(message.data, DeleteThread)
+            await self.on_thread_deleted(
+                delete_thread=delete_thread,
+                sender=message.sender,
+            )
+            await self._stop_thread_process(thread_id=delete_thread.thread_id)
+            return
+
+        elif message_type == AGENT_MESSAGE_THREAD_RENAME:
+            rename_thread = _coerce_message_data(message.data, RenameThread)
+            await self.on_thread_renamed(
+                rename_thread=rename_thread,
+                sender=message.sender,
+            )
+            return
 
         elif message_type in {AGENT_MESSAGE_THREAD_OPEN, AGENT_MESSAGE_THREAD_CLOSE}:
             if message_type == AGENT_MESSAGE_THREAD_OPEN:

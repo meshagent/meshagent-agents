@@ -15,7 +15,7 @@ from meshagent.api import Element, MeshDocument, Participant, RoomClient
 from .adapter import LLMAdapter
 from .process import Channel
 from .thread_schema import thread_list_schema
-from .thread_storage import ThreadStorage
+from .thread_storage import ThreadListEntry, ThreadListPage, ThreadStorage
 
 logger = logging.getLogger("threaded-channel")
 
@@ -220,7 +220,22 @@ class ThreadedChannel(Channel):
         thread_dir = self._thread_list_dir()
         if thread_dir is None:
             return None
+        storage_class = self._thread_storage_class()
+        if storage_class is not None:
+            return storage_class.thread_list_path_for_dir(thread_dir=thread_dir)
         return posixpath.join(thread_dir, "index.threadl")
+
+    def _thread_storage_class(self) -> type[ThreadStorage] | None:
+        if self._thread_url_scheme == "dataset://":
+            from .dataset_thread_storage import DatasetThreadStorage
+
+            return DatasetThreadStorage
+        if self._thread_url_scheme == "tmp://":
+            return None
+
+        from .process_thread_adapter import MeshDocumentThreadStorage
+
+        return MeshDocumentThreadStorage
 
     def _thread_list_entry_name_for_path(self, *, path: str) -> str:
         filename = posixpath.basename(self._thread_path_from_url(path=path.strip()))
@@ -273,6 +288,24 @@ class ThreadedChannel(Channel):
         created_at: str | None = None,
         modified_at: str | None = None,
     ) -> None:
+        storage_class = self._thread_storage_class()
+        if self._thread_list_document is None and storage_class is not None:
+            thread_dir = self._thread_list_dir()
+            if thread_dir is None or not self._is_index_managed_path(path=path):
+                return
+            task = asyncio.create_task(
+                storage_class.upsert_thread(
+                    room=self._room,
+                    thread_dir=thread_dir,
+                    path=path,
+                    name=name,
+                    created_at=created_at,
+                    modified_at=modified_at,
+                )
+            )
+            self._track_thread_list_background_task(task=task)
+            return
+
         if self._thread_list_document is None or not self._is_index_managed_path(
             path=path
         ):
@@ -463,9 +496,54 @@ class ThreadedChannel(Channel):
         normalized_limit = max(1, min(200, int(limit)))
         return entries[normalized_offset : normalized_offset + normalized_limit]
 
+    async def list_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        normalized_offset = max(0, int(offset))
+        normalized_limit = max(1, min(200, int(limit)))
+        thread_dir = self._thread_list_dir()
+        if thread_dir is None:
+            return ThreadListPage(
+                threads=[],
+                total=0,
+                offset=normalized_offset,
+                limit=normalized_limit,
+            )
+
+        storage_class = self._thread_storage_class()
+        if self._thread_list_document is None and storage_class is not None:
+            return await storage_class.list_threads(
+                room=self._room,
+                thread_dir=thread_dir,
+                limit=normalized_limit,
+                offset=normalized_offset,
+            )
+
+        entries = [
+            ThreadListEntry(
+                name=str(entry.get_attribute("name") or ""),
+                path=str(entry.get_attribute("path") or ""),
+                modified_at=str(entry.get_attribute("modified_at") or ""),
+                created_at=str(entry.get_attribute("created_at") or ""),
+            )
+            for entry in self._sorted_thread_list_entries()
+        ]
+        selected = entries[normalized_offset : normalized_offset + normalized_limit]
+        return ThreadListPage(
+            threads=selected,
+            total=len(entries),
+            offset=normalized_offset,
+            limit=normalized_limit,
+        )
+
     async def _open_thread_list_document(self) -> None:
         index_path = self._thread_list_index_path()
         if index_path is None:
+            return
+        if self._thread_url_scheme == "dataset://":
             return
 
         if (

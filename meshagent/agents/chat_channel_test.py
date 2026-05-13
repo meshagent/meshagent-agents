@@ -163,6 +163,42 @@ class _FakeSync:
         self.close_calls.append(path)
 
 
+class _FakeDatasets:
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+        self.inspect_calls: list[dict[str, object]] = []
+        self.create_calls: list[dict[str, object]] = []
+        self.merge_calls: list[dict[str, object]] = []
+
+    async def inspect(self, *, table: str, namespace=None):
+        self.inspect_calls.append({"table": table, "namespace": namespace})
+        raise RoomException("missing table")
+
+    async def create_table_with_schema(
+        self,
+        *,
+        name: str,
+        schema=None,
+        mode=None,
+        namespace=None,
+    ) -> None:
+        self.create_calls.append(
+            {"name": name, "schema": schema, "mode": mode, "namespace": namespace}
+        )
+
+    async def merge(self, *, table: str, namespace=None, on: str, records) -> None:
+        self.merge_calls.append(
+            {"table": table, "namespace": namespace, "on": on, "records": records}
+        )
+        for record in records:
+            self.records = [
+                existing
+                for existing in self.records
+                if existing.get(on) != record.get(on)
+            ]
+            self.records.append(dict(record))
+
+
 class _FakeStorage:
     def __init__(self, *, existing_paths: set[str] | None = None) -> None:
         self._existing_paths = set(existing_paths or [])
@@ -245,6 +281,7 @@ class _FakeRoom:
         messaging_enabled: bool = False,
         sync: _FakeSync | None = None,
         storage: _FakeStorage | None = None,
+        datasets: _FakeDatasets | None = None,
     ) -> None:
         self.local_participant = _FakeLocalParticipant()
         self.messaging = _FakeMessaging(
@@ -253,6 +290,7 @@ class _FakeRoom:
         )
         self.sync = sync if sync is not None else _FakeSync()
         self.storage = storage if storage is not None else _FakeStorage()
+        self.datasets = datasets if datasets is not None else _FakeDatasets()
 
 
 class _RecordingSupervisor(AgentSupervisor):
@@ -798,11 +836,13 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     sync = _FakeSync()
     storage = _FakeStorage()
+    datasets = _FakeDatasets()
     room = _FakeRoom(
         participants=[caller],
         messaging_enabled=True,
         sync=sync,
         storage=storage,
+        datasets=datasets,
     )
     channel = MessagingChatChannel(
         room=room,
@@ -842,12 +882,22 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
 
         await channel._wait_for_thread_list_background_tasks()
         await _drain_background_tasks()
-        entries = sync.document.root.get_children()
-        assert len(entries) == 1
-        assert entries[0].get_attribute("path") == result_path
+        assert sync.document.root.get_children() == []
+        assert len(datasets.records) == 1
+        assert datasets.records[0]["path"] == result_path
+        assert datasets.merge_calls[0]["table"] == "index"
+        assert datasets.merge_calls[0]["namespace"] == [
+            "agents",
+            "dataset",
+            "threads",
+        ]
         assert (
             room.local_participant.get_attribute("meshagent.chatbot.thread-dir")
             == "dataset://agents/dataset/threads"
+        )
+        assert (
+            room.local_participant.get_attribute("meshagent.chatbot.thread-list")
+            == "dataset://agents/dataset/threads/index"
         )
     finally:
         await channel.stop(supervisor)

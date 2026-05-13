@@ -28,7 +28,9 @@ from .messages import (
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_MODELS_RESPONSE,
     AGENT_MESSAGE_THREAD_CLOSE,
+    AGENT_MESSAGE_THREAD_DELETE,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_RENAME,
     AgentAudioGenerationDelta,
     AgentAudioTranscriptionDelta,
     AgentFileContent,
@@ -36,6 +38,7 @@ from .messages import (
     AgentImageGenerationCompleted,
     AgentImageGenerationPartial,
     AgentMessage,
+    AgentThreadStatus,
     AgentModelInfo,
     AgentModelChanged,
     AgentReasoningContentDelta,
@@ -45,9 +48,11 @@ from .messages import (
     AgentToolCallLogDelta,
     ChangeModel,
     CloseThread,
+    DeleteThread,
     ModelsRequest,
     ModelsResponse,
     OpenThread,
+    RenameThread,
     StartThread,
     ThreadStarted,
     TurnStart,
@@ -287,12 +292,15 @@ class BaseChatClient(ABC):
         *,
         local_participant_name: str | None = None,
         close_client_on_close: bool = False,
+        on_pending_session: Callable[[ChatThreadSession], None] | None = None,
     ) -> ChatThreadSession:
         session = self.create_thread_session(
             local_participant_name=local_participant_name,
             close_client_on_close=close_client_on_close,
         )
         await session.send(payload)
+        if on_pending_session is not None:
+            on_pending_session(session)
         try:
             async with asyncio.timeout(self._timeout):
                 while True:
@@ -359,6 +367,7 @@ class ChatThreadSession:
         self._timeout = timeout
         self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._thread_status_text: str | None = None
+        self._thread_status: AgentThreadStatus | None = None
         self._pending_inputs: dict[str, PendingAgentInput] = {}
         self._messages: list[AgentMessage] = []
         self._message_indexes: dict[str, int] = {}
@@ -400,6 +409,10 @@ class ChatThreadSession:
         return self._thread_status_text
 
     @property
+    def thread_status(self) -> AgentThreadStatus | None:
+        return self._thread_status
+
+    @property
     def current_model(self) -> AgentModelChanged | None:
         return self._current_model
 
@@ -433,6 +446,23 @@ class ChatThreadSession:
             OpenThread(
                 type=AGENT_MESSAGE_THREAD_OPEN,
                 thread_id=self.thread_path,
+            )
+        )
+
+    async def delete_thread(self, thread_path: str) -> None:
+        await self.send(
+            DeleteThread(
+                type=AGENT_MESSAGE_THREAD_DELETE,
+                thread_id=thread_path,
+            )
+        )
+
+    async def rename_thread(self, thread_path: str, name: str) -> None:
+        await self.send(
+            RenameThread(
+                type=AGENT_MESSAGE_THREAD_RENAME,
+                thread_id=thread_path,
+                name=name,
             )
         )
 
@@ -760,7 +790,16 @@ class ChatThreadSession:
         if agent_message is not None:
             self.add_agent_message(agent_message)
         if payload_type == AGENT_EVENT_THREAD_STATUS:
-            self._thread_status_text = _thread_status_text(payload.get("status"))
+            try:
+                thread_status = AgentThreadStatus.model_validate(payload)
+            except Exception:
+                thread_status = None
+            self._thread_status = thread_status
+            self._thread_status_text = (
+                None
+                if thread_status is None
+                else _thread_status_text(thread_status.status)
+            )
         elif payload_type == AGENT_EVENT_MODEL_CHANGED:
             try:
                 self._current_model = AgentModelChanged.model_validate(payload)
@@ -787,6 +826,7 @@ class ChatThreadSession:
             self._clear_queued_agent_input(payload.get("source_message_id"))
         elif payload_type == AGENT_EVENT_TURN_ENDED:
             self._track_remote_turn_ended(payload)
+            self._thread_status = None
             self._thread_status_text = None
             self.clear_applied_queued_agent_inputs()
         if agent_message is not None:
@@ -1150,7 +1190,7 @@ class LocalChatClient(BaseChatClient):
     def __init__(
         self,
         *,
-        thread_path: str,
+        thread_path: str | None = None,
         send_message: Callable[[Message], None],
         events: asyncio.Queue[Message],
         on_close: Callable[[], None] | None = None,
@@ -1224,17 +1264,6 @@ class LocalChatClient(BaseChatClient):
 
     async def _send_agent_message(self, payload: AgentMessage) -> None:
         self._send_message(Message(data=payload))
-
-    async def start_thread(
-        self,
-        payload: StartThread,
-        *,
-        local_participant_name: str | None = None,
-        close_client_on_close: bool = False,
-    ) -> ChatThreadSession:
-        del local_participant_name, close_client_on_close
-        del payload
-        raise RoomException("local chat client already has a thread")
 
     async def receive(self) -> dict[str, Any]:
         return await self._thread_session.receive()
