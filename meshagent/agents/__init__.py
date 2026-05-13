@@ -15,6 +15,7 @@ from .development import connect_development_agent
 from .listener import Listener, ListenerContext
 from .adapter import ToolResponseAdapter, LLMAdapter, LLMProvider
 from .image_captioner import ImageCaptioner, LLMImageCaptioner
+from .images_dataset import ImageDatasetClient, ImageDatasetRecord, ImagesDataset
 from .dataset_thread_storage import DatasetThreadStorage
 from .process_thread_adapter import MeshDocumentThreadStorage
 from .threaded_channel import ThreadedChannel
@@ -23,7 +24,23 @@ from .thread_status_publisher import (
     ParticipantAttributeThreadStatusPublisher,
     ThreadStatusPublisher,
 )
-from .chat_channel import ChatChannel
+from .chat_channel import (
+    BaseChatChannel,
+    MessagingChatChannel,
+    MsgpackWebSocketChatEncoding,
+    WebSocketChatChannel,
+    WebSocketChatEncoding,
+)
+from .chat_client import (
+    AcceptedAgentInput,
+    BaseChatClient,
+    ChatThreadSession,
+    LocalChatClient,
+    MessagingChatClient,
+    PendingAgentInput,
+    QueuedAgentInput,
+    WebSocketChatClient,
+)
 from .mail_channel import MailChannel
 from .queue_channel import QueueChannel
 from .toolkit_channel import ToolkitChannel
@@ -55,13 +72,28 @@ __all__ = [
     LLMProvider,
     ImageCaptioner,
     LLMImageCaptioner,
+    ImageDatasetClient,
+    ImageDatasetRecord,
+    ImagesDataset,
     DatasetThreadStorage,
     MeshDocumentThreadStorage,
     AgentMessageThreadStatusPublisher,
     ParticipantAttributeThreadStatusPublisher,
     ThreadStatusPublisher,
     ThreadedChannel,
-    ChatChannel,
+    BaseChatChannel,
+    MessagingChatChannel,
+    MsgpackWebSocketChatEncoding,
+    WebSocketChatChannel,
+    WebSocketChatEncoding,
+    AcceptedAgentInput,
+    BaseChatClient,
+    ChatThreadSession,
+    LocalChatClient,
+    MessagingChatClient,
+    PendingAgentInput,
+    QueuedAgentInput,
+    WebSocketChatClient,
     MailChannel,
     QueueChannel,
     ToolkitChannel,

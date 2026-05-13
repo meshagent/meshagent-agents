@@ -24,6 +24,7 @@ dependencies = [
   "meshagent-tools==0.40.2",
   "meshagent-openai==0.40.2",
   "pydantic~=2.11",
+  "msgpack~=1.1",
   "opentelemetry-distro~=0.59b0",
   "mistune~=3.1.4",
   "pathspec>=1.0.3,<2",

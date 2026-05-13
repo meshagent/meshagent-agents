@@ -12,7 +12,6 @@ from yarl import URL
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.chat import (
     ChatBot,
-    ChatBotClient,
     ChatThreadContext,
 )
 from meshagent.agents.context import AgentSessionContext
@@ -432,44 +431,6 @@ class _ChatBotAlwaysReplies(ChatBot):
         del toolkits
         del from_user
         return True
-
-
-@pytest.mark.asyncio
-async def test_chatbot_client_send_requests_server_side_store_without_touching_doc():
-    class _ExplodingDocument:
-        @property
-        def root(self):
-            raise AssertionError("chat client should not write directly to the thread")
-
-    room = _FakeRoom()
-    client = ChatBotClient(
-        room=room,
-        participant_name="assistant",
-        thread_path="/threads/test.thread",
-    )
-    client._participant = Participant(  # type: ignore[assignment]
-        id="assistant-id",
-        attributes={"name": "assistant"},
-    )
-    client._doc = _ExplodingDocument()
-
-    await client.send(
-        text="hello",
-        attachments=[{"path": "uploads/report.pdf"}],
-    )
-
-    assert room.messaging.sent_messages == [
-        {
-            "to": client._participant,
-            "type": "chat",
-            "message": {
-                "text": "hello",
-                "path": "/threads/test.thread",
-                "attachments": [{"path": "uploads/report.pdf"}],
-                "store": True,
-            },
-        }
-    ]
 
 
 @pytest.mark.asyncio

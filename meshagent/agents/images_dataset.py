@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 import pyarrow as pa
 
@@ -24,12 +25,103 @@ class SavedImage:
     annotations: dict[str, str]
 
 
-class ImagesDataset:
+@dataclass(frozen=True)
+class ImageDatasetRecord:
+    data: bytes
+    mime_type: str
+
+
+class ImageDatasetClient:
     TABLE_NAME = "images"
-    _METADATA_COLUMNS = ["id", "mime_type", "created_at", "created_by", "annotations"]
 
     def __init__(self, room: RoomClient):
         self._room = room
+
+    @staticmethod
+    def dataset_uri_reference(
+        uri: str | None,
+    ) -> tuple[str, list[str] | None, str] | None:
+        if not isinstance(uri, str):
+            return None
+        parsed = urlparse(uri.strip())
+        if parsed.scheme != "dataset":
+            return None
+        values = parse_qs(parsed.query).get("id")
+        if not values:
+            return None
+        image_id = values[0].strip()
+        if image_id == "":
+            return None
+
+        path_parts = [
+            part.strip()
+            for part in ([parsed.netloc] if parsed.netloc.strip() != "" else [])
+            + list(parsed.path.split("/"))
+            if part.strip() != ""
+        ]
+        if len(path_parts) == 0:
+            return None
+        table_name = path_parts[-1]
+        namespace = path_parts[:-1] or None
+        return table_name, namespace, image_id
+
+    async def read_record(
+        self,
+        *,
+        image_id: str,
+        table: str | None = None,
+        namespace: list[str] | None = None,
+        fallback_mime_type: str | None = None,
+    ) -> ImageDatasetRecord | None:
+        normalized_image_id = image_id.strip()
+        if normalized_image_id == "":
+            return None
+        rows = await self._room.datasets.search(
+            table=table or self.TABLE_NAME,
+            namespace=namespace,
+            where={"id": normalized_image_id},
+            limit=1,
+            select=["data", "mime_type"],
+        )
+        values = rows.to_pylist()
+        if len(values) == 0:
+            return None
+
+        row = values[0]
+        data = row.get("data")
+        if isinstance(data, bytearray):
+            data = bytes(data)
+        if not isinstance(data, bytes):
+            return None
+
+        mime_type = row.get("mime_type")
+        if not isinstance(mime_type, str) or mime_type.strip() == "":
+            mime_type = fallback_mime_type or "image/png"
+        return ImageDatasetRecord(data=data, mime_type=mime_type.strip())
+
+    async def read_record_from_uri(
+        self,
+        uri: str | None,
+        *,
+        fallback_mime_type: str | None = None,
+    ) -> ImageDatasetRecord | None:
+        reference = self.dataset_uri_reference(uri)
+        if reference is None:
+            return None
+        table, namespace, image_id = reference
+        return await self.read_record(
+            image_id=image_id,
+            table=table,
+            namespace=namespace,
+            fallback_mime_type=fallback_mime_type,
+        )
+
+
+class ImagesDataset(ImageDatasetClient):
+    _METADATA_COLUMNS = ["id", "mime_type", "created_at", "created_by", "annotations"]
+
+    def __init__(self, room: RoomClient):
+        super().__init__(room)
         self._ready = False
         self._lock = asyncio.Lock()
 

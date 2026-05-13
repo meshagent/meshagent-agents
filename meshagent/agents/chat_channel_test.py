@@ -3,9 +3,16 @@ import uuid
 from unittest import mock
 
 import pytest
+from aiohttp import WSMessage, WSMsgType
+from aiohttp.test_utils import make_mocked_request
 
 from meshagent.agents.adapter import LLMAdapter
-from meshagent.agents.chat_channel import ChatChannel
+from meshagent.agents import chat_channel as chat_channel_module
+from meshagent.agents.chat_channel import (
+    MessagingChatChannel,
+    MsgpackWebSocketChatEncoding,
+    WebSocketChatChannel,
+)
 import meshagent.agents.thread_storage as thread_storage_module
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
@@ -365,7 +372,7 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -457,7 +464,7 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -531,7 +538,7 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
     caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
     sync = _FakeSync()
     room = _FakeRoom(participants=[caller], messaging_enabled=True, sync=sync)
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -632,7 +639,7 @@ async def test_chat_channel_start_thread_message_allows_realtime_audio_thread() 
 async def test_chat_channel_start_thread_message_returns_realtime_connection() -> None:
     caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -683,7 +690,7 @@ async def test_chat_channel_start_thread_rejection_does_not_create_thread() -> N
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     sync = _FakeSync()
     room = _FakeRoom(participants=[caller], messaging_enabled=True, sync=sync)
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -740,7 +747,7 @@ async def test_chat_channel_start_thread_message_responds_when_storage_exists_st
         messaging_enabled=True,
         storage=storage,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="agents/assistant/threads",
@@ -797,7 +804,7 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
         sync=sync,
         storage=storage,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/agents/dataset/threads",
@@ -853,7 +860,7 @@ async def test_chat_channel_dataset_non_threading_publishes_thread_path() -> Non
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode=None,
         thread_dir="/agents/dataset/threads",
@@ -891,7 +898,7 @@ async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
         sync=sync,
         storage=storage,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/agents/tmp/threads",
@@ -947,7 +954,7 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -999,7 +1006,7 @@ async def test_chat_channel_new_thread_rejects_empty_message_without_attachments
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -1037,7 +1044,7 @@ async def test_chat_channel_attach_file_emits_file_content_events() -> None:
         messaging_enabled=True,
         storage=_FakeStorage(existing_paths={"docs/report.pdf"}),
     )
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1102,7 +1109,7 @@ async def test_chat_channel_attach_file_publishes_file_content_to_open_participa
         messaging_enabled=True,
         storage=_FakeStorage(existing_paths={"docs/report.pdf"}),
     )
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1158,7 +1165,7 @@ async def test_chat_channel_attach_file_publishes_file_content_to_open_participa
 async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1196,7 +1203,7 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
 ):
     sync = _FakeSync()
     room = _FakeRoom(messaging_enabled=True, sync=sync)
-    channel = ChatChannel(room=room, threading_mode="default-new")
+    channel = MessagingChatChannel(room=room, threading_mode="default-new")
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1231,7 +1238,7 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
 async def test_chat_channel_ignores_legacy_chat_messages() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller])
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1263,7 +1270,7 @@ async def test_agent_chat_channel_translates_capabilities_request_agent_message(
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1301,7 +1308,7 @@ async def test_agent_chat_channel_passes_model_messages_through() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
     room = _FakeRoom(participants=[caller, viewer], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1392,7 +1399,7 @@ async def test_agent_chat_channel_does_not_bump_thread_index_on_capabilities_req
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -1438,7 +1445,7 @@ async def test_agent_chat_channel_bumps_thread_index_on_turn_start() -> None:
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -1471,7 +1478,7 @@ async def test_agent_chat_channel_bumps_thread_index_on_turn_start() -> None:
 async def test_chat_channel_translates_agent_steer_cancel_and_approval() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1580,7 +1587,7 @@ async def test_chat_channel_translates_agent_steer_cancel_and_approval() -> None
 async def test_chat_channel_sends_agent_text_events_to_open_participants() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1683,7 +1690,7 @@ async def test_chat_channel_sends_agent_text_events_to_open_participants() -> No
 async def test_chat_channel_sends_usage_updates_to_open_participants() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1755,7 +1762,7 @@ async def test_chat_channel_forwards_realtime_speech_and_interruption_events_to_
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1815,7 +1822,7 @@ async def test_chat_channel_forwards_realtime_speech_and_interruption_events_to_
 async def test_chat_channel_sends_audio_generation_delta_as_attachment() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1862,7 +1869,7 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -1997,7 +2004,7 @@ async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubsc
 async def test_chat_channel_agent_open_replays_coalesced_tool_argument_delta() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2084,7 +2091,7 @@ async def test_chat_channel_agent_open_replays_status_total_bytes_with_coalesced
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2160,7 +2167,7 @@ async def test_chat_channel_agent_open_replays_status_total_bytes_with_coalesced
 async def test_chat_channel_agent_open_replays_current_thread_status() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2265,7 +2272,7 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
     viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
     late_viewer = _FakeParticipant(name="late", participant_id="late-id")
     room = _FakeRoom(participants=[sender, viewer, late_viewer], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2361,7 +2368,7 @@ async def test_chat_channel_agent_open_replays_pending_turn_start_as_accepted() 
     sender = _FakeParticipant(name="sender", participant_id="sender-id")
     viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
     room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2419,7 +2426,7 @@ async def test_chat_channel_agent_open_replays_pending_turn_steer_as_accepted() 
     sender = _FakeParticipant(name="sender", participant_id="sender-id")
     viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
     room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2482,7 +2489,7 @@ async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_pa
     sender = _FakeParticipant(name="sender", participant_id="sender-id")
     viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
     room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2553,7 +2560,7 @@ async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_pa
 async def test_chat_channel_sends_agent_file_events_to_open_participants() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2620,7 +2627,7 @@ async def test_chat_channel_sends_agent_file_events_to_open_participants() -> No
 async def test_chat_channel_translates_agent_clear_messages() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2652,7 +2659,7 @@ async def test_chat_channel_translates_agent_clear_messages() -> None:
 async def test_chat_channel_notifies_open_participants_when_thread_is_cleared() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     room = _FakeRoom(participants=[caller], messaging_enabled=True)
-    channel = ChatChannel(room=room)
+    channel = MessagingChatChannel(room=room)
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
@@ -2739,7 +2746,7 @@ async def test_chat_channel_sets_threading_attributes_and_tracks_thread_list() -
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -2796,7 +2803,7 @@ async def test_chat_channel_does_not_bump_thread_index_on_open() -> None:
         messaging_enabled=True,
         sync=sync,
     )
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -2832,7 +2839,7 @@ def test_chat_channel_bump_thread_forces_modified_at_forward_when_clock_does_not
         },
     )
     room = _FakeRoom(sync=sync)
-    channel = ChatChannel(
+    channel = MessagingChatChannel(
         room=room,
         threading_mode="default-new",
         thread_dir="/threads/chat",
@@ -2847,3 +2854,125 @@ def test_chat_channel_bump_thread_forces_modified_at_forward_when_clock_does_not
     assert channel._parse_iso_datetime(
         value=updated_modified_at
     ) > channel._parse_iso_datetime(value=existing_modified_at)
+
+
+@pytest.mark.asyncio
+async def test_websocket_chat_channel_default_authorization_uses_headers() -> None:
+    room = _FakeRoom()
+    channel = WebSocketChatChannel(room=room)
+    request = make_mocked_request(
+        "GET",
+        "/agent",
+        headers={
+            "X-Meshagent-Participant-Id": "caller-id",
+            "X-Meshagent-Participant-Name": "Caller",
+        },
+    )
+
+    result = await channel._authorize_request(request)
+
+    assert isinstance(result, Participant)
+    assert result.id == "caller-id"
+    assert result.get_attribute("name") == "Caller"
+
+
+def test_msgpack_websocket_chat_encoding_round_trips_agent_message() -> None:
+    encoding = MsgpackWebSocketChatEncoding()
+    message = TurnStart(
+        type=AGENT_MESSAGE_TURN_START,
+        thread_id="thread-1",
+        content=[AgentTextContent(type="text", text="hello")],
+    )
+
+    encoded = encoding.encode(message)
+    decoded = encoding.decode(WSMessage(WSMsgType.BINARY, encoded, None))
+
+    assert isinstance(decoded, TurnStart)
+    assert decoded.thread_id == "thread-1"
+    assert decoded.content == message.content
+
+
+class _RecordingWebSocketEncoding:
+    def __init__(self) -> None:
+        self.encoded_messages: list[AgentThreadStatus] = []
+
+    def encode(self, message):
+        self.encoded_messages.append(message)
+        return b"encoded"
+
+    def decode(self, message):
+        del message
+        raise NotImplementedError
+
+
+class _FakeWebSocket:
+    def __init__(self) -> None:
+        self.closed = False
+        self.sent_bytes: list[bytes] = []
+        self.sent_strings: list[str] = []
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.sent_bytes.append(data)
+
+    async def send_str(self, data: str) -> None:
+        self.sent_strings.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_websocket_chat_channel_uses_swappable_encoding_for_outbound_messages() -> (
+    None
+):
+    encoding = _RecordingWebSocketEncoding()
+    caller = _FakeParticipant(name="Caller", participant_id="caller-id")
+    websocket = _FakeWebSocket()
+    channel = WebSocketChatChannel(room=_FakeRoom(), encoding=encoding)
+    channel._register_connection(
+        connection=chat_channel_module._WebSocketChatConnection(
+            participant=caller,
+            websocket=websocket,
+        )
+    )
+
+    channel.send_agent_message_to_participant(
+        participant=caller,
+        payload=AgentThreadStatus(
+            type=AGENT_EVENT_THREAD_STATUS,
+            thread_id="thread-1",
+            status="Thinking",
+        ),
+    )
+    await asyncio.sleep(0)
+
+    assert websocket.sent_bytes == [b"encoded"]
+    assert len(encoding.encoded_messages) == 1
+    assert encoding.encoded_messages[0].thread_id == "thread-1"
+
+
+@pytest.mark.asyncio
+async def test_websocket_chat_channel_routes_decoded_agent_message_with_participant() -> (
+    None
+):
+    caller = _FakeParticipant(name="Caller", participant_id="caller-id")
+    room = _FakeRoom()
+    channel = WebSocketChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        channel._handle_websocket_agent_message(
+            sender=caller,
+            agent_message=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[AgentTextContent(type="text", text="hello")],
+            ),
+        )
+    finally:
+        await channel.stop(supervisor)
+
+    assert len(supervisor.sent) == 1
+    assert supervisor.sent[0].sender is caller
+    assert isinstance(supervisor.sent[0].data, TurnStart)

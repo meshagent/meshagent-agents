@@ -49,7 +49,7 @@ from meshagent.tools.storage import (
     StorageToolkit,
 )
 
-from .chat_channel import ChatChannel
+from .chat_channel import MessagingChatChannel
 from .config import RulesConfig
 from .mail_channel import MailChannel
 from .process import AgentSupervisor, ContentScheme, LLMAgentProcess, Message
@@ -2132,13 +2132,13 @@ class MeshagentPackage(PythonPackage):
             ):
                 process_llm_adapter.set_images_dataset(ImagesDataset(room=room_client))
             channels: list[
-                ChatChannel | MailChannel | QueueChannel | ToolkitChannel
+                MessagingChatChannel | MailChannel | QueueChannel | ToolkitChannel
             ] = []
             for channel_spec in self._process_channels():
                 lowered = channel_spec.casefold()
                 if lowered == "chat":
                     channels.append(
-                        ChatChannel(
+                        MessagingChatChannel(
                             room=room_client,
                             llm_adapter=channel_llm_adapter,
                         )

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, TypeVar
+from typing import Any, Awaitable, Callable, Protocol, TypeVar
 from urllib.parse import urlparse
 
+import aiohttp
+import msgpack
+from aiohttp import web
 from meshagent.api import Element, Participant, RoomClient, RoomException, RoomMessage
 from meshagent.api.messaging import JsonContent
 from pydantic import BaseModel, ValidationError
@@ -71,6 +77,35 @@ from .threaded_channel import ThreadedChannel
 
 logger = logging.getLogger("chat-channel")
 _MessageT = TypeVar("_MessageT", bound=AgentMessage)
+WebSocketAuthorizeHook = Callable[
+    [web.Request],
+    Awaitable[Participant | web.StreamResponse | None]
+    | Participant
+    | web.StreamResponse
+    | None,
+]
+
+
+class WebSocketChatEncoding(Protocol):
+    def encode(self, message: AgentMessage) -> str | bytes: ...
+
+    def decode(self, message: aiohttp.WSMessage) -> AgentMessage: ...
+
+
+class MsgpackWebSocketChatEncoding:
+    def encode(self, message: AgentMessage) -> bytes:
+        return msgpack.packb(
+            message.model_dump(mode="python", exclude_none=True),
+            use_bin_type=True,
+        )
+
+    def decode(self, message: aiohttp.WSMessage) -> AgentMessage:
+        if message.type != aiohttp.WSMsgType.BINARY:
+            raise ValueError("msgpack websocket encoding requires binary messages")
+        payload = msgpack.unpackb(message.data, raw=False)
+        if not isinstance(payload, dict):
+            raise ValueError("msgpack websocket message must decode to an object")
+        return parse_agent_message(payload)
 
 
 class _ChatAttachmentPayload(BaseModel):
@@ -94,7 +129,7 @@ _THREAD_CONTROL_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
 }
 
 
-class ChatChannel(ThreadedChannel):
+class BaseChatChannel(ThreadedChannel):
     _THREAD_INDEX_BUMP_AGENT_MESSAGE_TYPES = {
         AGENT_MESSAGE_TURN_START,
         AGENT_MESSAGE_TURN_STEER,
@@ -149,7 +184,6 @@ class ChatChannel(ThreadedChannel):
         return message_type.startswith("meshagent.agent.")
 
     async def on_start(self) -> None:
-        self._room.messaging.on("message", self._on_room_message)
         await self.publish_thread_attributes()
         await self._room.local_participant.set_attribute(
             "empty_state_title",
@@ -159,14 +193,11 @@ class ChatChannel(ThreadedChannel):
             "supports_agent_messages", True
         )
         await self.open_thread_list_document()
-        if not self._room.messaging.is_enabled:
-            await self._room.messaging.enable()
 
     async def on_stop(self) -> None:
         await self._room.local_participant.set_attribute(
             "supports_agent_messages", None
         )
-        self._room.messaging.off("message", self._on_room_message)
         await self._cancel_thread_list_background_tasks()
         await self.close_thread_list_document()
         self._active_turn_ids_by_thread.clear()
@@ -287,19 +318,10 @@ class ChatChannel(ThreadedChannel):
         payload: dict[str, Any],
         attachment: bytes | None = None,
     ) -> None:
-        try:
-            self.room.messaging.send_message_nowait(
-                to=participant,
-                type="agent-message",
-                message=payload,
-                attachment=attachment,
-            )
-        except Exception:
-            logger.debug(
-                "failed to send agent message to participant %s",
-                participant.id,
-                exc_info=True,
-            )
+        del participant
+        del payload
+        del attachment
+        raise NotImplementedError
 
     def send_agent_message_to_participant(
         self,
@@ -445,46 +467,9 @@ class ChatChannel(ThreadedChannel):
                 (tool_call_ended.thread_id, tool_call_ended.item_id), None
             )
 
-    def _on_room_message(self, *, message: RoomMessage) -> None:
-        sender = self._room.messaging.get_participant(message.from_participant_id)
-        if sender is None:
-            logger.warning(
-                "ignoring chat message from unknown participant %s",
-                message.from_participant_id,
-            )
-            return
-
-        if message.type == "typing":
-            return
-
-        thread_id = self._thread_id_from_room_message(message=message)
-        if thread_id is not None:
-            if self._should_touch_thread_index_for_room_message(message=message):
-                self.bump_thread(path=thread_id)
-
-        if message.type != "agent-message":
-            if thread_id is not None and message.type == "opened":
-                self._register_open_participant(
-                    thread_id=thread_id,
-                    participant_id=sender.id,
-                )
-            logger.debug(
-                "ignoring unsupported chat room message of type %s",
-                message.type,
-            )
-            return
-
-        try:
-            if self._handle_agent_control_message(message=message, sender=sender):
-                return
-            agent_message = self._agent_message_from_room_message(message=message)
-        except (ValidationError, ValueError):
-            logger.exception(
-                "unable to translate chat room message of type %s",
-                message.type,
-            )
-            return
-
+    def _on_agent_message(
+        self, *, agent_message: AgentMessage, sender: Participant
+    ) -> None:
         self._track_inbound_agent_message(message=agent_message, sender=sender)
         self._broadcast_inbound_turn_input(message=agent_message, sender=sender)
         if (
@@ -563,17 +548,13 @@ class ChatChannel(ThreadedChannel):
                 continue
             self._send_agent_payload_nowait(participant=participant, payload=payload)
 
-    def _handle_agent_control_message(
+    def _handle_agent_control_payload(
         self,
         *,
-        message: RoomMessage,
+        payload: dict[str, Any],
         sender: Participant,
     ) -> bool:
-        raw_payload = self._payload_from_agent_room_message(message=message)
-        if raw_payload is None:
-            return False
-
-        payload = self._normalize_agent_message_payload(payload=raw_payload)
+        payload = self._normalize_agent_message_payload(payload=payload)
         message_type = payload.get("type")
         if not isinstance(message_type, str):
             return False
@@ -1455,6 +1436,99 @@ class ChatChannel(ThreadedChannel):
             self._open_participant_ids_by_thread.pop(thread_id, None)
 
     def _open_participants(self, *, thread_id: str) -> list[Participant]:
+        del thread_id
+        raise NotImplementedError
+
+    def _clear_tracked_thread_state(self, *, thread_id: str) -> None:
+        self._active_turn_ids_by_thread.pop(thread_id, None)
+        self._turn_input_payloads_by_message_id = {
+            message_id: payload
+            for message_id, payload in self._turn_input_payloads_by_message_id.items()
+            if payload.get("thread_id") != thread_id
+        }
+
+
+class MessagingChatChannel(BaseChatChannel):
+    async def on_start(self) -> None:
+        await super().on_start()
+        self._room.messaging.on("message", self._on_room_message)
+        if not self._room.messaging.is_enabled:
+            await self._room.messaging.enable()
+
+    async def on_stop(self) -> None:
+        self._room.messaging.off("message", self._on_room_message)
+        await super().on_stop()
+
+    def _send_agent_payload_nowait(
+        self,
+        *,
+        participant: Participant,
+        payload: dict[str, Any],
+        attachment: bytes | None = None,
+    ) -> None:
+        try:
+            self.room.messaging.send_message_nowait(
+                to=participant,
+                type="agent-message",
+                message=payload,
+                attachment=attachment,
+            )
+        except Exception:
+            logger.debug(
+                "failed to send agent message to participant %s",
+                participant.id,
+                exc_info=True,
+            )
+
+    def _on_room_message(self, *, message: RoomMessage) -> None:
+        sender = self._room.messaging.get_participant(message.from_participant_id)
+        if sender is None:
+            logger.warning(
+                "ignoring chat message from unknown participant %s",
+                message.from_participant_id,
+            )
+            return
+
+        if message.type == "typing":
+            return
+
+        thread_id = self._thread_id_from_room_message(message=message)
+        if thread_id is not None:
+            if self._should_touch_thread_index_for_room_message(message=message):
+                self.bump_thread(path=thread_id)
+
+        if message.type != "agent-message":
+            if thread_id is not None and message.type == "opened":
+                self._register_open_participant(
+                    thread_id=thread_id,
+                    participant_id=sender.id,
+                )
+            logger.debug(
+                "ignoring unsupported chat room message of type %s",
+                message.type,
+            )
+            return
+
+        try:
+            raw_payload = self._payload_from_agent_room_message(message=message)
+            if raw_payload is None:
+                raise ValueError("agent-message payload must be a JSON object")
+            if self._handle_agent_control_payload(
+                payload=raw_payload,
+                sender=sender,
+            ):
+                return
+            agent_message = self._agent_message_from_room_message(message=message)
+        except (ValidationError, ValueError):
+            logger.exception(
+                "unable to translate chat room message of type %s",
+                message.type,
+            )
+            return
+
+        self._on_agent_message(agent_message=agent_message, sender=sender)
+
+    def _open_participants(self, *, thread_id: str) -> list[Participant]:
         participant_ids = self._open_participant_ids_by_thread.get(thread_id)
         if participant_ids is None:
             return []
@@ -1476,10 +1550,253 @@ class ChatChannel(ThreadedChannel):
 
         return online_participants
 
-    def _clear_tracked_thread_state(self, *, thread_id: str) -> None:
-        self._active_turn_ids_by_thread.pop(thread_id, None)
-        self._turn_input_payloads_by_message_id = {
-            message_id: payload
-            for message_id, payload in self._turn_input_payloads_by_message_id.items()
-            if payload.get("thread_id") != thread_id
-        }
+
+@dataclass(slots=True)
+class _WebSocketChatConnection:
+    participant: Participant
+    websocket: web.WebSocketResponse
+
+
+class WebSocketChatChannel(BaseChatChannel):
+    def __init__(
+        self,
+        *,
+        room: RoomClient,
+        authorize: WebSocketAuthorizeHook | None = None,
+        encoding: WebSocketChatEncoding | None = None,
+        heartbeat: float | None = 30.0,
+        receive_timeout: float | None = None,
+        compress: bool | int = True,
+        threading_mode: str | None = None,
+        thread_dir: str | None = None,
+        thread_url_scheme: str | None = None,
+        thread_path_extension: str = ".thread",
+        llm_adapter: LLMAdapter | None = None,
+        empty_state_title: str = "How can I help you?",
+    ) -> None:
+        super().__init__(
+            room=room,
+            threading_mode=threading_mode,
+            thread_dir=thread_dir,
+            thread_url_scheme=thread_url_scheme,
+            thread_path_extension=thread_path_extension,
+            llm_adapter=llm_adapter,
+            empty_state_title=empty_state_title,
+        )
+        self._authorize = authorize
+        self._encoding = encoding or MsgpackWebSocketChatEncoding()
+        self._heartbeat = heartbeat
+        self._receive_timeout = receive_timeout
+        self._compress = compress
+        self._connections_by_participant_id: dict[
+            str, list[_WebSocketChatConnection]
+        ] = {}
+        self._participants_by_id: dict[str, Participant] = {}
+        self._send_tasks: set[asyncio.Task[None]] = set()
+
+    async def on_stop(self) -> None:
+        connections = [
+            connection
+            for connections in self._connections_by_participant_id.values()
+            for connection in connections
+        ]
+        for connection in connections:
+            await connection.websocket.close()
+        if len(self._send_tasks) > 0:
+            await asyncio.gather(*self._send_tasks, return_exceptions=True)
+        self._connections_by_participant_id.clear()
+        self._participants_by_id.clear()
+        await super().on_stop()
+
+    @staticmethod
+    def _participant_from_request_headers(request: web.Request) -> Participant | None:
+        participant_id = request.headers.get("X-Meshagent-Participant-Id")
+        participant_name = request.headers.get("X-Meshagent-Participant-Name")
+        if participant_id is None or participant_id.strip() == "":
+            participant_id = participant_name
+        if participant_id is None or participant_id.strip() == "":
+            return None
+
+        attributes: dict[str, Any] = {}
+        if participant_name is not None and participant_name.strip() != "":
+            attributes["name"] = participant_name.strip()
+        return Participant(id=participant_id.strip(), attributes=attributes)
+
+    async def _authorize_request(
+        self,
+        request: web.Request,
+    ) -> Participant | web.StreamResponse | None:
+        if self._authorize is None:
+            return self._participant_from_request_headers(request)
+
+        result = self._authorize(request)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def websocket_handler(self, request: web.Request) -> web.StreamResponse:
+        auth_result = await self._authorize_request(request)
+        if auth_result is None:
+            raise web.HTTPUnauthorized(text="websocket participant is not authorized")
+        if isinstance(auth_result, web.StreamResponse):
+            return auth_result
+
+        websocket = web.WebSocketResponse(
+            heartbeat=self._heartbeat,
+            receive_timeout=self._receive_timeout,
+            compress=self._compress,
+        )
+        await websocket.prepare(request)
+
+        connection = _WebSocketChatConnection(
+            participant=auth_result,
+            websocket=websocket,
+        )
+        self._register_connection(connection=connection)
+        try:
+            async for message in websocket:
+                if message.type in {
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                }:
+                    break
+                if message.type == aiohttp.WSMsgType.ERROR:
+                    logger.debug(
+                        "websocket chat connection failed for participant %s",
+                        auth_result.id,
+                        exc_info=websocket.exception(),
+                    )
+                    break
+                try:
+                    agent_message = self._encoding.decode(message)
+                    self._handle_websocket_agent_message(
+                        agent_message=agent_message,
+                        sender=auth_result,
+                    )
+                except (ValidationError, ValueError):
+                    logger.exception(
+                        "unable to translate websocket message from participant %s",
+                        auth_result.id,
+                    )
+                    await websocket.close(
+                        code=aiohttp.WSCloseCode.UNSUPPORTED_DATA,
+                        message=b"invalid agent message",
+                    )
+                    break
+        finally:
+            self._unregister_connection(connection=connection)
+
+        return websocket
+
+    def _handle_websocket_agent_message(
+        self,
+        *,
+        agent_message: AgentMessage,
+        sender: Participant,
+    ) -> None:
+        if isinstance(agent_message, AgentThreadMessage):
+            if agent_message.type in self._THREAD_INDEX_BUMP_AGENT_MESSAGE_TYPES:
+                self.bump_thread(path=agent_message.thread_id)
+
+        payload = agent_message.model_dump(mode="python", exclude_none=True)
+        if self._handle_agent_control_payload(payload=payload, sender=sender):
+            return
+        self._on_agent_message(agent_message=agent_message, sender=sender)
+
+    def _register_connection(self, *, connection: _WebSocketChatConnection) -> None:
+        self._participants_by_id[connection.participant.id] = connection.participant
+        connections = self._connections_by_participant_id.setdefault(
+            connection.participant.id,
+            [],
+        )
+        connections.append(connection)
+
+    def _unregister_connection(self, *, connection: _WebSocketChatConnection) -> None:
+        connections = self._connections_by_participant_id.get(connection.participant.id)
+        if connections is None:
+            return
+        with contextlib.suppress(ValueError):
+            connections.remove(connection)
+        if len(connections) == 0:
+            self._connections_by_participant_id.pop(connection.participant.id, None)
+            self._participants_by_id.pop(connection.participant.id, None)
+
+    def _send_agent_payload_nowait(
+        self,
+        *,
+        participant: Participant,
+        payload: dict[str, Any],
+        attachment: bytes | None = None,
+    ) -> None:
+        if attachment is not None:
+            payload = {**payload, "data": attachment}
+        try:
+            agent_message = parse_agent_message(payload)
+        except (ValidationError, ValueError):
+            logger.debug(
+                "failed to encode agent message for websocket participant %s",
+                participant.id,
+                exc_info=True,
+            )
+            return
+
+        task = asyncio.create_task(
+            self._send_agent_message_to_websockets(
+                participant_id=participant.id,
+                message=agent_message,
+            )
+        )
+        self._send_tasks.add(task)
+        task.add_done_callback(self._send_tasks.discard)
+
+    async def _send_agent_message_to_websockets(
+        self,
+        *,
+        participant_id: str,
+        message: AgentMessage,
+    ) -> None:
+        connections = [
+            *self._connections_by_participant_id.get(participant_id, []),
+        ]
+        if len(connections) == 0:
+            return
+
+        encoded = self._encoding.encode(message)
+        for connection in connections:
+            if connection.websocket.closed:
+                continue
+            try:
+                if isinstance(encoded, bytes):
+                    await connection.websocket.send_bytes(encoded)
+                else:
+                    await connection.websocket.send_str(encoded)
+            except Exception:
+                logger.debug(
+                    "failed to send websocket agent message to participant %s",
+                    participant_id,
+                    exc_info=True,
+                )
+
+    def _open_participants(self, *, thread_id: str) -> list[Participant]:
+        participant_ids = self._open_participant_ids_by_thread.get(thread_id)
+        if participant_ids is None:
+            return []
+
+        participants: list[Participant] = []
+        stale_participant_ids: list[str] = []
+        for participant_id in participant_ids:
+            if participant_id not in self._connections_by_participant_id:
+                stale_participant_ids.append(participant_id)
+                continue
+            participant = self._participants_by_id.get(participant_id)
+            if participant is not None:
+                participants.append(participant)
+
+        for participant_id in stale_participant_ids:
+            participant_ids.discard(participant_id)
+
+        if len(participant_ids) == 0:
+            self._open_participant_ids_by_thread.pop(thread_id, None)
+
+        return participants

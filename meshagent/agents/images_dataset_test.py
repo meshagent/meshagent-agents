@@ -4,7 +4,7 @@ import pyarrow as pa
 import pytest
 
 from meshagent.api import RoomClient
-from meshagent.agents.images_dataset import ImagesDataset
+from meshagent.agents.images_dataset import ImageDatasetClient, ImagesDataset
 
 
 def test_images_dataset_marks_data_column_as_image_content() -> None:
@@ -25,6 +25,8 @@ class _FakeDatasets:
         self.create_calls = 0
         self.added_columns: dict[str, pa.Field] | None = None
         self.index_calls = 0
+        self.search_calls: list[dict] = []
+        self.search_rows: list[dict] = []
 
     async def inspect(self, *, table: str) -> pa.Schema:
         assert table == "images"
@@ -58,6 +60,26 @@ class _FakeDatasets:
         assert table == "images"
         self.index_calls += 1
 
+    async def search(
+        self,
+        *,
+        table: str,
+        namespace=None,
+        where=None,
+        limit=None,
+        select=None,
+    ) -> pa.Table:
+        self.search_calls.append(
+            {
+                "table": table,
+                "namespace": namespace,
+                "where": where,
+                "limit": limit,
+                "select": select,
+            }
+        )
+        return pa.Table.from_pylist(self.search_rows)
+
 
 class _FakeRoom:
     def __init__(self) -> None:
@@ -78,3 +100,40 @@ async def test_images_dataset_uses_existing_table_with_different_schema() -> Non
     assert "created_by" in room.datasets.added_columns
     assert "annotations" in room.datasets.added_columns
     assert room.datasets.index_calls == 1
+
+
+def test_image_dataset_client_parses_dataset_image_uri() -> None:
+    assert ImageDatasetClient.dataset_uri_reference("dataset://images?id=image-1") == (
+        "images",
+        None,
+        "image-1",
+    )
+    assert ImageDatasetClient.dataset_uri_reference(
+        "dataset://agents/demo/images?id=image-2"
+    ) == ("images", ["agents", "demo"], "image-2")
+
+
+@pytest.mark.asyncio
+async def test_image_dataset_client_reads_dataset_uri_record() -> None:
+    room = _FakeRoom()
+    room.datasets.search_rows = [
+        {"id": "image-1", "data": bytearray(b"image-bytes"), "mime_type": "image/png"}
+    ]
+    client = ImageDatasetClient(room=cast(RoomClient, room))
+
+    record = await client.read_record_from_uri(
+        "dataset://agents/demo/images?id=image-1"
+    )
+
+    assert record is not None
+    assert record.data == b"image-bytes"
+    assert record.mime_type == "image/png"
+    assert room.datasets.search_calls == [
+        {
+            "table": "images",
+            "namespace": ["agents", "demo"],
+            "where": {"id": "image-1"},
+            "limit": 1,
+            "select": ["data", "mime_type"],
+        }
+    ]

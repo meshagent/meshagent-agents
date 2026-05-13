@@ -524,7 +524,7 @@ class AgentToolCallApprovalRequested(AgentLLMMessage):
 
 class AgentThreadStatus(AgentThreadMessage):
     type: Literal[AGENT_EVENT_THREAD_STATUS]
-    status: str | None
+    status: str | None = None
     mode: Literal["busy", "steerable"] | None = None
     started_at: str | None = None
     turn_id: str | None = None
