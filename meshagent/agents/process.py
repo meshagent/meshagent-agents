@@ -18,9 +18,7 @@ from typing import (
     Callable,
     Literal,
     Optional,
-    Protocol,
     TypeVar,
-    runtime_checkable,
 )
 from urllib.parse import urlparse
 
@@ -93,7 +91,6 @@ from .messages import (
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
-    AgentThreadMessage,
     AgentModelChanged,
     AgentModelInfo,
     AgentAudioTranscriptionCompleted,
@@ -179,39 +176,6 @@ TurnToolkitsBuilder = Callable[
     Awaitable[list[Toolkit]],
 ]
 ContentDownload = Callable[[str], Awaitable[FileContent]]
-
-
-@runtime_checkable
-class ThreadStorageLifecycle(Protocol):
-    async def start(self) -> None: ...
-
-    async def stop(self) -> None: ...
-
-
-@runtime_checkable
-class AsyncReadyThreadStorage(Protocol):
-    async def wait_until_ready(self) -> None: ...
-
-
-@runtime_checkable
-class OpenStateThreadStorage(Protocol):
-    @property
-    def is_open(self) -> bool: ...
-
-
-@runtime_checkable
-class UnflushedAgentMessageThreadStorage(Protocol):
-    def unflushed_agent_messages(self) -> list[AgentThreadMessage]: ...
-
-
-@runtime_checkable
-class AgentEventBufferingChannel(Protocol):
-    def buffer_agent_event(self, *, message: Message) -> None: ...
-
-
-@runtime_checkable
-class AgentMessageThreadStorage(Protocol):
-    def agent_messages(self) -> list[AgentThreadMessage]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1132,13 +1096,11 @@ class AgentSupervisor:
 
         for process in processes:
             thread_storage = process.thread_storage
-            if not isinstance(thread_storage, UnflushedAgentMessageThreadStorage):
+            if thread_storage is None:
                 continue
             for agent_message in thread_storage.unflushed_agent_messages():
                 message = Message(data=agent_message, source=process)
-                for channel in self.channels:
-                    if isinstance(channel, AgentEventBufferingChannel):
-                        channel.buffer_agent_event(message=message)
+                self._send_to_channels(message)
 
     def _thread_process_creation_rejection(self, *, error: Exception) -> AgentError:
         return AgentError(
@@ -1743,7 +1705,7 @@ class AgentProcess:
             try:
                 self._supervisor = supervisor
                 thread_storage = self._thread_storage
-                if isinstance(thread_storage, ThreadStorageLifecycle):
+                if thread_storage is not None:
                     await thread_storage.start()
                 await self.on_start()
                 self._run_task = asyncio.create_task(self.run())
@@ -1751,7 +1713,7 @@ class AgentProcess:
             except Exception:
                 self._state = "failed"
                 thread_storage = self._thread_storage
-                if isinstance(thread_storage, ThreadStorageLifecycle):
+                if thread_storage is not None:
                     with contextlib.suppress(Exception):
                         await thread_storage.stop()
                 self._supervisor = None
@@ -1782,7 +1744,7 @@ class AgentProcess:
                     await self._run_task
                 await self.on_stop()
                 thread_storage = self._thread_storage
-                if isinstance(thread_storage, ThreadStorageLifecycle):
+                if thread_storage is not None:
                     await thread_storage.stop()
             except Exception:
                 logger.exception("agent process failed during stop")
@@ -2158,8 +2120,6 @@ class LLMAgentProcess(AgentProcess):
     def _restore_current_model_from_thread_storage(self) -> bool:
         thread_storage = self.thread_storage
         if thread_storage is None:
-            return False
-        if not isinstance(thread_storage, AgentMessageThreadStorage):
             return False
 
         restored_provider: LLMProvider | None = None
@@ -4107,13 +4067,7 @@ class LLMAgentProcess(AgentProcess):
     async def on_thread_open(self, message: Message) -> None:
         request = _coerce_message_data(message.data, OpenThread)
         thread_storage = self.thread_storage
-        if (
-            isinstance(thread_storage, ThreadStorageLifecycle)
-            and isinstance(thread_storage, OpenStateThreadStorage)
-            and not thread_storage.is_open
-        ):
-            await thread_storage.start()
-        if isinstance(thread_storage, AsyncReadyThreadStorage):
+        if thread_storage is not None:
             await thread_storage.wait_until_ready()
         self._restore_current_model_from_thread_storage()
         super().emit(
@@ -4159,9 +4113,6 @@ class LLMAgentProcess(AgentProcess):
             await self.llm_adapter.stop_session(context=self._session_context)
             await self._session_context.close()
             self._session_context = None
-        thread_storage = self.thread_storage
-        if isinstance(thread_storage, ThreadStorageLifecycle):
-            await thread_storage.stop()
 
     async def on_turn_start(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnStart)

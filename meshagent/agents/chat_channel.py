@@ -210,14 +210,6 @@ class BaseChatChannel(ThreadedChannel):
     async def on_message(self, message: Message) -> None:
         self._publish_agent_event_to_open_participants(message=message)
 
-    def buffer_agent_event(self, *, message: Message) -> None:
-        self._track_agent_event(message=message)
-        payload = self._outbound_agent_message_payload(message=message)
-        if self._should_buffer_agent_event(payload=payload):
-            if self._has_buffered_agent_event(payload=payload):
-                return
-            self._buffer_agent_event(payload=payload)
-
     def _publish_agent_event_to_open_participants(self, *, message: Message) -> None:
         self._track_agent_event(message=message)
         payload = self._outbound_agent_message_payload(message=message)

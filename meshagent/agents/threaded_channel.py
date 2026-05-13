@@ -15,7 +15,12 @@ from meshagent.api import Element, MeshDocument, Participant, RoomClient
 from .adapter import LLMAdapter
 from .process import Channel
 from .thread_schema import thread_list_schema
-from .thread_storage import ThreadListEntry, ThreadListPage, ThreadStorage
+from .thread_storage import (
+    ThreadListEntry,
+    ThreadListPage,
+    ThreadStorageRepository,
+    allocate_thread_path,
+)
 
 logger = logging.getLogger("threaded-channel")
 
@@ -225,7 +230,7 @@ class ThreadedChannel(Channel):
             return storage_class.thread_list_path_for_dir(thread_dir=thread_dir)
         return posixpath.join(thread_dir, "index.threadl")
 
-    def _thread_storage_class(self) -> type[ThreadStorage] | None:
+    def _thread_storage_class(self) -> type[ThreadStorageRepository] | None:
         if self._thread_url_scheme == "dataset://":
             from .dataset_thread_storage import DatasetThreadStorage
 
@@ -574,7 +579,7 @@ class ThreadedChannel(Channel):
         await self._close_thread_list_document()
 
     async def _next_available_thread_path(self, *, base_path: str) -> str:
-        return await ThreadStorage.allocate_thread_path(
+        return await allocate_thread_path(
             room=self._room,
             base_path=base_path,
             extension=self._thread_path_extension,

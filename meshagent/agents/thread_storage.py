@@ -10,7 +10,6 @@ from typing import (
     AsyncIterator,
     Literal,
     Protocol,
-    runtime_checkable,
 )
 
 from meshagent.api import Participant, RoomClient
@@ -48,48 +47,45 @@ class ThreadListEvent:
     entry: ThreadListEntry | None = None
 
 
-@runtime_checkable
-class ThreadStorage(Protocol):
-    @staticmethod
-    async def allocate_thread_path(
-        *,
-        room: RoomClient,
-        base_path: str,
-        extension: str = ".thread",
-    ) -> str:
+async def allocate_thread_path(
+    *,
+    room: RoomClient,
+    base_path: str,
+    extension: str = ".thread",
+) -> str:
+    try:
+        exists = await asyncio.wait_for(
+            room.storage.exists(path=base_path),
+            timeout=THREAD_PATH_EXISTS_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return base_path
+
+    if not exists:
+        return base_path
+
+    thread_dir, filename = posixpath.split(base_path)
+    if extension != "" and filename.endswith(extension):
+        base_name = filename[: -len(extension)]
+    else:
+        base_name = filename
+
+    for index in range(2, 1000):
+        candidate = posixpath.join(thread_dir, f"{base_name} {index}{extension}")
         try:
-            exists = await asyncio.wait_for(
-                room.storage.exists(path=base_path),
+            candidate_exists = await asyncio.wait_for(
+                room.storage.exists(path=candidate),
                 timeout=THREAD_PATH_EXISTS_TIMEOUT_SECONDS,
             )
-        except Exception:
-            return base_path
-
-        if not exists:
-            return base_path
-
-        thread_dir, filename = posixpath.split(base_path)
-        if extension != "" and filename.endswith(extension):
-            base_name = filename[: -len(extension)]
-        else:
-            base_name = filename
-
-        for index in range(2, 1000):
-            candidate = posixpath.join(thread_dir, f"{base_name} {index}{extension}")
-            try:
-                candidate_exists = await asyncio.wait_for(
-                    room.storage.exists(path=candidate),
-                    timeout=THREAD_PATH_EXISTS_TIMEOUT_SECONDS,
-                )
-                if not candidate_exists:
-                    return candidate
-            except Exception:
+            if not candidate_exists:
                 return candidate
+        except Exception:
+            return candidate
 
-        return posixpath.join(
-            thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}{extension}"
-        )
+    return posixpath.join(thread_dir, f"{base_name}-{uuid.uuid4().hex[:8]}{extension}")
 
+
+class ThreadStorageRepository(Protocol):
     @classmethod
     def thread_list_path_for_dir(cls, *, thread_dir: str) -> str: ...
 
@@ -144,8 +140,20 @@ class ThreadStorage(Protocol):
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]: ...
 
+
+class ThreadStorage(Protocol):
     @property
     def path(self) -> str: ...
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    async def wait_until_ready(self) -> None: ...
+
+    def unflushed_agent_messages(self) -> list[AgentThreadMessage]: ...
+
+    def agent_messages(self) -> list[AgentThreadMessage]: ...
 
     def push_message(
         self,

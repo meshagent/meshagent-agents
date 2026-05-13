@@ -860,6 +860,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._restore_message_count = len(self._message_elements())
         self._ensure_local_member_on_thread()
 
+    async def wait_until_ready(self) -> None:
+        return None
+
     async def __aenter__(self) -> "MeshDocumentThreadStorage":
         await self.start()
         return self
@@ -873,10 +876,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
     @property
     def thread(self) -> MeshDocument | None:
         return self._thread
-
-    @property
-    def is_open(self) -> bool:
-        return self._thread is not None
 
     @property
     def path(self) -> str:
@@ -1057,6 +1056,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
             )
 
         return agent_messages
+
+    def unflushed_agent_messages(self) -> list[AgentThreadMessage]:
+        return []
 
     @tool(
         name="get_message_range",
