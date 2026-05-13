@@ -1315,7 +1315,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 turn_id=message.turn_id if isinstance(message, TurnSteer) else None,
             )
         elif isinstance(message, AgentTextContentStarted):
-            self._text_content_accumulator.upsert(
+            accumulated = self._text_content_accumulator.upsert(
                 item_id=message.item_id,
                 turn_id=message.turn_id,
                 phase=message.phase,
@@ -1325,6 +1325,8 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 key=self._content_message_key(kind="text", item_id=message.item_id),
                 turn_id=message.turn_id,
             )
+            if accumulated.phase == "final_answer":
+                await self.set_thread_status(status="Writing")
         elif isinstance(message, AgentTextContentDelta):
             accumulated = self._text_content_accumulator.append_delta(
                 item_id=message.item_id,

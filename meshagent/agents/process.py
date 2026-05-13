@@ -107,6 +107,9 @@ from .messages import (
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
     ApproveAgentToolCall,
+    AgentTextContentDelta,
+    AgentTextContentEnded,
+    AgentTextContentStarted,
     CapabilitiesRequest,
     CapabilitiesResponse,
     ChangeModel,
@@ -1903,6 +1906,9 @@ class LLMAgentProcess(AgentProcess):
         self._active_turn_tool_choice: ToolChoice | None = None
         self._status_tool_call_accumulator = ToolCallAccumulator()
         self._status_text_by_item_id: dict[str, str] = {}
+        self._status_text_phase_by_item_id: dict[
+            str, Literal["commentary", "final_answer"]
+        ] = {}
         self._latest_status_text: str | None = None
         self._session_initializer = session_initializer
         self._turn_instructions_provider = turn_instructions_provider
@@ -3391,6 +3397,7 @@ class LLMAgentProcess(AgentProcess):
                 if state in _THREAD_STATUS_TERMINAL_STATES:
                     if status_item_id.strip() != "":
                         self._status_text_by_item_id.pop(status_item_id, None)
+                        self._status_text_phase_by_item_id.pop(status_item_id, None)
                         self._status_tool_call_accumulator.remove(status_item_id)
                     self._latest_status_text = None
                     return "Thinking", None, None, None, None
@@ -3408,6 +3415,39 @@ class LLMAgentProcess(AgentProcess):
                     None,
                     None,
                 )
+
+            if isinstance(message, AgentTextContentStarted):
+                if message.phase is not None:
+                    self._status_text_phase_by_item_id[message.item_id] = message.phase
+                if message.phase == "final_answer":
+                    return "Writing", message.item_id, None, None, None
+                if message.phase == "commentary":
+                    return "Planning", message.item_id, None, None, None
+                return None
+
+            if isinstance(message, AgentTextContentDelta):
+                phase = message.phase
+                if phase is None:
+                    phase = self._status_text_phase_by_item_id.get(message.item_id)
+                elif phase is not None:
+                    self._status_text_phase_by_item_id[message.item_id] = phase
+                if phase == "final_answer":
+                    return "Writing", message.item_id, None, None, None
+                if phase == "commentary":
+                    return "Planning", message.item_id, None, None, None
+                return None
+
+            if isinstance(message, AgentTextContentEnded):
+                phase = message.phase
+                if phase is None:
+                    phase = self._status_text_phase_by_item_id.pop(
+                        message.item_id, None
+                    )
+                else:
+                    self._status_text_phase_by_item_id.pop(message.item_id, None)
+                if phase == "final_answer":
+                    return "Writing", None, None, None, None
+                return None
 
             if isinstance(
                 message,
@@ -3473,6 +3513,7 @@ class LLMAgentProcess(AgentProcess):
                 event_status_text = self._status_text_by_item_id.pop(
                     message.item_id, None
                 )
+                self._status_text_phase_by_item_id.pop(message.item_id, None)
                 if (
                     event_status_text is not None
                     and self._latest_status_text == event_status_text
@@ -3785,6 +3826,7 @@ class LLMAgentProcess(AgentProcess):
         self._turn_id = turn_id
         self._status_tool_call_accumulator.clear()
         self._status_text_by_item_id.clear()
+        self._status_text_phase_by_item_id.clear()
         self._latest_status_text = None
         thread_status_publisher = self.thread_status_publisher
         if thread_status_publisher is not None:
@@ -3994,6 +4036,7 @@ class LLMAgentProcess(AgentProcess):
                 self._active_turn_tool_choice = None
                 self._status_tool_call_accumulator.clear()
                 self._status_text_by_item_id.clear()
+                self._status_text_phase_by_item_id.clear()
                 self._latest_status_text = None
                 remaining_queued_messages = self._drain_queued_turn_messages(
                     active_turn_queue=active_turn_queue,

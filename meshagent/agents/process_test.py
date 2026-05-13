@@ -1398,6 +1398,103 @@ class _ImageGenerationStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
         return {"ok": True}
 
 
+class _FinalAnswerTextStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
+    def __init__(self) -> None:
+        self.session = _LifecycleSession()
+
+    def default_model(self) -> str:
+        return "default-model"
+
+    def create_session(self, *, usage_callback=None) -> AgentSessionContext:
+        return self.session
+
+    def make_agent_event_publisher(
+        self,
+        turn_id: str,
+        thread_id: str,
+        callback,
+        custom_event_callback=None,
+    ):
+        del custom_event_callback
+
+        def publish(event: dict[str, Any]) -> None:
+            event_type = event["type"]
+            if event_type == "tool_started":
+                callback(
+                    AgentToolCallStarted(
+                        type=AGENT_EVENT_TOOL_CALL_STARTED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="tool-1",
+                        toolkit="openai",
+                        tool="shell",
+                    )
+                )
+                return
+            if event_type == "tool_ended":
+                callback(
+                    AgentToolCallEnded(
+                        type=AGENT_EVENT_TOOL_CALL_ENDED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="tool-1",
+                    )
+                )
+                return
+            if event_type == "text_started":
+                callback(
+                    AgentTextContentStarted(
+                        type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_id="final-1",
+                        phase="final_answer",
+                    )
+                )
+                return
+            callback(
+                AgentTextContentDelta(
+                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id="final-1",
+                    text="done",
+                )
+            )
+
+        return publish
+
+    async def create_response(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del caller
+        del toolkits
+        del output_schema
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
+        if event_handler is not None:
+            event_handler({"type": "tool_started"})
+            event_handler({"type": "tool_ended"})
+            event_handler({"type": "text_started"})
+            event_handler({"type": "text_delta"})
+        return {"ok": True}
+
+
 class _ShellStatusLLMAdapter(LLMAdapter[dict[str, Any]]):
     def __init__(
         self,
@@ -5971,6 +6068,43 @@ async def test_llm_agent_process_publishes_image_generation_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_publishes_writing_for_final_answer_text_status() -> (
+    None
+):
+    adapter = _FinalAnswerTextStatusLLMAdapter()
+    publisher = _RecordingThreadStatusPublisher()
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_status_publisher=publisher,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "write me a story"}],
+                )
+            )
+        )
+
+        await _wait_for(
+            lambda: any(status["status"] == "Writing" for status in publisher.statuses)
+        )
+        await _wait_for(lambda: publisher.turn_ids[-1] is None)
+        statuses = [status["status"] for status in publisher.statuses]
+        writing_index = statuses.index("Writing")
+        assert "Thinking" in statuses[:writing_index]
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_publishes_tool_status_from_agent_messages() -> None:
     adapter = _ShellStatusLLMAdapter()
     publisher = _RecordingThreadStatusPublisher()
@@ -7123,6 +7257,50 @@ async def test_agent_process_thread_adapter_sets_status_from_streaming_output_de
             ),
         )
         await _wait_for(lambda: adapter._thread_status_value == "Speaking")
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_process_thread_adapter_sets_writing_from_final_answer_start() -> (
+    None
+):
+    room = _ThreadRoom(document=_ThreadDocument())
+    adapter = MeshDocumentThreadStorage(room=room, path="/threads/test.thread")
+
+    await adapter.start()
+    try:
+        adapter.push_message(
+            message=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                source_message_id="start-1",
+            )
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Thinking")
+
+        adapter.push_message(
+            message=AgentTextContentStarted(
+                type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="final-1",
+                phase="final_answer",
+            ),
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Writing")
+
+        adapter.push_message(
+            message=AgentTextContentDelta(
+                type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+                item_id="final-1",
+                text="done",
+            ),
+        )
+        await _wait_for(lambda: adapter._thread_status_value == "Writing")
     finally:
         await adapter.stop()
 
