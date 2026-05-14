@@ -80,6 +80,7 @@ from meshagent.agents.messages import (
     ModelsResponse,
     StartThread,
     ThreadCleared,
+    ThreadStarted,
     TurnEnded,
     TurnInterrupted,
     TurnInterrupt,
@@ -567,6 +568,59 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
         assert entries[0].get_attribute("name") == "Plan this friendly thread"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_thread_started_from_supervisor_opens_thread_for_sender() -> (
+    None
+):
+    caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = MessagingChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        await channel.on_message(
+            Message(
+                data=ThreadStarted(
+                    type=AGENT_EVENT_THREAD_STARTED,
+                    source_message_id="start-thread-1",
+                    thread_id="dataset://agents/test/threads/one",
+                ),
+                sender=caller,
+            )
+        )
+        await channel.on_message(
+            Message(
+                data=AgentTextContentDelta(
+                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    thread_id="dataset://agents/test/threads/one",
+                    turn_id="turn-1",
+                    item_id="final",
+                    text="real server final answer",
+                    phase="final_answer",
+                )
+            )
+        )
+
+        assert channel._open_participant_ids_by_thread == {
+            "dataset://agents/test/threads/one": {caller.id}
+        }
+        assert [sent["message"]["type"] for sent in room.messaging.sent_messages] == [
+            AGENT_EVENT_THREAD_STARTED,
+            AGENT_EVENT_TEXT_CONTENT_DELTA,
+        ]
+        assert room.messaging.sent_messages[1]["to"] is caller
+        assert room.messaging.sent_messages[1]["message"]["text"] == (
+            "real server final answer"
+        )
     finally:
         await channel.stop(supervisor)
 

@@ -215,6 +215,11 @@ class BaseChatChannel(ThreadedChannel):
         payload = self._outbound_agent_message_payload(message=message)
         attachment = self._outbound_agent_message_attachment(message=message)
         data = message.data
+        if isinstance(data, ThreadStarted) and message.sender is not None:
+            self._register_open_participant(
+                thread_id=data.thread_id,
+                participant_id=message.sender.id,
+            )
         if isinstance(data, AgentThreadMessage):
             if self._should_buffer_agent_event(payload=payload):
                 self._buffer_agent_event(payload=payload)
