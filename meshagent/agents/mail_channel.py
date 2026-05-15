@@ -36,12 +36,14 @@ from .messages import (
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
     AGENT_MESSAGE_TURN_START,
     AgentFileContent,
     AgentTextContent,
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
+    ParticipantDisconnect,
     ThreadCleared,
     TurnEnded,
     TurnStart,
@@ -234,6 +236,15 @@ class MailChannel(ThreadedChannel):
         except Exception:
             logger.exception(
                 "failed sending email reply for thread %s", active.thread_id
+            )
+        else:
+            participant = self._participant_for_message(message=active.source_message)
+            self.emit(
+                sender=participant,
+                payload=ParticipantDisconnect(
+                    type=AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
+                    participant_id=participant.id,
+                ),
             )
 
     async def start_thread(
@@ -444,10 +455,15 @@ class MailChannel(ThreadedChannel):
             where={"id": message_id},
             namespace=namespace,
         )
-        results = results.to_pylist()
-        if len(results) == 0:
+        if isinstance(results, pa.Table):
+            rows = results.to_pylist()
+        elif isinstance(results, list):
+            rows = results
+        else:
+            rows = []
+        if len(rows) == 0:
             return None
-        raw_json = results[0].get("json")
+        raw_json = rows[0].get("json")
         if not isinstance(raw_json, str):
             return None
         return json.loads(raw_json)
@@ -574,7 +590,9 @@ class MailChannel(ThreadedChannel):
         from_header = str(message.get("from") or "")
         display_name, address = email.utils.parseaddr(from_header)
         participant_name = display_name.strip() or address.strip() or "email user"
-        participant_id = f"mail:{(address or message.get('id') or uuid.uuid4().hex)}"
+        source_id = str(message.get("id") or uuid.uuid4().hex).strip()
+        participant_key = address.strip() or "unknown"
+        participant_id = f"mail:{participant_key}:{source_id}"
         return Participant(id=participant_id, attributes={"name": participant_name})
 
     def _reply_text_for_turn(self, *, active: _ActiveMailTurn) -> str:

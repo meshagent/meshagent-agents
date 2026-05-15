@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -26,6 +27,10 @@ from .messages import (
     AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_FILE_CONTENT_STARTED,
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+    AGENT_EVENT_IMAGE_GENERATION_FAILED,
+    AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
+    AGENT_EVENT_IMAGE_GENERATION_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
@@ -37,6 +42,8 @@ from .messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEERED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_MESSAGE_PARTICIPANT_CONNECT,
+    AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_THREAD_CLOSE,
@@ -60,6 +67,8 @@ from .messages import (
     AgentThreadStatus,
     AgentToolCallEnded,
     OpenThread,
+    ParticipantConnect,
+    ParticipantDisconnect,
     StartThread,
     ThreadCleared,
     ThreadStarted,
@@ -74,6 +83,19 @@ from .messages import (
 )
 from .process import AgentSupervisor, Message
 from .threaded_channel import ThreadedChannel
+
+DEFAULT_WEBSOCKET_MAX_MSG_SIZE = int(
+    os.getenv("MESHAGENT_AGENT_WEBSOCKET_MAX_MSG_SIZE", str(64 * 1024 * 1024))
+)
+_LARGE_AGENT_WEBSOCKET_MESSAGE_LOG_BYTES = int(
+    os.getenv("MESHAGENT_AGENT_WEBSOCKET_LARGE_MESSAGE_LOG_BYTES", str(1024 * 1024))
+)
+_IMAGE_GENERATION_AGENT_EVENT_TYPES = {
+    AGENT_EVENT_IMAGE_GENERATION_STARTED,
+    AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
+    AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+    AGENT_EVENT_IMAGE_GENERATION_FAILED,
+}
 
 logger = logging.getLogger("chat-channel")
 _MessageT = TypeVar("_MessageT", bound=AgentMessage)
@@ -95,7 +117,7 @@ class WebSocketChatEncoding(Protocol):
 class MsgpackWebSocketChatEncoding:
     def encode(self, message: AgentMessage) -> bytes:
         return msgpack.packb(
-            message.model_dump(mode="python", exclude_none=True),
+            message.model_dump(mode="json", exclude_none=True),
             use_bin_type=True,
         )
 
@@ -453,6 +475,7 @@ class BaseChatChannel(ThreadedChannel):
             tracked_turn_id = self._active_turn_ids_by_thread.get(turn_ended.thread_id)
             if tracked_turn_id == turn_ended.turn_id:
                 self._active_turn_ids_by_thread.pop(turn_ended.thread_id, None)
+            self._drop_empty_open_thread_if_idle(thread_id=turn_ended.thread_id)
             self._event_buffer_by_thread.pop(turn_ended.thread_id, None)
             self._clear_tool_argument_delta_buffer(thread_id=turn_ended.thread_id)
             self._thread_status_by_thread.pop(turn_ended.thread_id, None)
@@ -556,6 +579,16 @@ class BaseChatChannel(ThreadedChannel):
         if not isinstance(message_type, str):
             return False
 
+        if message_type in {
+            AGENT_MESSAGE_PARTICIPANT_CONNECT,
+            AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
+        }:
+            logger.debug(
+                "dropping client-supplied participant lifecycle message from %s",
+                sender.id,
+            )
+            return True
+
         model = _THREAD_CONTROL_AGENT_MESSAGE_MODELS.get(message_type)
         if model is None:
             return False
@@ -582,10 +615,11 @@ class BaseChatChannel(ThreadedChannel):
                 thread_id=control_message.thread_id,
                 participant_id=sender.id,
             )
-            self._send_buffered_agent_events(
-                thread_id=control_message.thread_id,
-                participant=sender,
-            )
+            if control_message.load is not True:
+                self._send_buffered_agent_events(
+                    thread_id=control_message.thread_id,
+                    participant=sender,
+                )
             return False
 
         if isinstance(control_message, CloseThread):
@@ -1441,8 +1475,60 @@ class BaseChatChannel(ThreadedChannel):
         if participant_ids is None:
             return
         participant_ids.discard(participant_id)
-        if len(participant_ids) == 0:
+        if len(participant_ids) == 0 and not self._thread_has_active_turn(
+            thread_id=thread_id
+        ):
             self._open_participant_ids_by_thread.pop(thread_id, None)
+
+    def _remove_participant_from_all_open_threads(self, *, participant_id: str) -> None:
+        empty_thread_ids: list[str] = []
+        for thread_id, participant_ids in self._open_participant_ids_by_thread.items():
+            participant_ids.discard(participant_id)
+            if len(participant_ids) == 0 and not self._thread_has_active_turn(
+                thread_id=thread_id
+            ):
+                empty_thread_ids.append(thread_id)
+
+        for thread_id in empty_thread_ids:
+            self._open_participant_ids_by_thread.pop(thread_id, None)
+
+    def _emit_participant_connected(self, *, participant: Participant) -> None:
+        logger.info(
+            "agent chat participant connected: participant_id=%s participant_name=%s",
+            participant.id,
+            self._participant_log_name(participant),
+        )
+        self.emit(
+            sender=participant,
+            payload=ParticipantConnect(
+                type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
+                participant_id=participant.id,
+            ),
+        )
+
+    def _emit_participant_disconnected(self, *, participant: Participant) -> None:
+        logger.info(
+            "agent chat participant disconnected: participant_id=%s participant_name=%s",
+            participant.id,
+            self._participant_log_name(participant),
+        )
+        self.emit(
+            sender=participant,
+            payload=ParticipantDisconnect(
+                type=AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
+                participant_id=participant.id,
+            ),
+        )
+
+    @staticmethod
+    def _participant_log_name(participant: Participant) -> str | None:
+        name = participant.get_attribute("name")
+        if not isinstance(name, str):
+            return None
+        name = name.strip()
+        if name == "":
+            return None
+        return name
 
     def _open_participants(self, *, thread_id: str) -> list[Participant]:
         del thread_id
@@ -1456,17 +1542,57 @@ class BaseChatChannel(ThreadedChannel):
             if payload.get("thread_id") != thread_id
         }
 
+    def _thread_has_active_turn(self, *, thread_id: str) -> bool:
+        return thread_id in self._active_turn_ids_by_thread
+
+    def _drop_empty_open_thread_if_idle(self, *, thread_id: str) -> None:
+        if self._thread_has_active_turn(thread_id=thread_id):
+            return
+        participant_ids = self._open_participant_ids_by_thread.get(thread_id)
+        if participant_ids is not None and len(participant_ids) == 0:
+            self._open_participant_ids_by_thread.pop(thread_id, None)
+
 
 class MessagingChatChannel(BaseChatChannel):
     async def on_start(self) -> None:
         await super().on_start()
         self._room.messaging.on("message", self._on_room_message)
+        self._room.messaging.on("participant_added", self._on_participant_added)
+        self._room.messaging.on("participant_removed", self._on_participant_removed)
+        self._room.messaging.on("messaging_enabled", self._on_messaging_enabled)
         if not self._room.messaging.is_enabled:
             await self._room.messaging.enable()
+        else:
+            self._connect_current_messaging_participants()
 
     async def on_stop(self) -> None:
+        self._disconnect_current_messaging_participants()
+        self._room.messaging.off("messaging_enabled", self._on_messaging_enabled)
+        self._room.messaging.off("participant_removed", self._on_participant_removed)
+        self._room.messaging.off("participant_added", self._on_participant_added)
         self._room.messaging.off("message", self._on_room_message)
         await super().on_stop()
+
+    def _connect_current_messaging_participants(self) -> None:
+        for participant in self._room.messaging.get_participants():
+            self._emit_participant_connected(participant=participant)
+
+    def _disconnect_current_messaging_participants(self) -> None:
+        for participant in self._room.messaging.get_participants():
+            self._remove_participant_from_all_open_threads(
+                participant_id=participant.id
+            )
+            self._emit_participant_disconnected(participant=participant)
+
+    def _on_messaging_enabled(self) -> None:
+        self._connect_current_messaging_participants()
+
+    def _on_participant_added(self, *, participant: Participant) -> None:
+        self._emit_participant_connected(participant=participant)
+
+    def _on_participant_removed(self, *, participant: Participant) -> None:
+        self._remove_participant_from_all_open_threads(participant_id=participant.id)
+        self._emit_participant_disconnected(participant=participant)
 
     def _send_agent_payload_nowait(
         self,
@@ -1554,7 +1680,9 @@ class MessagingChatChannel(BaseChatChannel):
         for participant_id in stale_participant_ids:
             participant_ids.discard(participant_id)
 
-        if len(participant_ids) == 0:
+        if len(participant_ids) == 0 and not self._thread_has_active_turn(
+            thread_id=thread_id
+        ):
             self._open_participant_ids_by_thread.pop(thread_id, None)
 
         return online_participants
@@ -1573,8 +1701,11 @@ class WebSocketChatChannel(BaseChatChannel):
         room: RoomClient,
         authorize: WebSocketAuthorizeHook | None = None,
         encoding: WebSocketChatEncoding | None = None,
+        protocols: tuple[str, ...] = (),
+        on_participant_counts_changed: Callable[[dict[str, int]], None] | None = None,
         heartbeat: float | None = 30.0,
         receive_timeout: float | None = None,
+        max_msg_size: int = DEFAULT_WEBSOCKET_MAX_MSG_SIZE,
         compress: bool | int = True,
         threading_mode: str | None = None,
         thread_dir: str | None = None,
@@ -1594,14 +1725,18 @@ class WebSocketChatChannel(BaseChatChannel):
         )
         self._authorize = authorize
         self._encoding = encoding or MsgpackWebSocketChatEncoding()
+        self._protocols = protocols
+        self._on_participant_counts_changed = on_participant_counts_changed
         self._heartbeat = heartbeat
         self._receive_timeout = receive_timeout
+        self._max_msg_size = max_msg_size
         self._compress = compress
         self._connections_by_participant_id: dict[
             str, list[_WebSocketChatConnection]
         ] = {}
         self._participants_by_id: dict[str, Participant] = {}
         self._send_tasks: set[asyncio.Task[None]] = set()
+        self._send_tasks_by_participant_id: dict[str, asyncio.Task[None]] = {}
 
     async def on_stop(self) -> None:
         connections = [
@@ -1615,7 +1750,23 @@ class WebSocketChatChannel(BaseChatChannel):
             await asyncio.gather(*self._send_tasks, return_exceptions=True)
         self._connections_by_participant_id.clear()
         self._participants_by_id.clear()
+        self._send_tasks_by_participant_id.clear()
         await super().on_stop()
+
+    def participant_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for participant in self._participants_by_id.values():
+            role = participant.get_attribute("role")
+            if not isinstance(role, str) or role.strip() == "":
+                role = "user"
+            counts[role] = counts.get(role, 0) + 1
+        return counts
+
+    def _emit_participant_counts_changed(self) -> None:
+        on_participant_counts_changed = self._on_participant_counts_changed
+        if on_participant_counts_changed is None:
+            return
+        on_participant_counts_changed(self.participant_counts())
 
     @staticmethod
     def _participant_from_request_headers(request: web.Request) -> Participant | None:
@@ -1649,16 +1800,21 @@ class WebSocketChatChannel(BaseChatChannel):
             raise web.HTTPUnauthorized(text="websocket participant is not authorized")
         if isinstance(auth_result, web.StreamResponse):
             return auth_result
+        if self.supervisor is None or self.state != "started":
+            raise web.HTTPBadRequest(reason="chat channel is not started")
 
         websocket = web.WebSocketResponse(
             heartbeat=self._heartbeat,
+            protocols=self._protocols,
             receive_timeout=self._receive_timeout,
+            max_msg_size=self._max_msg_size,
             compress=self._compress,
         )
         await websocket.prepare(request)
 
+        participant = self._participant_for_websocket_connection(auth_result)
         connection = _WebSocketChatConnection(
-            participant=auth_result,
+            participant=participant,
             websocket=websocket,
         )
         self._register_connection(connection=connection)
@@ -1673,7 +1829,7 @@ class WebSocketChatChannel(BaseChatChannel):
                 if message.type == aiohttp.WSMsgType.ERROR:
                     logger.debug(
                         "websocket chat connection failed for participant %s",
-                        auth_result.id,
+                        participant.id,
                         exc_info=websocket.exception(),
                     )
                     break
@@ -1681,12 +1837,12 @@ class WebSocketChatChannel(BaseChatChannel):
                     agent_message = self._encoding.decode(message)
                     self._handle_websocket_agent_message(
                         agent_message=agent_message,
-                        sender=auth_result,
+                        sender=participant,
                     )
                 except (ValidationError, ValueError):
                     logger.exception(
                         "unable to translate websocket message from participant %s",
-                        auth_result.id,
+                        participant.id,
                     )
                     await websocket.close(
                         code=aiohttp.WSCloseCode.UNSUPPORTED_DATA,
@@ -1697,6 +1853,17 @@ class WebSocketChatChannel(BaseChatChannel):
             self._unregister_connection(connection=connection)
 
         return websocket
+
+    @staticmethod
+    def _participant_for_websocket_connection(participant: Participant) -> Participant:
+        connection_id = uuid.uuid4().hex
+        attributes = participant.attributes
+        attributes["base_participant_id"] = participant.id
+        attributes["websocket_connection_id"] = connection_id
+        return Participant(
+            id=f"{participant.id}:websocket:{connection_id}",
+            attributes=attributes,
+        )
 
     def _handle_websocket_agent_message(
         self,
@@ -1714,12 +1881,18 @@ class WebSocketChatChannel(BaseChatChannel):
         self._on_agent_message(agent_message=agent_message, sender=sender)
 
     def _register_connection(self, *, connection: _WebSocketChatConnection) -> None:
+        first_connection = (
+            connection.participant.id not in self._connections_by_participant_id
+        )
         self._participants_by_id[connection.participant.id] = connection.participant
         connections = self._connections_by_participant_id.setdefault(
             connection.participant.id,
             [],
         )
         connections.append(connection)
+        if first_connection:
+            self._emit_participant_connected(participant=connection.participant)
+            self._emit_participant_counts_changed()
 
     def _unregister_connection(self, *, connection: _WebSocketChatConnection) -> None:
         connections = self._connections_by_participant_id.get(connection.participant.id)
@@ -1730,6 +1903,11 @@ class WebSocketChatChannel(BaseChatChannel):
         if len(connections) == 0:
             self._connections_by_participant_id.pop(connection.participant.id, None)
             self._participants_by_id.pop(connection.participant.id, None)
+            self._remove_participant_from_all_open_threads(
+                participant_id=connection.participant.id
+            )
+            self._emit_participant_disconnected(participant=connection.participant)
+            self._emit_participant_counts_changed()
 
     def _send_agent_payload_nowait(
         self,
@@ -1750,14 +1928,48 @@ class WebSocketChatChannel(BaseChatChannel):
             )
             return
 
+        participant_id = participant.id
+        previous_task = self._send_tasks_by_participant_id.get(participant_id)
         task = asyncio.create_task(
-            self._send_agent_message_to_websockets(
+            self._send_agent_message_to_websockets_after(
+                previous_task=previous_task,
                 participant_id=participant.id,
                 message=agent_message,
             )
         )
         self._send_tasks.add(task)
-        task.add_done_callback(self._send_tasks.discard)
+        self._send_tasks_by_participant_id[participant_id] = task
+
+        def cleanup(completed: asyncio.Task[None]) -> None:
+            self._send_tasks.discard(completed)
+            if self._send_tasks_by_participant_id.get(participant_id) is completed:
+                self._send_tasks_by_participant_id.pop(participant_id, None)
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning(
+                    "failed to send websocket agent message task to participant %s",
+                    participant_id,
+                    exc_info=True,
+                )
+
+        task.add_done_callback(cleanup)
+
+    async def _send_agent_message_to_websockets_after(
+        self,
+        *,
+        previous_task: asyncio.Task[None] | None,
+        participant_id: str,
+        message: AgentMessage,
+    ) -> None:
+        if previous_task is not None:
+            await asyncio.gather(previous_task, return_exceptions=True)
+        await self._send_agent_message_to_websockets(
+            participant_id=participant_id,
+            message=message,
+        )
 
     async def _send_agent_message_to_websockets(
         self,
@@ -1772,8 +1984,37 @@ class WebSocketChatChannel(BaseChatChannel):
             return
 
         encoded = self._encoding.encode(message)
+        encoded_size = len(encoded)
+        message_type = message.type
+        thread_id = (
+            message.thread_id if isinstance(message, AgentThreadMessage) else None
+        )
+        if (
+            message_type in _IMAGE_GENERATION_AGENT_EVENT_TYPES
+            or encoded_size >= _LARGE_AGENT_WEBSOCKET_MESSAGE_LOG_BYTES
+        ):
+            logger.info(
+                "sending websocket agent message: participant=%s message_type=%s "
+                "thread_id=%s encoded_size=%s max_msg_size=%s connection_count=%s",
+                participant_id,
+                message_type,
+                thread_id,
+                encoded_size,
+                self._max_msg_size,
+                len(connections),
+            )
         for connection in connections:
             if connection.websocket.closed:
+                logger.warning(
+                    "skipping websocket agent message send to closed connection: "
+                    "participant=%s message_type=%s thread_id=%s "
+                    "encoded_size=%s close_code=%s",
+                    participant_id,
+                    message_type,
+                    thread_id,
+                    encoded_size,
+                    connection.websocket.close_code,
+                )
                 continue
             try:
                 if isinstance(encoded, bytes):
@@ -1781,9 +2022,15 @@ class WebSocketChatChannel(BaseChatChannel):
                 else:
                     await connection.websocket.send_str(encoded)
             except Exception:
-                logger.debug(
-                    "failed to send websocket agent message to participant %s",
+                logger.warning(
+                    "failed to send websocket agent message to participant %s: "
+                    "message_type=%s thread_id=%s encoded_size=%s "
+                    "close_code=%s",
                     participant_id,
+                    message_type,
+                    thread_id,
+                    encoded_size,
+                    connection.websocket.close_code,
                     exc_info=True,
                 )
 
@@ -1805,7 +2052,9 @@ class WebSocketChatChannel(BaseChatChannel):
         for participant_id in stale_participant_ids:
             participant_ids.discard(participant_id)
 
-        if len(participant_ids) == 0:
+        if len(participant_ids) == 0 and not self._thread_has_active_turn(
+            thread_id=thread_id
+        ):
             self._open_participant_ids_by_thread.pop(thread_id, None)
 
         return participants

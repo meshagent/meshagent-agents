@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,9 +11,14 @@ import aiohttp
 from meshagent.api import RemoteParticipant, RoomClient, RoomException
 from meshagent.api.http import new_client_session
 
-from .chat_channel import MsgpackWebSocketChatEncoding, WebSocketChatEncoding
+from .chat_channel import (
+    DEFAULT_WEBSOCKET_MAX_MSG_SIZE,
+    MsgpackWebSocketChatEncoding,
+    WebSocketChatEncoding,
+)
 from .messages import (
     AGENT_EVENT_MODEL_CHANGED,
+    AGENT_EVENT_CONNECTION_STATUS,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
@@ -38,6 +43,7 @@ from .messages import (
     AgentImageGenerationCompleted,
     AgentImageGenerationPartial,
     AgentMessage,
+    AgentConnectionStatus,
     AgentThreadStatus,
     AgentModelInfo,
     AgentModelChanged,
@@ -54,6 +60,7 @@ from .messages import (
     OpenThread,
     RenameThread,
     StartThread,
+    TurnEnded,
     ThreadStarted,
     TurnStart,
     TurnStartAccepted,
@@ -218,6 +225,7 @@ class BaseChatClient(ABC):
         self._timeout = timeout
         self._thread_sessions: dict[str, ChatThreadSession] = {}
         self._pending_thread_sessions: set[ChatThreadSession] = set()
+        self._connection_status: AgentConnectionStatus | None = None
 
     async def __aenter__(self) -> BaseChatClient:
         await self.start()
@@ -317,6 +325,30 @@ class BaseChatClient(ABC):
     async def send(self, payload: AgentMessage) -> None:
         await self._send_agent_message(payload)
 
+    @property
+    def connection_status(self) -> AgentConnectionStatus | None:
+        return self._connection_status
+
+    def _emit_connection_status(
+        self,
+        *,
+        status: str,
+        message: str | None = None,
+        reason: str | None = None,
+        retry_in_seconds: float | None = None,
+    ) -> None:
+        payload = AgentConnectionStatus(
+            type=AGENT_EVENT_CONNECTION_STATUS,
+            status=status,
+            message=message,
+            reason=reason,
+            retry_in_seconds=retry_in_seconds,
+        )
+        self._connection_status = payload
+        payload_json = payload.model_dump(mode="json", exclude_none=True)
+        for session in self._all_sessions():
+            session._handle_agent_payload(payload_json)
+
     def _register_thread_session(self, session: ChatThreadSession) -> None:
         self._pending_thread_sessions.discard(session)
         self._thread_sessions[session.thread_path] = session
@@ -379,6 +411,7 @@ class ChatThreadSession:
         self._local_turn_ids: set[str] = set()
         self._remote_source_message_ids: set[str] = set()
         self._remote_turn_output_parts: dict[str, list[str]] = {}
+        self._last_completed_turn_id: str | None = None
         self._current_model: AgentModelChanged | None = None
         self._models_response: ModelsResponse | None = None
         self._closed = False
@@ -429,6 +462,10 @@ class ChatThreadSession:
         return tuple(self._messages)
 
     @property
+    def last_completed_turn_id(self) -> str | None:
+        return self._last_completed_turn_id
+
+    @property
     def pending_inputs(self) -> tuple[PendingAgentInput, ...]:
         return tuple(item for item in self._pending_inputs.values() if not item.applied)
 
@@ -441,11 +478,18 @@ class ChatThreadSession:
     ) -> None:
         self._accepted_input_callback = callback
 
-    async def open(self) -> None:
+    async def open(
+        self,
+        *,
+        load: bool | None = None,
+        since_turn: str | None = None,
+    ) -> None:
         await self.send(
             OpenThread(
                 type=AGENT_MESSAGE_THREAD_OPEN,
                 thread_id=self.thread_path,
+                load=load,
+                since_turn=since_turn,
             )
         )
 
@@ -499,6 +543,10 @@ class ChatThreadSession:
         await self._client.send(payload)
 
     def add_agent_message(self, message: AgentMessage) -> None:
+        if isinstance(message, TurnEnded):
+            turn_id = _normalized_string(message.turn_id)
+            if turn_id is not None:
+                self._last_completed_turn_id = turn_id
         if isinstance(message, (StartThread, TurnStart, TurnSteer)):
             if _agent_input_content_text(message.content or []).strip() == "":
                 return
@@ -672,9 +720,11 @@ class ChatThreadSession:
 
     def _apply_models_response(self, response: ModelsResponse) -> None:
         self._models_response = response
+        if self._thread_path is None:
+            return
         active_model = self._active_model_from_models_response(
             response,
-            thread_id=self.thread_path,
+            thread_id=self._thread_path,
         )
         if active_model is not None:
             self._current_model = active_model
@@ -700,6 +750,8 @@ class ChatThreadSession:
                     output_format=model.output_format,
                     turn_detection=model.turn_detection,
                     realtime_protocols=model.realtime_protocols,
+                    supports_attachments=model.supports_attachments,
+                    accepts=model.accepts,
                     output_modalities=ChatThreadSession._default_output_modalities(
                         model
                     ),
@@ -754,6 +806,23 @@ class ChatThreadSession:
 
     def _handle_agent_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
+        if payload_type == AGENT_EVENT_CONNECTION_STATUS:
+            try:
+                connection_status = AgentConnectionStatus.model_validate(payload)
+            except Exception:
+                return
+            status = connection_status.status.strip().lower()
+            if status in ("connected", "reconnected"):
+                self._thread_status_text = None
+                self._thread_status = None
+            elif status in ("disconnected", "reconnecting"):
+                self._thread_status_text = connection_status.message or (
+                    "Reconnecting" if status == "reconnecting" else "Disconnected"
+                )
+                self._thread_status = None
+            self.on_event(connection_status)
+            self._events.put_nowait(payload)
+            return
         if payload_type == AGENT_EVENT_THREAD_STARTED:
             if not self._is_local_source_message(payload.get("source_message_id")):
                 return
@@ -769,6 +838,8 @@ class ChatThreadSession:
                     OpenThread(
                         type=AGENT_MESSAGE_THREAD_OPEN,
                         thread_id=thread_started.thread_id,
+                        load=False,
+                        since_turn=None,
                     )
                 )
             )
@@ -826,6 +897,9 @@ class ChatThreadSession:
             self._clear_queued_agent_input(payload.get("source_message_id"))
         elif payload_type == AGENT_EVENT_TURN_ENDED:
             self._track_remote_turn_ended(payload)
+            turn_id = _normalized_string(payload.get("turn_id"))
+            if turn_id is not None:
+                self._last_completed_turn_id = turn_id
             self._thread_status = None
             self._thread_status_text = None
             self.clear_applied_queued_agent_inputs()
@@ -1015,6 +1089,7 @@ class MessagingChatClient(BaseChatClient):
         self._room = room
         self._participant_name = participant_name
         self._participant: RemoteParticipant | None = None
+        self._room_status_connected = False
 
     @property
     def room(self) -> RoomClient:
@@ -1061,13 +1136,72 @@ class MessagingChatClient(BaseChatClient):
         )
 
     async def _start_transport(self) -> None:
+        self._room.on("room.status", self._on_room_status)
+        self._room.on("disconnected", self._on_room_disconnected)
+        self._room.on("reconnected", self._on_room_reconnected)
         self._room.messaging.on("message", self._on_message)
         if not self._room.messaging.is_enabled:
             await self._room.messaging.enable()
         await self._wait_for_participant()
+        self._emit_connection_status(
+            status="connected",
+            message=f"connected to {self._participant_name}",
+        )
 
     async def _stop_transport(self) -> None:
         self._room.messaging.off("message", self._on_message)
+        self._room.off("room.status", self._on_room_status)
+        self._room.off("disconnected", self._on_room_disconnected)
+        self._room.off("reconnected", self._on_room_reconnected)
+        self._emit_connection_status(
+            status="disconnected",
+            message="chat client stopped",
+            reason="stopped",
+        )
+
+    def _on_room_status(self, **kwargs: object) -> None:
+        status = kwargs.get("status")
+        if not isinstance(status, str):
+            return
+        message_value = kwargs.get("message")
+        message = message_value if isinstance(message_value, str) else None
+        normalized = status.strip().lower()
+        if normalized in ("connected", "ready"):
+            status_name = "connected"
+            self._room_status_connected = True
+        elif normalized == "reconnected":
+            status_name = "reconnected" if self._room_status_connected else "connected"
+            self._room_status_connected = True
+        elif normalized == "disconnected":
+            status_name = "disconnected"
+            self._room_status_connected = False
+        elif normalized in ("reconnecting", "connecting"):
+            status_name = "reconnecting"
+        else:
+            return
+        self._emit_connection_status(
+            status=status_name,
+            message=message,
+            reason=message if status_name == "disconnected" else None,
+        )
+
+    def _on_room_disconnected(self, **kwargs: object) -> None:
+        reason_value = kwargs.get("reason")
+        reason = reason_value if isinstance(reason_value, str) else None
+        self._room_status_connected = False
+        self._emit_connection_status(
+            status="disconnected",
+            message=reason or "room connection lost",
+            reason=reason,
+        )
+
+    def _on_room_reconnected(self, **_: object) -> None:
+        status = "reconnected" if self._room_status_connected else "connected"
+        self._room_status_connected = True
+        self._emit_connection_status(
+            status=status,
+            message="room connection restored",
+        )
 
     async def _wait_for_participant(self) -> None:
         try:
@@ -1120,65 +1254,238 @@ class WebSocketChatClient(BaseChatClient):
         *,
         url: str,
         headers: dict[str, str] | None = None,
+        protocols: tuple[str, ...] = ("meshagent-msgpack",),
         encoding: WebSocketChatEncoding | None = None,
+        heartbeat: float = 30.0,
         timeout: float = 30,
+        max_msg_size: int = DEFAULT_WEBSOCKET_MAX_MSG_SIZE,
+        reconnect: bool = True,
+        reconnect_initial_delay: float = 1.0,
+        reconnect_max_delay: float = 10.0,
     ) -> None:
         super().__init__(timeout=timeout)
         self._url = url
         self._headers = headers
+        self._protocols = protocols
         self._encoding = encoding or MsgpackWebSocketChatEncoding()
+        self._heartbeat = heartbeat
+        self._max_msg_size = max_msg_size
         self._session: aiohttp.ClientSession | None = None
         self._websocket: aiohttp.ClientWebSocketResponse | None = None
         self._receive_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._close_code: int | None = None
+        self._receive_exception: BaseException | None = None
+        self._reconnect = reconnect
+        self._reconnect_initial_delay = reconnect_initial_delay
+        self._reconnect_max_delay = reconnect_max_delay
+        self._started = False
+        self._stopping = False
+        self._connecting = False
+        self._reconnect_attempts = 0
 
     @property
     def remote_participant_name(self) -> str:
         return "assistant"
 
     async def _start_transport(self) -> None:
-        self._session = new_client_session()
-        self._websocket = await self._session.ws_connect(
-            self._url,
-            headers=self._headers,
-        )
+        self._started = True
+        self._stopping = False
+        await self._connect(is_reconnect=False)
+
+    async def _connect(self, *, is_reconnect: bool) -> None:
+        if self._connecting:
+            return
+        self._connecting = True
+        session = new_client_session()
+        try:
+            websocket = await session.ws_connect(
+                self._url,
+                headers=self._headers,
+                heartbeat=self._heartbeat,
+                protocols=self._protocols,
+                max_msg_size=self._max_msg_size,
+            )
+        except aiohttp.ClientResponseError as exc:
+            await session.close()
+            raise RoomException(
+                f"chat websocket connection failed: {exc.status} {exc.message}"
+            ) from exc
+        except aiohttp.ClientError as exc:
+            await session.close()
+            raise RoomException(f"chat websocket connection failed: {exc}") from exc
+        finally:
+            self._connecting = False
+        self._session = session
+        self._websocket = websocket
+        self._close_code = None
+        self._receive_exception = None
+        self._reconnect_attempts = 0
         self._receive_task = asyncio.create_task(self._receive_loop())
+        self._receive_task.add_done_callback(_consume_task_exception)
+        self._emit_connection_status(
+            status="reconnected" if is_reconnect else "connected",
+            message=(
+                "chat websocket reconnected"
+                if is_reconnect
+                else "chat websocket connected"
+            ),
+        )
+        if is_reconnect:
+            await self._reopen_sessions()
 
     async def _stop_transport(self) -> None:
+        self._stopping = True
+        self._started = False
+        reconnect_task = self._reconnect_task
+        self._reconnect_task = None
+        if reconnect_task is not None:
+            reconnect_task.cancel()
+            await asyncio.gather(reconnect_task, return_exceptions=True)
         receive_task = self._receive_task
         self._receive_task = None
         websocket = self._websocket
         self._websocket = None
         session = self._session
         self._session = None
-        if websocket is not None:
-            await websocket.close()
         if receive_task is not None:
             receive_task.cancel()
             await asyncio.gather(receive_task, return_exceptions=True)
+        if websocket is not None:
+            await websocket.close()
         if session is not None:
             await session.close()
+        self._emit_connection_status(
+            status="disconnected",
+            message="chat websocket stopped",
+            reason="stopped",
+        )
 
     async def _receive_loop(self) -> None:
         websocket = self._websocket
         if websocket is None:
             return
-        async for message in websocket:
-            if message.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
-                agent_message = self._encoding.decode(message)
-                self._handle_agent_payload(
-                    agent_message.model_dump(mode="json", exclude_none=True)
-                )
-            elif message.type in (
-                aiohttp.WSMsgType.CLOSE,
-                aiohttp.WSMsgType.CLOSED,
-                aiohttp.WSMsgType.ERROR,
-            ):
+        try:
+            async for message in websocket:
+                if message.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                    try:
+                        agent_message = self._encoding.decode(message)
+                    except Exception as exc:
+                        self._receive_exception = exc
+                        await websocket.close()
+                        return
+                    self._handle_agent_payload(
+                        agent_message.model_dump(mode="json", exclude_none=True)
+                    )
+                elif message.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    self._close_code = websocket.close_code
+                    if message.type == aiohttp.WSMsgType.ERROR:
+                        self._receive_exception = websocket.exception()
+                    return
+        except BaseException as exc:
+            self._receive_exception = exc
+            raise
+        finally:
+            self._close_code = websocket.close_code
+            if self._websocket is websocket:
+                self._websocket = None
+                session = self._session
+                self._session = None
+                if not websocket.closed:
+                    await websocket.close()
+                if session is not None:
+                    await session.close()
+            if not self._stopping and self._started:
+                self._schedule_reconnect()
+
+    def _schedule_reconnect(self) -> None:
+        if not self._reconnect:
+            self._emit_connection_status(
+                status="disconnected",
+                message="chat websocket disconnected",
+                reason=self._connection_close_reason(),
+            )
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        delay = min(
+            self._reconnect_initial_delay * (2**self._reconnect_attempts),
+            self._reconnect_max_delay,
+        )
+        self._reconnect_attempts += 1
+        reason = self._connection_close_reason()
+        self._emit_connection_status(
+            status="reconnecting",
+            message="chat websocket reconnecting",
+            reason=reason,
+            retry_in_seconds=delay,
+        )
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop(delay=delay))
+        self._reconnect_task.add_done_callback(_consume_task_exception)
+
+    async def _reconnect_loop(self, *, delay: float) -> None:
+        next_delay = delay
+        while not self._stopping and self._started:
+            await asyncio.sleep(next_delay)
+            try:
+                await self._connect(is_reconnect=True)
                 return
+            except RoomException as exc:
+                next_delay = min(next_delay * 2, self._reconnect_max_delay)
+                self._emit_connection_status(
+                    status="reconnecting",
+                    message="chat websocket reconnecting",
+                    reason=str(exc),
+                    retry_in_seconds=next_delay,
+                )
+
+    def _connection_close_reason(self) -> str | None:
+        details: list[str] = []
+        if self._close_code is not None:
+            details.append(f"code={self._close_code}")
+        if self._receive_exception is not None:
+            details.append(f"error={self._receive_exception}")
+        if len(details) == 0:
+            return None
+        return ", ".join(details)
+
+    async def _reopen_sessions(self) -> None:
+        messages: list[AgentMessage] = []
+        for session in self._reopenable_sessions():
+            messages.append(
+                OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id=session.thread_path,
+                    load=True,
+                    since_turn=session.last_completed_turn_id,
+                )
+            )
+        messages.append(ModelsRequest(type=AGENT_MESSAGE_MODELS_REQUEST))
+        for message in messages:
+            await self._send_agent_message(message)
+
+    def _reopenable_sessions(self) -> Iterable[ChatThreadSession]:
+        for session in self._thread_sessions.values():
+            if not session._closed:
+                yield session
 
     async def _send_agent_message(self, payload: AgentMessage) -> None:
         websocket = self._websocket
         if websocket is None or websocket.closed:
-            raise RoomException("chat client not started")
+            details: list[str] = []
+            close_code = self._close_code
+            if close_code is None and websocket is not None:
+                close_code = websocket.close_code
+            if close_code is not None:
+                details.append(f"code={close_code}")
+            if self._receive_exception is not None:
+                details.append(f"error={self._receive_exception}")
+            detail_text = "" if len(details) == 0 else f" ({', '.join(details)})"
+            raise RoomException(f"chat websocket is closed{detail_text}")
         encoded = self._encoding.encode(payload)
         if isinstance(encoded, str):
             await websocket.send_str(encoded)

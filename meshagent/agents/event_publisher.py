@@ -475,11 +475,16 @@ def _image_generation_arguments(item: dict[str, Any]) -> dict[str, Any] | None:
     arguments = _filtered_tool_arguments(
         item=item,
         excluded_keys={
+            "call_id",
             "id",
             "images",
+            "item_id",
+            "output_index",
             "partial_image_b64",
             "partial_image_index",
             "result",
+            "sequence_number",
+            "status",
             "type",
         },
     )
@@ -517,6 +522,18 @@ def _generated_images_from_item(item: dict[str, Any]) -> list[AgentGeneratedImag
         if generated_image is not None:
             generated.append(generated_image)
     return generated
+
+
+def _image_generation_item_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    item_id = _as_str(event.get("item_id")) or _as_str(event.get("id"))
+    if item_id is None:
+        return None
+    item = dict(event)
+    item["type"] = "image_generation_call"
+    item["id"] = item_id
+    if _as_str(item.get("status")) is None:
+        item["status"] = "completed"
+    return item
 
 
 @dataclass(frozen=True, slots=True)
@@ -2024,6 +2041,20 @@ class _OpenAIAgentEventPublisher:
             if info is None:
                 return
             self._emit_image_generation_started(info=info, item=event)
+            return
+
+        if event_type == "response.image_generation_call.completed":
+            item = _image_generation_item_from_event(event)
+            if item is None:
+                return
+            info = _openai_tool_call_info(
+                item,
+                provider_tool_namespace=self.provider_tool_namespace,
+                function_tool_name_resolver=self.function_tool_name_resolver,
+            )
+            if info is None:
+                return
+            self._emit_image_generation_completed(info=info, item=item)
             return
 
         if event_type == "response.image_generation_call.partial_image":

@@ -74,6 +74,8 @@ class LLMModelInfo:
     output_format: LLMAudioFormat | None = None
     turn_detection: Literal["none", "automatic"] | None = None
     realtime_protocols: tuple[Literal["websocket", "webrtc"], ...] = ()
+    supports_attachments: bool = False
+    accepts: tuple[str, ...] = ()
 
 
 def llm_model_pricing(*, provider: str, model: str) -> dict[str, float] | None:

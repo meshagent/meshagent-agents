@@ -10,6 +10,7 @@ from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents.mail_channel import MailChannel
 from meshagent.agents.mail_common import SmtpConfiguration
 from meshagent.agents.messages import (
+    ParticipantDisconnect,
     AgentTextContentDelta,
     AgentTextContentEnded,
     AgentTextContentStarted,
@@ -424,9 +425,7 @@ async def test_mail_channel_default_new_indexes_new_threads_from_subject() -> No
                 "schema": thread_list_schema,
             }
         ]
-        assert room.storage.exists_calls == [
-            ".threads/assistant/12345678-1234-5678-1234-567812345678.thread"
-        ]
+        assert room.storage.exists_calls == []
 
         assert len(supervisor.sent) == 1
         outbound = supervisor.sent[0]
@@ -681,6 +680,10 @@ async def test_mail_channel_sends_reply_when_turn_ends(
         stored_rows = room.datasets.tables[(((".threads", "assistant")), "emails")]
         assert len(stored_rows) == 2
         assert stored_rows[-1]["thread_id"] == turn_start.thread_id
+        assert isinstance(supervisor.sent[-1].data, ParticipantDisconnect)
+        assert supervisor.sent[-1].data.participant_id.startswith(
+            "mail:alice@example.com:"
+        )
     finally:
         await channel.stop(supervisor)  # type: ignore[arg-type]
 

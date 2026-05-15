@@ -33,6 +33,8 @@ AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
 AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
 AGENT_MESSAGE_THREAD_DELETE = "meshagent.agent.thread.delete"
 AGENT_MESSAGE_THREAD_RENAME = "meshagent.agent.thread.rename"
+AGENT_MESSAGE_PARTICIPANT_CONNECT = "meshagent.agent.participant.connect"
+AGENT_MESSAGE_PARTICIPANT_DISCONNECT = "meshagent.agent.participant.disconnect"
 AGENT_MESSAGE_CAPABILITIES_REQUEST = "meshagent.agent.capabilities_request"
 AGENT_MESSAGE_CAPABILITIES_RESPONSE = "meshagent.agent.capabilities_response"
 AGENT_MESSAGE_MODELS_REQUEST = "meshagent.agent.models.request"
@@ -50,6 +52,7 @@ AGENT_EVENT_TURN_STEER_REJECTED = "meshagent.agent.turn.steer.rejected"
 AGENT_EVENT_TURN_STARTED = "meshagent.agent.turn.started"
 AGENT_EVENT_TURN_ENDED = "meshagent.agent.turn.ended"
 AGENT_EVENT_THREAD_STARTED = "meshagent.agent.thread.started"
+AGENT_EVENT_THREAD_LOADED = "meshagent.agent.thread.loaded"
 AGENT_EVENT_REASONING_CONTENT_STARTED = "meshagent.agent.reasoning_content.started"
 AGENT_EVENT_REASONING_CONTENT_DELTA = "meshagent.agent.reasoning_content.delta"
 AGENT_EVENT_REASONING_CONTENT_ENDED = "meshagent.agent.reasoning_content.ended"
@@ -68,7 +71,9 @@ AGENT_EVENT_TOOL_CALL_ENDED = "meshagent.agent.tool_call.ended"
 AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
     "meshagent.agent.tool_call.approval_requested"
 )
+AGENT_EVENT_SECRET_REQUESTED = "meshagent.agent.secret.requested"
 AGENT_EVENT_THREAD_STATUS = "meshagent.agent.thread.status"
+AGENT_EVENT_CONNECTION_STATUS = "meshagent.agent.connection.status"
 AGENT_EVENT_THREAD_EVENT = "meshagent.agent.thread.event"
 AGENT_EVENT_IMAGE_GENERATION_STARTED = "meshagent.agent.image_generation.started"
 AGENT_EVENT_IMAGE_GENERATION_PARTIAL = "meshagent.agent.image_generation.partial"
@@ -90,6 +95,7 @@ AGENT_EVENT_CONTEXT_COMPACTED = "meshagent.agent.context.compacted"
 AGENT_EVENT_USAGE_UPDATED = "meshagent.agent.usage.updated"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
 AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
+AGENT_MESSAGE_SECRET_RESPONSE = "meshagent.agent.secret.response"
 
 
 class AgentMessage(BaseModel):
@@ -189,10 +195,22 @@ class ClearThread(AgentThreadMessage):
 
 class OpenThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_OPEN]
+    load: bool | None = None
+    since_turn: str | None = None
 
 
 class CloseThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLOSE]
+
+
+class ParticipantConnect(AgentMessage):
+    type: Literal[AGENT_MESSAGE_PARTICIPANT_CONNECT]
+    participant_id: str
+
+
+class ParticipantDisconnect(AgentMessage):
+    type: Literal[AGENT_MESSAGE_PARTICIPANT_DISCONNECT]
+    participant_id: str
 
 
 class DeleteThread(AgentThreadMessage):
@@ -252,6 +270,8 @@ class AgentModelInfo(BaseModel):
     realtime_protocols: list[Literal["websocket", "webrtc"]] = Field(
         default_factory=list
     )
+    supports_attachments: bool = False
+    accepts: list[str] = Field(default_factory=list)
     active: bool = False
 
 
@@ -300,6 +320,8 @@ class AgentModelChanged(AgentThreadMessage):
     realtime_protocols: list[Literal["websocket", "webrtc"]] = Field(
         default_factory=list
     )
+    supports_attachments: bool = False
+    accepts: list[str] = Field(default_factory=list)
 
 
 class ThreadCleared(AgentThreadMessage):
@@ -363,7 +385,7 @@ class TurnStarted(AgentThreadMessage):
 class TurnEnded(AgentThreadMessage):
     type: Literal[AGENT_EVENT_TURN_ENDED]
     turn_id: str
-    error: Optional[AgentError]
+    error: Optional[AgentError] = None
 
 
 class ThreadStarted(AgentMessage):
@@ -371,6 +393,12 @@ class ThreadStarted(AgentMessage):
     source_message_id: str
     thread_id: str
     realtime_connection: "AgentRealtimeConnectionInfo | None" = None
+
+
+class ThreadLoaded(AgentThreadMessage):
+    type: Literal[AGENT_EVENT_THREAD_LOADED]
+    source_message_id: str | None = None
+    since_turn: str | None = None
 
 
 class AgentRealtimeConnectionInfo(BaseModel):
@@ -533,6 +561,28 @@ class AgentToolCallApprovalRequested(AgentLLMMessage):
     arguments: Optional[dict[str, Any]] = None
 
 
+class AgentSecretOAuthRequest(BaseModel):
+    secret_name: str
+    client_secret_id: str | None = None
+    scopes: list[str] | None = None
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    registration_endpoint: str | None = None
+    redirect_uri: str | None = None
+    client_id: str | None = None
+    no_pkce: bool = False
+
+
+class AgentSecretRequested(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_SECRET_REQUESTED]
+    turn_id: str
+    request_id: str
+    secret_name: str
+    prompt: str | None = None
+    oauth: AgentSecretOAuthRequest | None = None
+    challenge: str | None = None
+
+
 class AgentThreadStatus(AgentThreadMessage):
     type: Literal[AGENT_EVENT_THREAD_STATUS]
     status: str | None = None
@@ -543,6 +593,14 @@ class AgentThreadStatus(AgentThreadMessage):
     total_bytes: int | None = None
     lines_added: int | None = None
     lines_removed: int | None = None
+
+
+class AgentConnectionStatus(AgentMessage):
+    type: Literal[AGENT_EVENT_CONNECTION_STATUS]
+    status: str
+    message: str | None = None
+    reason: str | None = None
+    retry_in_seconds: float | None = None
 
 
 class AgentThreadEvent(AgentLLMMessage):
@@ -739,6 +797,16 @@ class RejectAgentToolCall(AgentThreadMessage):
     item_id: str
 
 
+class AgentSecretResponse(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_SECRET_RESPONSE]
+    turn_id: str
+    request_id: str
+    value: str | None = None
+    authorization_code: str | None = None
+    redirect_uri: str | None = None
+    error: str | None = None
+
+
 _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_START: StartThread,
     AGENT_MESSAGE_TURN_START: TurnStart,
@@ -749,6 +817,8 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
+    AGENT_MESSAGE_PARTICIPANT_CONNECT: ParticipantConnect,
+    AGENT_MESSAGE_PARTICIPANT_DISCONNECT: ParticipantDisconnect,
     AGENT_MESSAGE_THREAD_DELETE: DeleteThread,
     AGENT_MESSAGE_THREAD_RENAME: RenameThread,
     AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
@@ -768,6 +838,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_TURN_STARTED: TurnStarted,
     AGENT_EVENT_TURN_ENDED: TurnEnded,
     AGENT_EVENT_THREAD_STARTED: ThreadStarted,
+    AGENT_EVENT_THREAD_LOADED: ThreadLoaded,
     AGENT_EVENT_REASONING_CONTENT_STARTED: AgentReasoningContentStarted,
     AGENT_EVENT_REASONING_CONTENT_DELTA: AgentReasoningContentDelta,
     AGENT_EVENT_REASONING_CONTENT_ENDED: AgentReasoningContentEnded,
@@ -784,7 +855,9 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_TOOL_CALL_LOG_DELTA: AgentToolCallLogDelta,
     AGENT_EVENT_TOOL_CALL_ENDED: AgentToolCallEnded,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED: AgentToolCallApprovalRequested,
+    AGENT_EVENT_SECRET_REQUESTED: AgentSecretRequested,
     AGENT_EVENT_THREAD_STATUS: AgentThreadStatus,
+    AGENT_EVENT_CONNECTION_STATUS: AgentConnectionStatus,
     AGENT_EVENT_THREAD_EVENT: AgentThreadEvent,
     AGENT_EVENT_IMAGE_GENERATION_STARTED: AgentImageGenerationStarted,
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL: AgentImageGenerationPartial,
@@ -804,6 +877,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_USAGE_UPDATED: AgentUsageUpdated,
     AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,
     AGENT_MESSAGE_TOOL_CALL_REJECT: RejectAgentToolCall,
+    AGENT_MESSAGE_SECRET_RESPONSE: AgentSecretResponse,
 }
 
 

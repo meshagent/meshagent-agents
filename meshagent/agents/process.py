@@ -46,6 +46,8 @@ from .messages import (
     AGENT_MESSAGE_MODEL_CHANGE,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_MODELS_RESPONSE,
+    AGENT_MESSAGE_PARTICIPANT_CONNECT,
+    AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
     AGENT_MESSAGE_THREAD_CLOSE,
@@ -57,6 +59,7 @@ from .messages import (
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_THREAD_EVENT,
+    AGENT_EVENT_THREAD_LOADED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
@@ -71,9 +74,11 @@ from .messages import (
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
+    AGENT_MESSAGE_SECRET_RESPONSE,
     AGENT_MESSAGE_TURN_INTERRUPT,
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
+    AGENT_EVENT_SECRET_REQUESTED,
     AgentError,
     AgentFileContent,
     AgentContextCompacted,
@@ -83,6 +88,8 @@ from .messages import (
     AgentTextContent,
     AgentToolCallArgumentsDelta,
     AgentToolCallApprovalRequested,
+    AgentSecretRequested,
+    AgentSecretResponse,
     AgentToolCallEnded,
     AgentToolCallInProgress,
     AgentToolCallPending,
@@ -98,6 +105,7 @@ from .messages import (
     AgentAudioTranscriptionFailed,
     AgentAudioTranscriptionStarted,
     AgentThreadEvent,
+    AgentThreadMessage,
     AgentContextWindowUsage,
     AgentUsageUpdated,
     AgentProviderInfo,
@@ -116,9 +124,12 @@ from .messages import (
     ModelsRequest,
     ModelsResponse,
     OpenThread,
+    ParticipantConnect,
+    ParticipantDisconnect,
     RejectAgentToolCall,
     RenameThread,
     StartThread,
+    ThreadLoaded,
     ThreadStarted,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
@@ -161,6 +172,7 @@ _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
         AGENT_MESSAGE_THREAD_RENAME,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
         AGENT_MESSAGE_TOOL_CALL_REJECT,
+        AGENT_MESSAGE_SECRET_RESPONSE,
         AGENT_MESSAGE_TURN_INTERRUPT,
         AGENT_MESSAGE_TURN_START,
         AGENT_MESSAGE_TURN_STEER,
@@ -637,6 +649,15 @@ def _coerce_message_data(data: AgentMessage, model: type[_MessageT]) -> _Message
     return model.model_validate(data.model_dump(mode="python"))
 
 
+def _message_turn_id(message: AgentThreadMessage) -> str | None:
+    data = message.model_dump(mode="python")
+    value = data.get("turn_id")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized != "" else None
+
+
 def _agent_audio_format_from_llm_audio_format(
     audio_format: LLMAudioFormat | None,
 ) -> AgentAudioFormat | None:
@@ -693,6 +714,8 @@ def agent_model_info(
         ),
         turn_detection=model_info.turn_detection,
         realtime_protocols=list(model_info.realtime_protocols),
+        supports_attachments=model_info.supports_attachments,
+        accepts=list(model_info.accepts),
         active=provider.name == current_provider and model_info.name == current_model,
     )
 
@@ -857,6 +880,12 @@ class AgentSupervisor:
         self._queue: asyncio.Queue[Message] = asyncio.Queue()
         self._lifecycle_lock = asyncio.Lock()
         self._route_lock = asyncio.Lock()
+        self._participants_by_client_id: dict[str, Participant] = {}
+        self._participant_connection_counts_by_client_id: dict[str, int] = {}
+        self._open_thread_ids_by_client_id: dict[str, set[str]] = {}
+        self._open_client_ids_by_thread_id: dict[str, set[str]] = {}
+        self._pending_stop_thread_ids_after_turn: set[str] = set()
+        self._pending_stop_thread_tasks_by_thread_id: dict[str, asyncio.Task[None]] = {}
 
     @property
     def state(self) -> SupervisorState:
@@ -982,12 +1011,20 @@ class AgentSupervisor:
             self._stop.clear()
 
             try:
+                logger.info(
+                    "agent supervisor starting with %d channels and %d processes",
+                    len(self.channels),
+                    len(self.processes),
+                )
                 await self.on_start()
-                await self._ensure_children_started()
+                await self._ensure_children_started(fatal=True)
                 self._run_task = asyncio.create_task(self.run())
                 self._state = "started"
+                logger.info("agent supervisor started")
             except Exception:
                 logger.exception("agent supervisor failed during start")
+                with contextlib.suppress(Exception):
+                    await self._stop_children()
                 self._state = "failed"
                 self._run_task = None
                 raise
@@ -1001,6 +1038,9 @@ class AgentSupervisor:
 
             try:
                 self._stop.set()
+                for task in self._pending_stop_thread_tasks_by_thread_id.values():
+                    task.cancel()
+                self._pending_stop_thread_tasks_by_thread_id.clear()
                 self._queue.shutdown()
                 await self._run_task
                 await self.on_stop()
@@ -1020,6 +1060,11 @@ class AgentSupervisor:
         return None
 
     async def _stop_thread_process(self, *, thread_id: str) -> None:
+        self._pending_stop_thread_ids_after_turn.discard(thread_id)
+        task = self._pending_stop_thread_tasks_by_thread_id.pop(thread_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        self._forget_thread_tracking(thread_id=thread_id)
         process = self._process_for_thread(thread_id=thread_id)
         if process is None:
             return
@@ -1028,6 +1073,69 @@ class AgentSupervisor:
         if process.supervisor is self:
             with contextlib.suppress(ValueError):
                 await process.stop(self)
+
+    async def _stop_thread_process_when_idle(self, *, thread_id: str) -> None:
+        process = self._process_for_thread(thread_id=thread_id)
+        if process is not None and process.turn_id is not None:
+            self._pending_stop_thread_ids_after_turn.add(thread_id)
+            self._schedule_pending_thread_stop(thread_id=thread_id)
+            return
+        await self._stop_thread_process(thread_id=thread_id)
+
+    def _thread_has_open_clients(self, *, thread_id: str) -> bool:
+        client_ids = self._open_client_ids_by_thread_id.get(thread_id)
+        return client_ids is not None and len(client_ids) > 0
+
+    async def _stop_pending_thread_process_when_idle(self, *, thread_id: str) -> None:
+        try:
+            while thread_id in self._pending_stop_thread_ids_after_turn:
+                if self._stop.is_set() or self._state == "stopping":
+                    return
+                if self._thread_has_open_clients(thread_id=thread_id):
+                    await asyncio.sleep(0.05)
+                    continue
+                process = self._process_for_thread(thread_id=thread_id)
+                if process is None:
+                    self._pending_stop_thread_ids_after_turn.discard(thread_id)
+                    return
+                if process.turn_id is None:
+                    await self._stop_thread_process(thread_id=thread_id)
+                    return
+                await asyncio.sleep(0.05)
+        finally:
+            task = self._pending_stop_thread_tasks_by_thread_id.get(thread_id)
+            if task is asyncio.current_task():
+                self._pending_stop_thread_tasks_by_thread_id.pop(thread_id, None)
+
+    def _schedule_pending_thread_stop(self, *, thread_id: str) -> None:
+        task = self._pending_stop_thread_tasks_by_thread_id.get(thread_id)
+        if task is not None and not task.done():
+            return
+        self._pending_stop_thread_tasks_by_thread_id[thread_id] = asyncio.create_task(
+            self._stop_pending_thread_process_when_idle(thread_id=thread_id)
+        )
+
+    def _defer_stop_thread_process_after_turn(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+    ) -> None:
+        async def stop_after_turn_cleanup() -> None:
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                process = self._process_for_thread(thread_id=thread_id)
+                if process is None or process.turn_id != turn_id:
+                    break
+            if self._thread_has_open_clients(thread_id=thread_id):
+                self._pending_stop_thread_ids_after_turn.discard(thread_id)
+                return
+            process = self._process_for_thread(thread_id=thread_id)
+            if process is not None and process.turn_id is not None:
+                return
+            await self._stop_thread_process(thread_id=thread_id)
+
+        asyncio.create_task(stop_after_turn_cleanup())
 
     def _process_for_turn(self, *, turn_id: str) -> AgentProcess | None:
         for process in self.processes:
@@ -1042,6 +1150,126 @@ class AgentSupervisor:
             sender=message.sender,
             source=message.source,
         )
+
+    @staticmethod
+    def _client_id_for_thread_tracking(message: Message) -> str | None:
+        sender = message.sender
+        if sender is None or sender.id.strip() == "":
+            return None
+        return sender.id
+
+    def _track_thread_open_for_client(
+        self,
+        *,
+        thread_id: str,
+        client_id: str | None,
+    ) -> bool:
+        if client_id is None:
+            return False
+
+        self._pending_stop_thread_ids_after_turn.discard(thread_id)
+        task = self._pending_stop_thread_tasks_by_thread_id.pop(thread_id, None)
+        if task is not None:
+            task.cancel()
+        thread_ids = self._open_thread_ids_by_client_id.setdefault(client_id, set())
+        client_ids = self._open_client_ids_by_thread_id.setdefault(
+            thread_id,
+            set(),
+        )
+        was_open = len(client_ids) > 0
+        thread_ids.add(thread_id)
+        client_ids.add(client_id)
+        return was_open
+
+    def _track_thread_open_for_message(
+        self,
+        *,
+        thread_id: str,
+        message: Message,
+    ) -> bool:
+        return self._track_thread_open_for_client(
+            thread_id=thread_id,
+            client_id=self._client_id_for_thread_tracking(message),
+        )
+
+    def _track_thread_close_for_client(
+        self,
+        *,
+        thread_id: str,
+        client_id: str | None,
+    ) -> bool:
+        if client_id is None:
+            self._forget_thread_tracking(thread_id=thread_id)
+            return False
+
+        thread_ids = self._open_thread_ids_by_client_id.get(client_id)
+        if thread_ids is not None:
+            thread_ids.discard(thread_id)
+            if len(thread_ids) == 0:
+                self._open_thread_ids_by_client_id.pop(client_id, None)
+
+        client_ids = self._open_client_ids_by_thread_id.get(thread_id)
+        if client_ids is None:
+            return False
+
+        client_ids.discard(client_id)
+        if len(client_ids) > 0:
+            return True
+
+        self._open_client_ids_by_thread_id.pop(thread_id, None)
+        return False
+
+    def _track_participant_connected(
+        self,
+        *,
+        participant_id: str,
+        sender: Participant | None,
+    ) -> None:
+        client_id = participant_id.strip()
+        if client_id == "":
+            return
+        if sender is not None:
+            self._participants_by_client_id[client_id] = sender
+        self._participant_connection_counts_by_client_id[client_id] = (
+            self._participant_connection_counts_by_client_id.get(client_id, 0) + 1
+        )
+
+    async def _track_participant_disconnected(self, *, participant_id: str) -> None:
+        client_id = participant_id.strip()
+        if client_id == "":
+            return
+
+        connection_count = (
+            self._participant_connection_counts_by_client_id.get(client_id, 0) - 1
+        )
+        if connection_count > 0:
+            self._participant_connection_counts_by_client_id[client_id] = (
+                connection_count
+            )
+            return
+
+        self._participant_connection_counts_by_client_id.pop(client_id, None)
+        self._participants_by_client_id.pop(client_id, None)
+        thread_ids = list(self._open_thread_ids_by_client_id.pop(client_id, set()))
+        for thread_id in thread_ids:
+            client_ids = self._open_client_ids_by_thread_id.get(thread_id)
+            if client_ids is None:
+                continue
+            client_ids.discard(client_id)
+            if len(client_ids) > 0:
+                continue
+            self._open_client_ids_by_thread_id.pop(thread_id, None)
+            await self._stop_thread_process_when_idle(thread_id=thread_id)
+
+    def _forget_thread_tracking(self, *, thread_id: str) -> None:
+        client_ids = self._open_client_ids_by_thread_id.pop(thread_id, set())
+        for client_id in client_ids:
+            thread_ids = self._open_thread_ids_by_client_id.get(client_id)
+            if thread_ids is None:
+                continue
+            thread_ids.discard(thread_id)
+            if len(thread_ids) == 0:
+                self._open_thread_ids_by_client_id.pop(client_id, None)
 
     def _send_to_channels(self, message: Message) -> None:
         for channel in self.channels:
@@ -1205,7 +1433,31 @@ class AgentSupervisor:
         routed_message = message
         target_processes: list[AgentProcess] | None = None
         message_type = message.data.type
-        if message_type == AGENT_MESSAGE_THREAD_START:
+        if message_type == AGENT_MESSAGE_PARTICIPANT_CONNECT:
+            participant_connect = _coerce_message_data(message.data, ParticipantConnect)
+            self._track_participant_connected(
+                participant_id=participant_connect.participant_id,
+                sender=message.sender,
+            )
+            return
+
+        elif message_type == AGENT_MESSAGE_PARTICIPANT_DISCONNECT:
+            participant_disconnect = _coerce_message_data(
+                message.data,
+                ParticipantDisconnect,
+            )
+            await self._track_participant_disconnected(
+                participant_id=participant_disconnect.participant_id
+            )
+            return
+
+        elif message_type == AGENT_EVENT_TURN_ENDED:
+            turn_ended = _coerce_message_data(message.data, TurnEnded)
+            if not self._thread_has_open_clients(thread_id=turn_ended.thread_id):
+                self._pending_stop_thread_ids_after_turn.add(turn_ended.thread_id)
+                self._schedule_pending_thread_stop(thread_id=turn_ended.thread_id)
+
+        elif message_type == AGENT_MESSAGE_THREAD_START:
             start_thread = _coerce_message_data(message.data, StartThread)
             try:
                 thread_id = await self.create_thread_id(
@@ -1250,6 +1502,10 @@ class AgentSupervisor:
                     sender=message.sender,
                     thread_id=thread_id,
                     realtime_connection=realtime_connection,
+                )
+                self._track_thread_open_for_message(
+                    thread_id=thread_id,
+                    message=message,
                 )
                 return
 
@@ -1302,11 +1558,16 @@ class AgentSupervisor:
                 sender=message.sender,
                 thread_id=thread_id,
             )
+            self._track_thread_open_for_message(thread_id=thread_id, message=message)
             routed_message = self._copy_message(message, data=turn_start)
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TURN_START:
             turn_start = _coerce_message_data(message.data, TurnStart)
+            self._track_thread_open_for_message(
+                thread_id=turn_start.thread_id,
+                message=message,
+            )
             process = self._process_for_thread(thread_id=turn_start.thread_id)
             if process is None:
                 process, rejection = self._create_thread_process_for_route(
@@ -1329,6 +1590,10 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TURN_STEER:
             turn_steer = _coerce_message_data(message.data, TurnSteer)
+            self._track_thread_open_for_message(
+                thread_id=turn_steer.thread_id,
+                message=message,
+            )
             process = self._process_for_thread(thread_id=turn_steer.thread_id)
             if process is None:
                 process, rejection = self._create_thread_process_for_route(
@@ -1408,6 +1673,18 @@ class AgentSupervisor:
             else:
                 target_processes = []
 
+        elif message_type == AGENT_MESSAGE_SECRET_RESPONSE:
+            response = _coerce_message_data(message.data, AgentSecretResponse)
+            process = self._process_for_thread(thread_id=response.thread_id)
+            routed_message = self._copy_message(
+                message,
+                data=response,
+            )
+            if process is not None and process.turn_id == response.turn_id:
+                target_processes = [process]
+            else:
+                target_processes = []
+
         elif message_type == AGENT_MESSAGE_THREAD_CLEAR:
             clear_thread = _coerce_message_data(message.data, ClearThread)
             process = self._process_for_thread(thread_id=clear_thread.thread_id)
@@ -1447,6 +1724,32 @@ class AgentSupervisor:
             else:
                 thread_message = _coerce_message_data(message.data, CloseThread)
 
+            routed_message = self._copy_message(
+                message,
+                data=thread_message,
+            )
+            client_id = self._client_id_for_thread_tracking(message)
+            if message_type == AGENT_MESSAGE_THREAD_OPEN:
+                thread_was_open = self._track_thread_open_for_client(
+                    thread_id=thread_message.thread_id,
+                    client_id=client_id,
+                )
+                if thread_was_open:
+                    self._send_to_channels(routed_message)
+                    return
+            else:
+                thread_still_has_clients = self._track_thread_close_for_client(
+                    thread_id=thread_message.thread_id,
+                    client_id=client_id,
+                )
+                self._send_to_channels(routed_message)
+                if thread_still_has_clients:
+                    return
+                await self._stop_thread_process_when_idle(
+                    thread_id=thread_message.thread_id
+                )
+                return
+
             process = self._process_for_thread(thread_id=thread_message.thread_id)
             if process is None and message_type == AGENT_MESSAGE_THREAD_OPEN:
                 process, _ = self._create_thread_process_for_route(
@@ -1455,10 +1758,6 @@ class AgentSupervisor:
             if process is None:
                 return
 
-            routed_message = self._copy_message(
-                message,
-                data=thread_message,
-            )
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_MODELS_REQUEST:
@@ -1471,21 +1770,27 @@ class AgentSupervisor:
         target_processes = await self._ensure_routing_processes_started(
             processes=target_processes
         )
-        if message_type == AGENT_MESSAGE_THREAD_OPEN:
+        if (
+            message_type == AGENT_MESSAGE_THREAD_OPEN
+            and isinstance(routed_message.data, OpenThread)
+            and routed_message.data.load is not True
+        ):
             self._buffer_unflushed_thread_storage_for_open(processes=target_processes)
         self._send_to_channels(routed_message)
         self._send_to_processes(routed_message, processes=target_processes)
 
-    async def _ensure_children_started(self) -> None:
+    async def _ensure_children_started(self, *, fatal: bool = False) -> None:
         for channel in self.channels:
             if channel.state == "stopped":
                 try:
                     await channel.start(self)
                 except Exception:
                     logger.exception(
-                        "channel %s failed during start; continuing",
+                        "channel %s failed during start",
                         channel.__class__.__name__,
                     )
+                    if fatal:
+                        raise
 
         for process in self.processes:
             if process.state == "stopped":
@@ -1493,9 +1798,11 @@ class AgentSupervisor:
                     await process.start(self)
                 except Exception:
                     logger.exception(
-                        "process %s failed during start; continuing",
+                        "process %s failed during start",
                         process.__class__.__name__,
                     )
+                    if fatal:
+                        raise
 
     async def _stop_children(self) -> None:
         errors: list[Exception] = []
@@ -1533,7 +1840,17 @@ class AgentSupervisor:
                 with contextlib.suppress(asyncio.QueueShutDown):
                     message = await self._queue.get()
                     async with self._route_lock:
-                        await self._route(message)
+                        try:
+                            await self._route(message)
+                        except Exception:
+                            logger.exception(
+                                "agent supervisor failed while routing %s message",
+                                message.data.type,
+                            )
+        except Exception:
+            logger.exception("agent supervisor run loop failed")
+            self._state = "failed"
+            raise
         finally:
             await self._stop_children()
 
@@ -1844,6 +2161,7 @@ class LLMAgentProcess(AgentProcess):
             AGENT_MESSAGE_MODEL_CHANGE: self.on_model_change,
             AGENT_MESSAGE_TOOL_CALL_APPROVE: self.on_tool_call_approve,
             AGENT_MESSAGE_TOOL_CALL_REJECT: self.on_tool_call_reject,
+            AGENT_MESSAGE_SECRET_RESPONSE: self.on_secret_response,
         }
         self._session_context: AgentSessionContext | None = None
         self._turn_task: asyncio.Task[None] | None = None
@@ -1856,6 +2174,9 @@ class LLMAgentProcess(AgentProcess):
         self._participant = participant
         self._content_schemes: list[ContentScheme] = []
         self._pending_tool_call_approvals: dict[str, asyncio.Future[bool]] = {}
+        self._pending_secret_requests: dict[
+            str, asyncio.Future[AgentSecretResponse]
+        ] = {}
         self._active_turn_sender: Participant | None = None
         self._active_turn_toolkits: list[Toolkit] | None = None
         self._usage_emitted_turn_ids: set[str] = set()
@@ -1864,6 +2185,13 @@ class LLMAgentProcess(AgentProcess):
         self._pending_realtime_audio_chunks_by_turn_id: dict[
             str, list[_PendingRealtimeAudioChunk]
         ] = {}
+        self._pending_runtime_configuration: (
+            tuple[
+                list[LLMProvider],
+                list[Toolkit],
+            ]
+            | None
+        ) = None
         self._pending_realtime_audio_events_by_turn_id: dict[
             str, list[dict[str, Any]]
         ] = {}
@@ -1905,6 +2233,61 @@ class LLMAgentProcess(AgentProcess):
     @property
     def thread_status_publisher(self) -> ThreadStatusPublisher | None:
         return self._thread_status_publisher
+
+    def configure_runtime(
+        self,
+        *,
+        llm_providers: list[LLMProvider],
+        toolkits: list[Toolkit],
+    ) -> None:
+        if self._turn_task is not None or self._turn_id is not None:
+            self._pending_runtime_configuration = (llm_providers, toolkits)
+            return
+
+        self._apply_runtime_configuration(
+            llm_providers=llm_providers,
+            toolkits=toolkits,
+        )
+
+    def _apply_runtime_configuration(
+        self,
+        *,
+        llm_providers: list[LLMProvider],
+        toolkits: list[Toolkit],
+    ) -> None:
+        providers = self._normalize_llm_providers(
+            llm_adapter=None,
+            llm_providers=llm_providers,
+            default_provider=None,
+        )
+        current_provider_name = self._current_provider.name
+        self._llm_providers_by_name = {
+            provider.name: provider for provider in providers
+        }
+        self._default_provider = providers[0]
+        self._current_provider = self._llm_providers_by_name.get(
+            current_provider_name, self._default_provider
+        )
+        self.llm_adapter = self._current_provider.adapter
+        self._current_model = self.llm_adapter.default_model()
+        current_model_info = self._current_model_info()
+        self._current_voice = (
+            current_model_info.default_output_voice
+            if current_model_info is not None
+            else None
+        )
+        self._toolkits = list(toolkits)
+
+    def _apply_pending_runtime_configuration(self) -> None:
+        pending = self._pending_runtime_configuration
+        if pending is None:
+            return
+        self._pending_runtime_configuration = None
+        llm_providers, toolkits = pending
+        self._apply_runtime_configuration(
+            llm_providers=llm_providers,
+            toolkits=toolkits,
+        )
 
     @staticmethod
     def _provider_name_for_adapter(adapter: LLMAdapter) -> str:
@@ -2115,6 +2498,10 @@ class LLMAgentProcess(AgentProcess):
             realtime_protocols=(
                 list(model_info.realtime_protocols) if model_info is not None else []
             ),
+            supports_attachments=(
+                model_info.supports_attachments if model_info is not None else False
+            ),
+            accepts=(list(model_info.accepts) if model_info is not None else []),
         )
 
     def _restore_current_model_from_thread_storage(self) -> bool:
@@ -2267,7 +2654,11 @@ class LLMAgentProcess(AgentProcess):
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
         payload = self._agent_message_with_participant_name(payload)
         thread_storage = self.thread_storage
-        if thread_storage is not None:
+        if (
+            thread_storage is not None
+            and isinstance(payload, AgentThreadMessage)
+            and payload.thread_id == self._thread_id
+        ):
             thread_storage.push_message(message=payload, sender=sender)
 
         super().emit(sender=sender, payload=payload)
@@ -2275,6 +2666,12 @@ class LLMAgentProcess(AgentProcess):
     def handles(self, message: Message) -> bool:
         message_type = message.data.type
         if message_type not in self._handlers:
+            return False
+
+        if message_type == AGENT_MESSAGE_MODELS_REQUEST:
+            return True
+
+        if not isinstance(message.data, AgentThreadMessage):
             return False
 
         return message.data.thread_id == self._thread_id
@@ -2724,6 +3121,52 @@ class LLMAgentProcess(AgentProcess):
             if not future.done():
                 future.cancel()
 
+    def _cancel_pending_secret_requests(self) -> None:
+        pending_requests = list(self._pending_secret_requests.values())
+        self._pending_secret_requests.clear()
+        for future in pending_requests:
+            if not future.done():
+                future.cancel()
+
+    async def request_user_secret(
+        self,
+        *,
+        secret_name: str,
+        prompt: str | None = None,
+        oauth: dict[str, Any] | None = None,
+        challenge: str | None = None,
+    ) -> AgentSecretResponse:
+        turn_id = self._turn_id
+        thread_id = self.thread_id
+        if turn_id is None or thread_id is None:
+            raise RuntimeError("user secret requested without an active turn")
+
+        request_id = str(uuid.uuid4())
+        request_future: asyncio.Future[AgentSecretResponse] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending_secret_requests[request_id] = request_future
+        self.emit(
+            sender=self._active_turn_sender,
+            payload=AgentSecretRequested(
+                type=AGENT_EVENT_SECRET_REQUESTED,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                secret_name=secret_name,
+                prompt=prompt,
+                oauth=oauth,
+                challenge=challenge,
+            ),
+        )
+
+        try:
+            return await request_future
+        finally:
+            existing_future = self._pending_secret_requests.get(request_id)
+            if existing_future is request_future:
+                del self._pending_secret_requests[request_id]
+
     async def _request_tool_call_approval(
         self,
         context: ToolContext,
@@ -2768,6 +3211,13 @@ class LLMAgentProcess(AgentProcess):
             return
 
         approval_future.set_result(approved)
+
+    async def _resolve_secret_request(self, response: AgentSecretResponse) -> None:
+        request_future = self._pending_secret_requests.get(response.request_id)
+        if request_future is None or request_future.done():
+            return
+
+        request_future.set_result(response)
 
     def _resolve_turn_toolkit_client_options(
         self,
@@ -4060,6 +4510,7 @@ class LLMAgentProcess(AgentProcess):
         self._turn_task = None
         self._active_turn_queue = None
         self._active_turn_queue_updated = None
+        self._apply_pending_runtime_configuration()
 
         if not self._stop.is_set():
             self._schedule_next_turn()
@@ -4070,6 +4521,29 @@ class LLMAgentProcess(AgentProcess):
         if thread_storage is not None:
             await thread_storage.wait_until_ready()
         self._restore_current_model_from_thread_storage()
+        if request.load is True:
+            if thread_storage is not None:
+                for stored_message in self._stored_agent_messages_since_turn(
+                    thread_storage=thread_storage,
+                    since_turn=request.since_turn,
+                ):
+                    super().emit(
+                        sender=message.sender,
+                        payload=self._agent_message_with_participant_name(
+                            stored_message
+                        ),
+                    )
+            super().emit(
+                sender=message.sender,
+                payload=self._agent_message_with_participant_name(
+                    ThreadLoaded(
+                        type=AGENT_EVENT_THREAD_LOADED,
+                        thread_id=request.thread_id,
+                        source_message_id=request.message_id,
+                        since_turn=request.since_turn,
+                    )
+                ),
+            )
         super().emit(
             sender=message.sender,
             payload=self._agent_message_with_participant_name(
@@ -4106,6 +4580,30 @@ class LLMAgentProcess(AgentProcess):
             sender=message.sender,
             source=message.source,
         )
+
+    @staticmethod
+    def _stored_agent_messages_since_turn(
+        *,
+        thread_storage: ThreadStorage,
+        since_turn: str | None,
+    ) -> list[AgentThreadMessage]:
+        messages = thread_storage.agent_messages()
+        if since_turn is None or since_turn.strip() == "":
+            return messages
+
+        normalized_since_turn = since_turn.strip()
+        for index, stored_message in enumerate(messages):
+            if stored_message.thread_id != thread_storage.path:
+                continue
+            if stored_message.message_id == normalized_since_turn:
+                return messages[index:]
+            turn_id = _message_turn_id(stored_message)
+            if turn_id == normalized_since_turn:
+                return messages[index:]
+            if isinstance(stored_message, (TurnStart, TurnSteer)):
+                if stored_message.message_id == normalized_since_turn:
+                    return messages[index:]
+        return []
 
     async def on_thread_close(self, message: Message) -> None:
         _coerce_message_data(message.data, CloseThread)
@@ -4654,6 +5152,13 @@ class LLMAgentProcess(AgentProcess):
             approved=False,
         )
 
+    async def on_secret_response(self, message: Message) -> None:
+        response = _coerce_message_data(message.data, AgentSecretResponse)
+        if self._turn_id != response.turn_id:
+            return
+
+        await self._resolve_secret_request(response)
+
     async def on_stop(self) -> None:
         if self._turn_task is not None:
             active_next_task = self._active_next_task
@@ -4672,6 +5177,7 @@ class LLMAgentProcess(AgentProcess):
         self._pending_realtime_audio_events_by_turn_id.clear()
         self._pending_realtime_audio_status_active = False
         self._cancel_pending_tool_call_approvals()
+        self._cancel_pending_secret_requests()
         await self._clear_pending_status_messages()
         thread_status_publisher = self.thread_status_publisher
         if thread_status_publisher is not None:
