@@ -83,6 +83,7 @@ class _FakeDatasets:
         self.rows: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
         self.create_calls: list[dict[str, Any]] = []
         self.insert_calls: list[dict[str, Any]] = []
+        self.merge_calls: list[dict[str, Any]] = []
         self.optimize_calls: list[dict[str, Any]] = []
         self.update_calls: list[dict[str, Any]] = []
         self.raise_on_existing_create = False
@@ -218,6 +219,35 @@ class _FakeDatasets:
                 row.update(stored_values)
                 return
         raise AssertionError(f"row not found for {where}")
+
+    async def merge(
+        self,
+        *,
+        table: str,
+        on: str,
+        records: list[dict[str, Any]],
+        namespace: list[str] | None = None,
+    ) -> None:
+        self.merge_calls.append(
+            {
+                "table": table,
+                "on": on,
+                "records": records,
+                "namespace": namespace,
+            }
+        )
+        key = self._key(table=table, namespace=namespace)
+        rows = self.rows.setdefault(key, [])
+        stored_records = [self._stored_record(record) for record in records]
+        for stored_record in stored_records:
+            matched = False
+            for row in rows:
+                if row.get(on) == stored_record.get(on):
+                    row.update(stored_record)
+                    matched = True
+                    break
+            if not matched:
+                rows.append(stored_record)
 
     async def optimize(
         self,
@@ -842,6 +872,8 @@ async def test_dataset_thread_storage_persists_only_accepted_user_turns() -> Non
     assert rows[1]["item_id"] == "accepted"
     assert rows[1]["turn_id"] == "turn-accepted"
     assert rows[1]["type"] == AGENT_MESSAGE_TURN_START
+    assert room.datasets.merge_calls[0]["on"] == "sequence"
+    assert room.datasets.merge_calls[0]["records"][0]["sequence"] == rows[1]["sequence"]
     assert accepted_data["type"] == AGENT_EVENT_TURN_START_ACCEPTED
     assert accepted_data["turn_id"] == "turn-accepted"
     assert accepted_data["source_message_id"] == "accepted"
@@ -1752,7 +1784,7 @@ async def test_dataset_thread_storage_async_restore_hydrates_image_dataset_uris(
     None
 ):
     room = _FakeRoom()
-    saved_image = await ImagesDataset(room).save(
+    saved_image = await ImagesDataset(room.datasets).save(
         image_id="image-1",
         data=b"fake image bytes",
         mime_type="image/png",
@@ -2267,3 +2299,25 @@ async def test_dataset_thread_storage_restores_context_with_llm_reader() -> None
         "created_at": "2026-05-05T00:00:00Z",
     }
     assert "agent_events" not in context.metadata
+
+
+def test_dataset_thread_storage_default_name_uses_new_chat_for_uuid_paths() -> None:
+    assert (
+        DatasetThreadStorage.default_thread_name(
+            path="dataset://threads/12345678-1234-4678-9234-123456789abc"
+        )
+        == "New Chat"
+    )
+    assert (
+        DatasetThreadStorage.default_thread_name(
+            path="dataset://threads/support-thread"
+        )
+        == "Support Thread"
+    )
+    assert (
+        DatasetThreadStorage.default_thread_name(
+            path="dataset://threads/support-thread",
+            name="Customer Support",
+        )
+        == "Customer Support"
+    )

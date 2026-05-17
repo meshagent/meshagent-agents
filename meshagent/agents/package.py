@@ -2041,7 +2041,7 @@ class MeshagentPackage(PythonPackage):
                     if self_package._discovery_enabled:
                         toolkits.append(DiscoveryToolkit(room=self._room))
                     if self_package._computer_use_config is not None:
-                        images_dataset = ImagesDataset(room=self._room)
+                        images_dataset = ImagesDataset(self._room.datasets)
                         computer_toolkit: ComputerToolkit | None = None
 
                         async def render_screen(image_bytes: bytes) -> None:
@@ -2130,7 +2130,9 @@ class MeshagentPackage(PythonPackage):
             if self._image_gen_enabled and isinstance(
                 process_llm_adapter, OpenAIResponsesAdapter
             ):
-                process_llm_adapter.set_images_dataset(ImagesDataset(room=room_client))
+                process_llm_adapter.set_images_dataset(
+                    ImagesDataset(room_client.datasets)
+                )
             channels: list[
                 MessagingChatChannel | MailChannel | QueueChannel | ToolkitChannel
             ] = []

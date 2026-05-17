@@ -62,7 +62,10 @@ from meshagent.agents.messages import (
     AGENT_EVENT_USAGE_UPDATED,
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_THREAD_CLOSE,
+    AGENT_MESSAGE_THREAD_DELETE,
+    AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_RENAME,
     AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_PARTICIPANT_CONNECT,
     AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
@@ -106,12 +109,19 @@ from meshagent.agents.messages import (
     AgentUsageUpdated,
     ClearThread,
     CloseThread,
+    DeleteThread,
+    ListThreads,
     ModelsRequest,
     OpenThread,
     ParticipantConnect,
     ParticipantDisconnect,
     RejectAgentToolCall,
+    RenameThread,
+    ThreadCreated,
+    ThreadDeleted,
+    ThreadsListed,
     ThreadLoaded,
+    ThreadUpdated,
     TurnStart,
     StartThread,
     TurnStartRejected,
@@ -131,8 +141,10 @@ from meshagent.agents.process import (
     ContentScheme,
     LLMAgentProcess,
     Message,
+    ThreadIsolationMode,
 )
 from meshagent.agents.thread_adapter import ThreadAdapter
+from meshagent.agents.thread_storage import ThreadListEntry, ThreadListPage
 from meshagent.api import MeshDocument, Participant, RemoteParticipant
 from meshagent.api.messaging import BinaryContent, FileContent, JsonContent, TextContent
 from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
@@ -236,6 +248,23 @@ class _ThreadOpenResponseChannel(_RecordingChannel):
     ) -> bool:
         del participant
         self.direct_payloads.append(payload)
+        return True
+
+
+class _ParticipantRoutingChannel(_RecordingChannel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.direct_payloads_by_participant_id: dict[str, list[AgentMessage]] = {}
+
+    def send_agent_message_to_participant(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        self.direct_payloads_by_participant_id.setdefault(participant.id, []).append(
+            payload
+        )
         return True
 
 
@@ -547,8 +576,8 @@ class _PayloadMessage(AgentMessage):
 
 
 class _ThreadCreatingSupervisor(AgentSupervisor):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, thread_isolation: ThreadIsolationMode = "global") -> None:
+        super().__init__(thread_isolation=thread_isolation)
         self.created_processes: list[_ThreadRecordingProcess] = []
 
     def create_thread_process(self, thread_id: str) -> AgentProcess:
@@ -558,8 +587,8 @@ class _ThreadCreatingSupervisor(AgentSupervisor):
 
 
 class _OpenCloseThreadCreatingSupervisor(AgentSupervisor):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, thread_isolation: ThreadIsolationMode = "global") -> None:
+        super().__init__(thread_isolation=thread_isolation)
         self.created_processes: list[_OpenCloseThreadRecordingProcess] = []
 
     def create_thread_process(self, thread_id: str) -> AgentProcess:
@@ -611,6 +640,74 @@ class _StorageThreadCreatingSupervisor(AgentSupervisor):
         )
         self.created_processes.append(process)
         return process
+
+
+class _ListThreadSupervisor(AgentSupervisor):
+    async def list_threads(
+        self,
+        *,
+        list_threads: ListThreads,
+        sender: Participant | None,
+    ) -> ThreadListPage:
+        del sender
+        return ThreadListPage(
+            threads=[
+                ThreadListEntry(
+                    path="/threads/one.thread",
+                    name="One",
+                    created_at="2026-01-01T00:00:00Z",
+                    modified_at="2026-01-02T00:00:00Z",
+                )
+            ],
+            total=1,
+            offset=list_threads.offset,
+            limit=list_threads.limit,
+        )
+
+
+class _ThreadLifecycleEventSupervisor(AgentSupervisor):
+    async def create_thread_id(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del start_thread
+        del sender
+        return "/threads/created.thread"
+
+    def create_thread_process(self, thread_id: str) -> AgentProcess:
+        del thread_id
+        return _RecordingProcess(handled_type=AGENT_MESSAGE_TURN_START)
+
+    async def on_thread_started(
+        self,
+        *,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> ThreadListEntry | None:
+        del sender
+        return ThreadListEntry(
+            path=thread_id,
+            name=start_thread.name or "New Chat",
+            created_at="2026-01-01T00:00:00Z",
+            modified_at="2026-01-01T00:00:00Z",
+        )
+
+    async def on_thread_renamed(
+        self,
+        *,
+        rename_thread: RenameThread,
+        sender: Participant | None,
+    ) -> ThreadListEntry | None:
+        del sender
+        return ThreadListEntry(
+            path=rename_thread.thread_id,
+            name=rename_thread.name,
+            created_at="2026-01-01T00:00:00Z",
+            modified_at="2026-01-02T00:00:00Z",
+        )
 
 
 class _GenericThreadAdapter(ThreadAdapter):
@@ -732,7 +829,7 @@ class _AttachmentRecordingSession(_LifecycleSession):
         self.image_message_calls: list[dict[str, Any]] = []
         self.file_message_calls: list[dict[str, Any]] = []
         self.image_url_calls: list[str] = []
-        self.file_url_calls: list[str] = []
+        self.file_url_calls: list[dict[str, str | None]] = []
 
     @property
     def supports_images(self) -> bool:
@@ -790,11 +887,14 @@ class _AttachmentRecordingSession(_LifecycleSession):
         self.messages.append(message)
         return message
 
-    def append_file_url(self, *, url: str) -> dict:
-        self.file_url_calls.append(url)
+    def append_file_url(self, *, url: str, filename: str | None = None) -> dict:
+        self.file_url_calls.append({"url": url, "filename": filename})
+        content = {"type": "file-url", "url": url}
+        if filename is not None:
+            content["filename"] = filename
         message = {
             "role": "user",
-            "content": [{"type": "file-url", "url": url}],
+            "content": [content],
         }
         self.messages.append(message)
         return message
@@ -2949,6 +3049,281 @@ async def test_agent_supervisor_route_initializes_thread_storage_before_returnin
 
 
 @pytest.mark.asyncio
+async def test_agent_supervisor_lists_threads_over_agent_messages() -> None:
+    supervisor = _ListThreadSupervisor()
+    channel = _ThreadOpenResponseChannel()
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+
+    try:
+        request = ListThreads(
+            type=AGENT_MESSAGE_THREAD_LIST,
+            limit=50,
+            offset=10,
+        )
+        sender = RemoteParticipant(
+            id="participant-1",
+            attributes={"name": "participant"},
+        )
+
+        await supervisor.route(Message(data=request, sender=sender))
+
+        assert len(channel.direct_payloads) == 1
+        response = channel.direct_payloads[0]
+        assert isinstance(response, ThreadsListed)
+        assert response.source_message_id == request.message_id
+        assert response.total == 1
+        assert response.offset == 10
+        assert response.limit == 50
+        assert response.threads[0].path == "/threads/one.thread"
+        assert response.threads[0].name == "One"
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_broadcasts_thread_list_lifecycle_events() -> None:
+    supervisor = _ThreadLifecycleEventSupervisor()
+    channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(channel)
+    sender = RemoteParticipant(
+        id="participant-1",
+        attributes={"name": "participant"},
+    )
+    same_participant_other_tab = RemoteParticipant(
+        id="participant-2",
+        attributes={"name": "participant"},
+    )
+    different_participant = RemoteParticipant(
+        id="participant-3",
+        attributes={"name": "other-participant"},
+    )
+
+    await supervisor.start()
+
+    try:
+        for participant in [sender, same_participant_other_tab, different_participant]:
+            await supervisor.route(
+                Message(
+                    data=ParticipantConnect(
+                        type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
+                        participant_id=participant.id,
+                    ),
+                    sender=participant,
+                )
+            )
+
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadCreated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    same_participant_other_tab.id, []
+                )
+            )
+        )
+
+        created = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[sender.id]
+            if isinstance(payload, ThreadCreated)
+        ]
+        assert len(created) == 1
+        assert created[0].thread.path == "/threads/created.thread"
+        assert created[0].thread.name == "New Chat"
+
+        await supervisor.route(
+            Message(
+                data=RenameThread(
+                    type=AGENT_MESSAGE_THREAD_RENAME,
+                    thread_id="/threads/created.thread",
+                    name="Renamed",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadUpdated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    different_participant.id, []
+                )
+            )
+        )
+        updated = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[sender.id]
+            if isinstance(payload, ThreadUpdated)
+        ]
+        assert len(updated) == 1
+        assert updated[0].thread.name == "Renamed"
+
+        await supervisor.route(
+            Message(
+                data=DeleteThread(
+                    type=AGENT_MESSAGE_THREAD_DELETE,
+                    thread_id="/threads/created.thread",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadDeleted)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    same_participant_other_tab.id, []
+                )
+            )
+        )
+        deleted = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[sender.id]
+            if isinstance(payload, ThreadDeleted)
+        ]
+        assert len(deleted) == 1
+        assert deleted[0].path == "/threads/created.thread"
+        for participant in [sender, same_participant_other_tab, different_participant]:
+            direct_payloads = channel.direct_payloads_by_participant_id[participant.id]
+            assert [type(payload) for payload in direct_payloads] == [
+                ThreadCreated,
+                ThreadUpdated,
+                ThreadDeleted,
+            ]
+        assert [
+            message.data
+            for message in channel.received
+            if isinstance(message.data, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+        ] == []
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_participant_isolation_sends_thread_lifecycle_events_to_owner() -> (
+    None
+):
+    supervisor = _ThreadLifecycleEventSupervisor(thread_isolation="participant")
+    channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(channel)
+    sender = RemoteParticipant(
+        id="participant-1",
+        attributes={"name": "participant"},
+    )
+    same_participant_other_tab = RemoteParticipant(
+        id="participant-2",
+        attributes={"name": "participant"},
+    )
+    different_participant = RemoteParticipant(
+        id="participant-3",
+        attributes={"name": "other-participant"},
+    )
+
+    await supervisor.start()
+
+    try:
+        for participant in [sender, same_participant_other_tab, different_participant]:
+            await supervisor.route(
+                Message(
+                    data=ParticipantConnect(
+                        type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
+                        participant_id=participant.id,
+                    ),
+                    sender=participant,
+                )
+            )
+
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadCreated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    same_participant_other_tab.id, []
+                )
+            )
+        )
+
+        await supervisor.route(
+            Message(
+                data=RenameThread(
+                    type=AGENT_MESSAGE_THREAD_RENAME,
+                    thread_id="/threads/created.thread",
+                    name="Renamed",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadUpdated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+
+        await supervisor.route(
+            Message(
+                data=DeleteThread(
+                    type=AGENT_MESSAGE_THREAD_DELETE,
+                    thread_id="/threads/created.thread",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadDeleted)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+
+        direct_payloads = channel.direct_payloads_by_participant_id[sender.id]
+        assert [type(payload) for payload in direct_payloads] == [
+            ThreadCreated,
+            ThreadUpdated,
+            ThreadDeleted,
+        ]
+        mirrored_direct_payloads = channel.direct_payloads_by_participant_id[
+            same_participant_other_tab.id
+        ]
+        assert [type(payload) for payload in mirrored_direct_payloads] == [
+            ThreadCreated,
+            ThreadUpdated,
+            ThreadDeleted,
+        ]
+        assert (
+            channel.direct_payloads_by_participant_id.get(different_participant.id)
+            is None
+        )
+        assert [
+            message.data
+            for message in channel.received
+            if isinstance(message.data, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+        ] == []
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_supervisor_route_sends_unflushed_storage_before_thread_open_reaches_channel() -> (
     None
 ):
@@ -3215,6 +3590,144 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_steer_until_clos
         assert process.state == "stopped"
         assert supervisor._open_client_ids_by_thread_id == {}
         assert supervisor._open_thread_ids_by_client_id == {}
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_participant_isolation_rejects_other_participant_turn_start() -> (
+    None
+):
+    supervisor = _ThreadCreatingSupervisor(thread_isolation="participant")
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    first_client = _ThreadParticipant(name="First", participant_id="client-1")
+    second_client = _ThreadParticipant(name="Second", participant_id="client-2")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                sender=first_client,
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/private",
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+            )
+        )
+        assert supervisor.thread_namespace(thread_id="/threads/private") == "First"
+        assert len(supervisor.created_processes) == 1
+        process = supervisor.created_processes[0]
+        await _wait_for(lambda: len(process.received) == 1)
+
+        await supervisor.route(
+            Message(
+                sender=second_client,
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/private",
+                    content=[AgentTextContent(type="text", text="hello from second")],
+                ),
+            )
+        )
+
+        await _wait_for(
+            lambda: any(
+                message.data.type == AGENT_EVENT_TURN_START_REJECTED
+                for message in channel.received
+            )
+        )
+        rejected = [
+            message.data
+            for message in channel.received
+            if isinstance(message.data, TurnStartRejected)
+        ][0]
+        assert rejected.error.code == "thread_not_available"
+        assert len(process.received) == 1
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_global_isolation_allows_shared_thread_access() -> None:
+    supervisor = _ThreadCreatingSupervisor(thread_isolation="global")
+    first_client = _ThreadParticipant(name="First", participant_id="client-1")
+    second_client = _ThreadParticipant(name="Second", participant_id="client-2")
+
+    await supervisor.start()
+    try:
+        for participant, text in [
+            (first_client, "hello"),
+            (second_client, "hello from second"),
+        ]:
+            await supervisor.route(
+                Message(
+                    sender=participant,
+                    data=TurnStart(
+                        type=AGENT_MESSAGE_TURN_START,
+                        thread_id="/threads/shared",
+                        content=[AgentTextContent(type="text", text=text)],
+                    ),
+                )
+            )
+
+        assert supervisor.thread_namespace(thread_id="/threads/shared") is None
+        assert len(supervisor.created_processes) == 1
+        process = supervisor.created_processes[0]
+        await _wait_for(lambda: len(process.received) == 2)
+        assert [message.sender for message in process.received] == [
+            first_client,
+            second_client,
+        ]
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_participant_isolation_blocks_open_from_other_participant() -> (
+    None
+):
+    supervisor = _OpenCloseThreadCreatingSupervisor(thread_isolation="participant")
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    first_client = _ThreadParticipant(name="First", participant_id="client-1")
+    second_client = _ThreadParticipant(name="Second", participant_id="client-2")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                sender=first_client,
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/private",
+                ),
+            )
+        )
+        assert supervisor.thread_namespace(thread_id="/threads/private") == "First"
+        assert len(supervisor.created_processes) == 1
+        process = supervisor.created_processes[0]
+        await _wait_for(lambda: len(process.received) == 1)
+
+        await supervisor.route(
+            Message(
+                sender=second_client,
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/private",
+                ),
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert len(process.received) == 1
+        assert [message.data.type for message in channel.received] == [
+            AGENT_MESSAGE_THREAD_OPEN
+        ]
+        assert supervisor._open_client_ids_by_thread_id == {
+            "/threads/private": {"client-1"}
+        }
     finally:
         await supervisor.stop()
 
@@ -6103,7 +6616,9 @@ async def test_llm_agent_process_appends_remote_file_urls_as_image_and_file_inpu
     )
 
     assert session.image_url_calls == ["https://example.com/image.png"]
-    assert session.file_url_calls == ["https://example.com/report.pdf"]
+    assert session.file_url_calls == [
+        {"url": "https://example.com/report.pdf", "filename": None}
+    ]
     assert session.image_message_calls == []
     assert session.file_message_calls == []
     assert adapter.calls[0]["messages"] == [
@@ -6296,14 +6811,14 @@ async def test_llm_agent_process_preserves_data_url_file_attachments() -> None:
 
     await process.start(supervisor)
 
-    data_url = "data:text/plain;name=note.txt;base64,aGVsbG8="
+    data_url = "data:text/plain;base64,aGVsbG8="
     process.send(
         Message(
             data=TurnStart(
                 type=AGENT_MESSAGE_TURN_START,
                 thread_id="thread-1",
                 content=[
-                    {"type": "file", "url": data_url},
+                    {"type": "file", "url": data_url, "name": "note.txt"},
                 ],
             )
         )
@@ -6314,12 +6829,12 @@ async def test_llm_agent_process_preserves_data_url_file_attachments() -> None:
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
 
-    assert session.file_url_calls == [data_url]
+    assert session.file_url_calls == [{"url": data_url, "filename": "note.txt"}]
     assert session.file_message_calls == []
     assert adapter.calls[0]["messages"] == [
         {
             "role": "user",
-            "content": [{"type": "file-url", "url": data_url}],
+            "content": [{"type": "file-url", "url": data_url, "filename": "note.txt"}],
         }
     ]
 

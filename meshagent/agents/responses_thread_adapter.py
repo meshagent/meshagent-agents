@@ -894,7 +894,7 @@ class ResponsesThreadAdapter(ThreadAdapter):
     ):
         super().__init__(**kwargs)
         self._active_events_by_key: dict[str, Element] = {}
-        self._images_db = ImagesDataset(room=self._room)
+        self._images_db = ImagesDataset(self._room.datasets)
         self._image_captioner = image_captioner
         self._saved_image_ids_by_item_id: dict[str, str] = {}
         self._saved_image_stage_by_item_id: dict[str, str] = {}

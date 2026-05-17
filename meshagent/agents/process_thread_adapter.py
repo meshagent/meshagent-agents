@@ -88,6 +88,7 @@ from .thread_storage import (
     ThreadListEvent,
     ThreadListPage,
     ThreadStorage,
+    thread_dir_for_namespace,
 )
 from .stream_content_accumulator import FileContentAccumulator, TextContentAccumulator
 from .tool_call_accumulator import ToolCallAccumulator
@@ -553,9 +554,13 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> ThreadListPage:
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
             limit=limit,
             offset=offset,
@@ -581,11 +586,15 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         name: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
     ) -> None:
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         document = await room.sync.open(
             path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
             schema=thread_list_schema,
@@ -609,9 +618,13 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         delete_storage: bool = True,
     ) -> None:
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         document = await room.sync.open(
             path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
             schema=thread_list_schema,
@@ -636,6 +649,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         name: str,
     ) -> None:
@@ -645,6 +659,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         await cls.upsert_thread(
             room=room,
             thread_dir=thread_dir,
+            namespace=namespace,
             path=path,
             name=resolved_name,
             modified_at=_utc_now_iso(),
@@ -656,9 +671,13 @@ class MeshDocumentThreadStorage(ThreadStorage):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]:
         del poll_interval
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         index_path = cls.thread_list_path_for_dir(thread_dir=thread_dir)
         document = await room.sync.open(path=index_path, schema=thread_list_schema)
         mutation_queue: asyncio.Queue[None] = asyncio.Queue()
@@ -805,6 +824,12 @@ class MeshDocumentThreadStorage(ThreadStorage):
         filename = posixpath.basename(path.strip())
         if filename.endswith(".thread"):
             filename = filename[: -len(".thread")]
+        try:
+            uuid.UUID(filename)
+        except ValueError:
+            pass
+        else:
+            return "New Chat"
         normalized = filename.replace("-", " ").replace("_", " ").strip()
         return normalized.title() if normalized != "" else "New Chat"
 
@@ -822,7 +847,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._thread: MeshDocument | None = None
         self._format_message = default_format_message
         self._max_append_message_count = max_append_message_count
-        self._images_db = ImagesDataset(room=self._room)
+        self._images_db = ImagesDataset(self._room.datasets)
         self._active_message_elements_by_key: dict[str, Element] = {}
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}

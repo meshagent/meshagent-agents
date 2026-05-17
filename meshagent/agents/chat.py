@@ -70,6 +70,7 @@ ThreadStatusMode = Literal["busy", "steerable"]
 
 class ChatAttachment(BaseModel):
     path: str
+    name: str | None = None
 
 
 class ChatMessageInput(BaseModel):
@@ -1568,7 +1569,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 normalized_path = path_value.strip()
                 if normalized_path == "":
                     continue
-                attachments.append({"path": normalized_path})
+                attachment_payload = {"path": normalized_path}
+                name_value = attachment.get("name")
+                if isinstance(name_value, str) and name_value.strip() != "":
+                    attachment_payload["name"] = name_value.strip()
+                attachments.append(attachment_payload)
 
         payload = {
             **message,
@@ -1876,7 +1881,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
             ) -> JsonContent:
                 text_value = message.get("text")
                 text = text_value if isinstance(text_value, str) else ""
-                attachment_paths: list[str] = []
+                attachments: list[dict[str, str]] = []
                 raw_attachments = message.get("attachments")
                 if isinstance(raw_attachments, list):
                     for attachment in raw_attachments:
@@ -1888,9 +1893,13 @@ class ChatBotBase(SingleRoomAgent, ABC):
                         normalized_path = path_value.strip()
                         if normalized_path == "":
                             continue
-                        attachment_paths.append(normalized_path)
+                        attachment_payload = {"path": normalized_path}
+                        name_value = attachment.get("name")
+                        if isinstance(name_value, str) and name_value.strip() != "":
+                            attachment_payload["name"] = name_value.strip()
+                        attachments.append(attachment_payload)
 
-                if text.strip() == "" and len(attachment_paths) == 0:
+                if text.strip() == "" and len(attachments) == 0:
                     raise RoomException(
                         "chat.new_thread requires non-empty text or at least one attachment"
                     )
@@ -1898,7 +1907,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                 payload = {
                     **message,
                     "text": text,
-                    "attachments": [{"path": path} for path in attachment_paths],
+                    "attachments": attachments,
                 }
 
                 path = await outer._new_thread_path()
@@ -2568,6 +2577,15 @@ class ChatBot(ChatBotBase):
 
         attachments = message.get("attachments", [])
         for attachment in attachments:
+            name = attachment.get("name")
+            if isinstance(name, str) and name.strip() != "":
+                thread_context.session.append_assistant_message(
+                    message=(
+                        "the user attached a file named "
+                        f"'{name.strip()}' at the path '{attachment['path']}'"
+                    )
+                )
+                continue
             thread_context.session.append_assistant_message(
                 message=f"the user attached a file at the path '{attachment['path']}'"
             )

@@ -36,7 +36,7 @@ from meshagent.tools import ToolContext, Toolkit
 from opentelemetry import trace
 from pydantic_core import from_json as pydantic_core_from_json
 from .thread_adapter import default_format_message
-from .thread_storage import ThreadStorage
+from .thread_storage import ThreadListEntry, ThreadListPage, ThreadStorage
 from .thread_status_publisher import ThreadStatusPublisher
 from .tool_call_accumulator import ToolCallAccumulator
 from .version import __version__ as agents_version
@@ -52,15 +52,20 @@ from .messages import (
     AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_DELETE,
+    AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_RENAME,
     AGENT_MESSAGE_THREAD_START,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_EVENT_THREAD_CREATED,
+    AGENT_EVENT_THREAD_DELETED,
+    AGENT_EVENT_THREAD_LISTED,
     AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_THREAD_LOADED,
     AGENT_EVENT_THREAD_STARTED,
+    AGENT_EVENT_THREAD_UPDATED,
     AGENT_EVENT_TURN_INTERRUPTED,
     AGENT_EVENT_TURN_INTERRUPT_ACCEPTED,
     AGENT_EVENT_TURN_START_ACCEPTED,
@@ -90,6 +95,7 @@ from .messages import (
     AgentToolCallApprovalRequested,
     AgentSecretRequested,
     AgentSecretResponse,
+    AgentThreadListEntry,
     AgentToolCallEnded,
     AgentToolCallInProgress,
     AgentToolCallPending,
@@ -121,6 +127,7 @@ from .messages import (
     ClearThread,
     CloseThread,
     DeleteThread,
+    ListThreads,
     ModelsRequest,
     ModelsResponse,
     OpenThread,
@@ -130,7 +137,11 @@ from .messages import (
     RenameThread,
     StartThread,
     ThreadLoaded,
+    ThreadCreated,
+    ThreadDeleted,
+    ThreadsListed,
     ThreadStarted,
+    ThreadUpdated,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
     ToolChoice,
@@ -168,6 +179,7 @@ _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
         AGENT_EVENT_MODEL_CHANGED,
         AGENT_MESSAGE_THREAD_CLOSE,
         AGENT_MESSAGE_THREAD_DELETE,
+        AGENT_MESSAGE_THREAD_LIST,
         AGENT_MESSAGE_THREAD_OPEN,
         AGENT_MESSAGE_THREAD_RENAME,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
@@ -869,9 +881,11 @@ class Channel:
 
 SupervisorState = LifecycleState
 
+ThreadIsolationMode = Literal["global", "participant"]
+
 
 class AgentSupervisor:
-    def __init__(self) -> None:
+    def __init__(self, *, thread_isolation: ThreadIsolationMode = "global") -> None:
         self.channels: list[Channel] = []
         self.processes: list[AgentProcess] = []
         self._stop = asyncio.Event()
@@ -884,6 +898,8 @@ class AgentSupervisor:
         self._participant_connection_counts_by_client_id: dict[str, int] = {}
         self._open_thread_ids_by_client_id: dict[str, set[str]] = {}
         self._open_client_ids_by_thread_id: dict[str, set[str]] = {}
+        self._thread_namespace_by_thread_id: dict[str, str | None] = {}
+        self._thread_isolation: ThreadIsolationMode = thread_isolation
         self._pending_stop_thread_ids_after_turn: set[str] = set()
         self._pending_stop_thread_tasks_by_thread_id: dict[str, asyncio.Task[None]] = {}
 
@@ -900,6 +916,53 @@ class AgentSupervisor:
 
     def add_process(self, process: AgentProcess) -> None:
         self.processes.append(process)
+
+    @property
+    def thread_isolation(self) -> ThreadIsolationMode:
+        return self._thread_isolation
+
+    def set_thread_isolation(self, thread_isolation: ThreadIsolationMode) -> None:
+        self._thread_isolation = thread_isolation
+
+    def thread_namespace(self, *, thread_id: str) -> str | None:
+        if self._thread_isolation != "participant":
+            return None
+        return self._thread_namespace_by_thread_id.get(thread_id)
+
+    def _participant_namespace(self, *, participant: Participant | None) -> str | None:
+        if participant is None:
+            return None
+        participant_name = participant.get_attribute("name")
+        if isinstance(participant_name, str) and participant_name.strip() != "":
+            return participant_name.strip()
+        return None
+
+    def _participants_for_namespace(
+        self,
+        *,
+        namespace: str,
+        fallback: Participant | None = None,
+    ) -> list[Participant]:
+        participants_by_id: dict[str, Participant] = {}
+        for participant in self._participants_by_client_id.values():
+            if self._participant_namespace(participant=participant) == namespace:
+                participants_by_id[participant.id] = participant
+        if (
+            fallback is not None
+            and self._participant_namespace(participant=fallback) == namespace
+        ):
+            participants_by_id[fallback.id] = fallback
+        return list(participants_by_id.values())
+
+    def _connected_participants(
+        self,
+        *,
+        fallback: Participant | None = None,
+    ) -> list[Participant]:
+        participants_by_id = dict(self._participants_by_client_id)
+        if fallback is not None:
+            participants_by_id[fallback.id] = fallback
+        return list(participants_by_id.values())
 
     def create_thread_process(self, thread_id: str) -> AgentProcess:
         raise NotImplementedError(
@@ -967,10 +1030,11 @@ class AgentSupervisor:
         thread_id: str,
         start_thread: StartThread,
         sender: Participant | None,
-    ) -> None:
+    ) -> ThreadListEntry | None:
         del thread_id
         del start_thread
         del sender
+        return None
 
     async def on_thread_deleted(
         self,
@@ -986,9 +1050,24 @@ class AgentSupervisor:
         *,
         rename_thread: RenameThread,
         sender: Participant | None,
-    ) -> None:
+    ) -> ThreadListEntry | None:
         del rename_thread
         del sender
+        return None
+
+    async def list_threads(
+        self,
+        *,
+        list_threads: ListThreads,
+        sender: Participant | None,
+    ) -> ThreadListPage:
+        del sender
+        return ThreadListPage(
+            threads=[],
+            total=0,
+            offset=list_threads.offset,
+            limit=list_threads.limit,
+        )
 
     async def route(self, message: Message) -> None:
         if self._stop.is_set() or self._state == "stopping":
@@ -1158,6 +1237,42 @@ class AgentSupervisor:
             return None
         return sender.id
 
+    def _participant_namespace_for_message(self, message: Message) -> str | None:
+        return self._participant_namespace(participant=message.sender)
+
+    def _thread_access_error(self, *, thread_id: str) -> AgentError:
+        del thread_id
+        return AgentError(
+            message="thread is not available to this participant",
+            code="thread_not_available",
+        )
+
+    def _ensure_thread_access_for_message(
+        self,
+        *,
+        thread_id: str,
+        message: Message,
+    ) -> AgentError | None:
+        if self._thread_isolation == "global":
+            return None
+        if isinstance(message.source, AgentProcess):
+            return None
+
+        namespace = self._participant_namespace_for_message(message)
+        if namespace is None:
+            return AgentError(
+                message="participant name is required for isolated threads",
+                code="participant_name_required",
+            )
+
+        existing = self._thread_namespace_by_thread_id.get(thread_id)
+        if existing is None:
+            self._thread_namespace_by_thread_id[thread_id] = namespace
+            return None
+        if existing != namespace:
+            return self._thread_access_error(thread_id=thread_id)
+        return None
+
     def _track_thread_open_for_client(
         self,
         *,
@@ -1276,6 +1391,66 @@ class AgentSupervisor:
             if message.source is channel:
                 continue
             channel.send(message)
+
+    def _agent_thread_list_entry(self, entry: ThreadListEntry) -> AgentThreadListEntry:
+        return AgentThreadListEntry(
+            path=entry.path,
+            name=entry.name,
+            created_at=entry.created_at,
+            modified_at=entry.modified_at,
+        )
+
+    def _emit_thread_created(
+        self, *, entry: ThreadListEntry, sender: Participant | None
+    ) -> None:
+        self._send_thread_list_event(
+            payload=ThreadCreated(
+                type=AGENT_EVENT_THREAD_CREATED,
+                thread=self._agent_thread_list_entry(entry),
+            ),
+            sender=sender,
+        )
+
+    def _emit_thread_updated(
+        self, *, entry: ThreadListEntry, sender: Participant | None
+    ) -> None:
+        self._send_thread_list_event(
+            payload=ThreadUpdated(
+                type=AGENT_EVENT_THREAD_UPDATED,
+                thread=self._agent_thread_list_entry(entry),
+            ),
+            sender=sender,
+        )
+
+    def _emit_thread_deleted(self, *, path: str, sender: Participant | None) -> None:
+        self._send_thread_list_event(
+            payload=ThreadDeleted(type=AGENT_EVENT_THREAD_DELETED, path=path),
+            sender=sender,
+        )
+
+    def _send_thread_list_event(
+        self,
+        *,
+        payload: ThreadCreated | ThreadUpdated | ThreadDeleted,
+        sender: Participant | None,
+    ) -> None:
+        if self._thread_isolation == "participant":
+            namespace = self._participant_namespace(participant=sender)
+            if namespace is None:
+                return
+            participants = self._participants_for_namespace(
+                namespace=namespace,
+                fallback=sender,
+            )
+        else:
+            participants = self._connected_participants(fallback=sender)
+
+        for participant in participants:
+            for channel in self.channels:
+                channel.send_agent_message_to_participant(
+                    participant=participant,
+                    payload=payload,
+                )
 
     def _send_to_processes(
         self,
@@ -1474,6 +1649,19 @@ class AgentSupervisor:
                 )
                 return
 
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                self._emit_start_thread_rejected(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                    thread_id=thread_id,
+                    error=access_error,
+                )
+                return
+
             if start_thread.content is None:
                 try:
                     realtime_connection = await self.create_realtime_connection(
@@ -1492,11 +1680,16 @@ class AgentSupervisor:
                         ),
                     )
                     return
-                await self.on_thread_started(
+                created_entry = await self.on_thread_started(
                     thread_id=thread_id,
                     start_thread=start_thread,
                     sender=message.sender,
                 )
+                if created_entry is not None:
+                    self._emit_thread_created(
+                        entry=created_entry,
+                        sender=message.sender,
+                    )
                 self._emit_thread_started(
                     start_thread=start_thread,
                     sender=message.sender,
@@ -1548,11 +1741,16 @@ class AgentSupervisor:
                             error=rejection,
                         )
                     return
-            await self.on_thread_started(
+            created_entry = await self.on_thread_started(
                 thread_id=thread_id,
                 start_thread=start_thread,
                 sender=message.sender,
             )
+            if created_entry is not None:
+                self._emit_thread_created(
+                    entry=created_entry,
+                    sender=message.sender,
+                )
             self._emit_thread_started(
                 start_thread=start_thread,
                 sender=message.sender,
@@ -1564,6 +1762,17 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TURN_START:
             turn_start = _coerce_message_data(message.data, TurnStart)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=turn_start.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                self._emit_turn_start_rejected(
+                    turn_start=turn_start,
+                    sender=message.sender,
+                    error=access_error,
+                )
+                return
             self._track_thread_open_for_message(
                 thread_id=turn_start.thread_id,
                 message=message,
@@ -1590,6 +1799,17 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TURN_STEER:
             turn_steer = _coerce_message_data(message.data, TurnSteer)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=turn_steer.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                self._emit_turn_steer_rejected(
+                    turn_steer=turn_steer,
+                    sender=message.sender,
+                    error=access_error,
+                )
+                return
             self._track_thread_open_for_message(
                 thread_id=turn_steer.thread_id,
                 message=message,
@@ -1615,6 +1835,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TURN_INTERRUPT:
             turn_interrupt = _coerce_message_data(message.data, TurnInterrupt)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=turn_interrupt.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=turn_interrupt.thread_id)
             routed_message = self._copy_message(
                 message,
@@ -1627,6 +1853,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_REALTIME_AUDIO_CHUNK:
             audio_chunk = _coerce_message_data(message.data, AgentRealtimeAudioChunk)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=audio_chunk.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=audio_chunk.thread_id)
             if process is None:
                 process, _ = self._create_thread_process_for_route(
@@ -1639,6 +1871,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_REALTIME_AUDIO_COMMIT:
             audio_commit = _coerce_message_data(message.data, AgentRealtimeAudioCommit)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=audio_commit.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=audio_commit.thread_id)
             if process is None:
                 process, _ = self._create_thread_process_for_route(
@@ -1651,6 +1889,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TOOL_CALL_APPROVE:
             approval = _coerce_message_data(message.data, ApproveAgentToolCall)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=approval.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=approval.thread_id)
             routed_message = self._copy_message(
                 message,
@@ -1663,6 +1907,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TOOL_CALL_REJECT:
             rejection = _coerce_message_data(message.data, RejectAgentToolCall)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=rejection.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=rejection.thread_id)
             routed_message = self._copy_message(
                 message,
@@ -1675,6 +1925,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_SECRET_RESPONSE:
             response = _coerce_message_data(message.data, AgentSecretResponse)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=response.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=response.thread_id)
             routed_message = self._copy_message(
                 message,
@@ -1687,6 +1943,12 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_THREAD_CLEAR:
             clear_thread = _coerce_message_data(message.data, ClearThread)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=clear_thread.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             process = self._process_for_thread(thread_id=clear_thread.thread_id)
             if process is None:
                 process, _ = self._create_thread_process_for_route(
@@ -1701,21 +1963,75 @@ class AgentSupervisor:
             )
             target_processes = [process]
 
+        elif message_type == AGENT_MESSAGE_THREAD_LIST:
+            list_threads = _coerce_message_data(message.data, ListThreads)
+            page = await self.list_threads(
+                list_threads=list_threads,
+                sender=message.sender,
+            )
+            response = ThreadsListed(
+                type=AGENT_EVENT_THREAD_LISTED,
+                source_message_id=list_threads.message_id,
+                threads=[
+                    AgentThreadListEntry(
+                        path=entry.path,
+                        name=entry.name,
+                        created_at=entry.created_at,
+                        modified_at=entry.modified_at,
+                    )
+                    for entry in page.threads
+                ],
+                total=page.total,
+                offset=page.offset,
+                limit=page.limit,
+            )
+            if message.sender is not None:
+                for channel in self.channels:
+                    if channel.send_agent_message_to_participant(
+                        participant=message.sender,
+                        payload=response,
+                    ):
+                        return
+            self._send_to_channels(Message(data=response, sender=message.sender))
+            return
+
         elif message_type == AGENT_MESSAGE_THREAD_DELETE:
             delete_thread = _coerce_message_data(message.data, DeleteThread)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=delete_thread.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             await self.on_thread_deleted(
                 delete_thread=delete_thread,
                 sender=message.sender,
             )
+            self._thread_namespace_by_thread_id.pop(delete_thread.thread_id, None)
             await self._stop_thread_process(thread_id=delete_thread.thread_id)
+            self._emit_thread_deleted(
+                path=delete_thread.thread_id,
+                sender=message.sender,
+            )
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_RENAME:
             rename_thread = _coerce_message_data(message.data, RenameThread)
-            await self.on_thread_renamed(
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=rename_thread.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
+            updated_entry = await self.on_thread_renamed(
                 rename_thread=rename_thread,
                 sender=message.sender,
             )
+            if updated_entry is not None:
+                self._emit_thread_updated(
+                    entry=updated_entry,
+                    sender=message.sender,
+                )
             return
 
         elif message_type in {AGENT_MESSAGE_THREAD_OPEN, AGENT_MESSAGE_THREAD_CLOSE}:
@@ -1728,6 +2044,12 @@ class AgentSupervisor:
                 message,
                 data=thread_message,
             )
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=thread_message.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
             client_id = self._client_id_for_thread_tracking(message)
             if message_type == AGENT_MESSAGE_THREAD_OPEN:
                 thread_was_open = self._track_thread_open_for_client(
@@ -3431,6 +3753,7 @@ class LLMAgentProcess(AgentProcess):
         *,
         session: AgentSessionContext,
         url: str,
+        filename: str | None = None,
         sender: Participant | None,
     ) -> None:
         guessed_mime_type = self._guess_url_mime_type(url=url)
@@ -3443,7 +3766,7 @@ class LLMAgentProcess(AgentProcess):
             return
 
         if session.supports_files:
-            session.append_file_url(url=url)
+            session.append_file_url(url=url, filename=filename)
             return
 
         session.append_user_message(
@@ -3455,6 +3778,7 @@ class LLMAgentProcess(AgentProcess):
         *,
         session: AgentSessionContext,
         url: str,
+        filename: str | None = None,
         sender: Participant | None,
     ) -> None:
         content_scheme = self._resolve_content_scheme(url=url)
@@ -3471,6 +3795,7 @@ class LLMAgentProcess(AgentProcess):
         self._append_remote_file_content(
             session=session,
             url=url,
+            filename=filename,
             sender=sender,
         )
 
@@ -3494,6 +3819,7 @@ class LLMAgentProcess(AgentProcess):
                     await self._append_file_content(
                         session=session,
                         url=item.url,
+                        filename=item.name,
                         sender=sender,
                     )
 

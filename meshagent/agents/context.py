@@ -152,8 +152,9 @@ class AgentSessionContext:
         del data
         raise RoomException("this chat context does not support file inputs")
 
-    def append_file_url(self, *, url: str) -> dict:
+    def append_file_url(self, *, url: str, filename: str | None = None) -> dict:
         del url
+        del filename
         raise RoomException("this chat context does not support file URL inputs")
 
     async def append_realtime_audio_chunk(

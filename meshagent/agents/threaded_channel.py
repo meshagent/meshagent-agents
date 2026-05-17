@@ -3,12 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import PurePosixPath
 from typing import Any, Sequence
-from urllib.parse import urlparse
 
 from meshagent.api import Element, MeshDocument, Participant, RoomClient
 
@@ -21,15 +18,18 @@ from .thread_storage import (
     ThreadStorageRepository,
     allocate_thread_path,
 )
+from .thread_naming import (
+    DEFAULT_CHANNEL_THREAD_NAME_RULES,
+    DEFAULT_THREAD_NAME,
+    attachment_name_for_thread_title,
+    determine_thread_name,
+    fallback_thread_name,
+    normalized_thread_title_attachments,
+    sanitize_thread_name,
+    thread_name_input_text,
+)
 
 logger = logging.getLogger("threaded-channel")
-
-DEFAULT_CHANNEL_THREAD_NAME_RULES = [
-    "generate a concise, friendly title for this chat thread",
-    "return only a thread_name value suitable for display in a thread list",
-    "thread_name should be 2-6 words and topic-focused",
-    "use normal capitalization and spaces, and do not include a .thread extension",
-]
 
 
 class ThreadedChannel(Channel):
@@ -107,7 +107,7 @@ class ThreadedChannel(Channel):
         return "chat"
 
     def _default_thread_name(self) -> str:
-        return "New Chat"
+        return DEFAULT_THREAD_NAME
 
     def _uses_explicit_thread_dir_for_thread_list(self) -> bool:
         return False
@@ -144,19 +144,7 @@ class ThreadedChannel(Channel):
 
     @staticmethod
     def _sanitize_thread_name(*, value: str) -> str:
-        normalized = value.strip()
-        if normalized.endswith(".thread"):
-            normalized = normalized[: -len(".thread")]
-
-        normalized = re.sub(r"[-_/]+", " ", normalized)
-        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
-        normalized = re.sub(r"[^A-Za-z0-9 .,!?':()&]+", "", normalized)
-        normalized = re.sub(r"\s+", " ", normalized).strip(" .-_")
-        if normalized == "":
-            return "New Chat"
-        if normalized == normalized.lower() or normalized == normalized.upper():
-            normalized = normalized.title()
-        return normalized[:64].strip() or "New Chat"
+        return sanitize_thread_name(value=value)
 
     @staticmethod
     def _thread_path_for_name(
@@ -587,33 +575,14 @@ class ThreadedChannel(Channel):
 
     @staticmethod
     def _attachment_name_for_thread_title(*, attachment: str) -> str:
-        normalized = attachment.strip()
-        if normalized == "":
-            return ""
-
-        parsed = urlparse(normalized)
-        if parsed.scheme != "":
-            attachment_name = PurePosixPath(parsed.path).name
-            if attachment_name != "":
-                return attachment_name
-
-        attachment_name = PurePosixPath(normalized).name
-        if attachment_name != "":
-            return attachment_name
-
-        return normalized
+        return attachment_name_for_thread_title(attachment=attachment)
 
     def _normalized_thread_title_attachments(
         self,
         *,
         attachments: Sequence[str] | None,
     ) -> list[str]:
-        attachment_names: list[str] = []
-        for attachment in attachments or []:
-            normalized = self._attachment_name_for_thread_title(attachment=attachment)
-            if normalized != "":
-                attachment_names.append(normalized)
-        return attachment_names
+        return normalized_thread_title_attachments(attachments=attachments)
 
     def _thread_name_input_text(
         self,
@@ -621,23 +590,10 @@ class ThreadedChannel(Channel):
         message_text: str,
         attachments: Sequence[str] | None = None,
     ) -> str:
-        parts: list[str] = []
-        normalized_message_text = message_text.strip()
-        if normalized_message_text != "":
-            parts.append(f"Message:\n{normalized_message_text}")
-
-        attachment_names = self._normalized_thread_title_attachments(
-            attachments=attachments
+        return thread_name_input_text(
+            message_text=message_text,
+            attachments=attachments,
         )
-        if len(attachment_names) > 0:
-            attachment_lines = "\n".join(
-                f"- {attachment_name}" for attachment_name in attachment_names
-            )
-            parts.append(f"Attachments:\n{attachment_lines}")
-
-        if len(parts) == 0:
-            return self._default_thread_name()
-        return "\n\n".join(parts)
 
     def _fallback_thread_name(
         self,
@@ -645,19 +601,10 @@ class ThreadedChannel(Channel):
         message_text: str,
         attachments: Sequence[str] | None = None,
     ) -> str:
-        normalized_message_text = message_text.strip()
-        if normalized_message_text != "":
-            return self._sanitize_thread_name(value=normalized_message_text)
-
-        attachment_names = self._normalized_thread_title_attachments(
-            attachments=attachments
+        return fallback_thread_name(
+            message_text=message_text,
+            attachments=attachments,
         )
-        if len(attachment_names) > 0:
-            return self._sanitize_thread_name(
-                value=", ".join(attachment_names[:3]),
-            )
-
-        return self._default_thread_name()
 
     def fallback_thread_name(
         self,
@@ -677,56 +624,14 @@ class ThreadedChannel(Channel):
         attachments: Sequence[str] | None = None,
         on_behalf_of: Participant | None = None,
     ) -> str:
-        generated_name = self._fallback_thread_name(
+        return await determine_thread_name(
+            adapter=self.thread_name_adapter(),
+            caller=self._room.local_participant,
             message_text=message_text,
             attachments=attachments,
+            on_behalf_of=on_behalf_of,
+            thread_name_rules=self._thread_name_rules,
         )
-        adapter = self.thread_name_adapter()
-        if adapter is None:
-            return generated_name
-
-        session = adapter.create_session()
-        cloned_context = session.copy()
-        async with cloned_context:
-            cloned_context.replace_rules(rules=self._thread_name_rules)
-            cloned_context.append_user_message(
-                self._thread_name_input_text(
-                    message_text=message_text,
-                    attachments=attachments,
-                )
-            )
-            try:
-                response = await adapter.create_response(
-                    context=cloned_context,
-                    caller=self._room.local_participant,
-                    model=adapter.default_model(),
-                    on_behalf_of=on_behalf_of,
-                    toolkits=[],
-                    output_schema={
-                        "type": "object",
-                        "required": ["thread_name"],
-                        "additionalProperties": False,
-                        "properties": {
-                            "thread_name": {
-                                "type": "string",
-                                "description": "2-6 word topic name for the task thread",
-                            }
-                        },
-                    },
-                )
-                if isinstance(response, dict):
-                    thread_name = response.get("thread_name")
-                    if isinstance(thread_name, str):
-                        generated_name = self._sanitize_thread_name(
-                            value=thread_name,
-                        )
-            except Exception as ex:
-                logger.warning(
-                    "unable to auto-generate thread name, using fallback",
-                    exc_info=ex,
-                )
-
-        return generated_name
 
     def _begin_pending_thread_list_entry(self, *, path: str) -> None:
         if self._thread_list_dir() is None:

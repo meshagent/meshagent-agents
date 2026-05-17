@@ -8,8 +8,11 @@ from urllib.parse import parse_qs, urlparse
 
 import pyarrow as pa
 
-from meshagent.api import RoomClient
-from meshagent.api.room_server_client import DatasetIndexConfig, DatasetStruct
+from meshagent.api.room_server_client import (
+    DatasetIndexConfig,
+    DatasetStruct,
+    DatasetsClient,
+)
 
 logger = logging.getLogger("images_dataset")
 _IMAGE_SAVE_MAX_RETRIES = 6
@@ -34,8 +37,8 @@ class ImageDatasetRecord:
 class ImageDatasetClient:
     TABLE_NAME = "images"
 
-    def __init__(self, room: RoomClient):
-        self._room = room
+    def __init__(self, client: DatasetsClient):
+        self.client = client
 
     @staticmethod
     def dataset_uri_reference(
@@ -76,7 +79,7 @@ class ImageDatasetClient:
         normalized_image_id = image_id.strip()
         if normalized_image_id == "":
             return None
-        rows = await self._room.datasets.search(
+        rows = await self.client.search(
             table=table or self.TABLE_NAME,
             namespace=namespace,
             where={"id": normalized_image_id},
@@ -120,8 +123,8 @@ class ImageDatasetClient:
 class ImagesDataset(ImageDatasetClient):
     _METADATA_COLUMNS = ["id", "mime_type", "created_at", "created_by", "annotations"]
 
-    def __init__(self, room: RoomClient):
-        super().__init__(room)
+    def __init__(self, client: DatasetsClient):
+        super().__init__(client)
         self._ready = False
         self._lock = asyncio.Lock()
 
@@ -224,12 +227,10 @@ class ImagesDataset(ImageDatasetClient):
 
             schema = self._schema()
             try:
-                existing_schema = await self._room.datasets.inspect(
-                    table=self.TABLE_NAME
-                )
+                existing_schema = await self.client.inspect(table=self.TABLE_NAME)
             except Exception:
                 try:
-                    await self._room.datasets.create_table_with_schema(
+                    await self.client.create_table_with_schema(
                         name=self.TABLE_NAME,
                         schema=schema,
                         mode="create_if_not_exists",
@@ -241,9 +242,7 @@ class ImagesDataset(ImageDatasetClient):
                         "unable to create images table; inspecting existing table",
                         exc_info=True,
                     )
-                existing_schema = await self._room.datasets.inspect(
-                    table=self.TABLE_NAME
-                )
+                existing_schema = await self.client.inspect(table=self.TABLE_NAME)
 
             existing_names = set(existing_schema.names)
             missing_columns = {
@@ -252,13 +251,13 @@ class ImagesDataset(ImageDatasetClient):
                 if field.name not in existing_names
             }
             if len(missing_columns) > 0:
-                await self._room.datasets.add_columns(
+                await self.client.add_columns(
                     table=self.TABLE_NAME,
                     new_columns=missing_columns,
                 )
 
             try:
-                await self._room.datasets.create_index(
+                await self.client.create_index(
                     table=self.TABLE_NAME,
                     config=DatasetIndexConfig(column="id", index_type="BTREE"),
                 )
@@ -299,7 +298,7 @@ class ImagesDataset(ImageDatasetClient):
 
         for attempt in range(_IMAGE_SAVE_MAX_RETRIES):
             try:
-                await self._room.datasets.insert(
+                await self.client.insert(
                     table=self.TABLE_NAME,
                     records=[record],
                 )
@@ -330,7 +329,7 @@ class ImagesDataset(ImageDatasetClient):
     async def read(self, *, image_id: str) -> Optional[SavedImage]:
         await self._ensure_ready()
 
-        rows = await self._room.datasets.search(
+        rows = await self.client.search(
             table=self.TABLE_NAME,
             where={"id": image_id},
             limit=1,
@@ -350,7 +349,7 @@ class ImagesDataset(ImageDatasetClient):
     ) -> list[SavedImage]:
         await self._ensure_ready()
 
-        rows = await self._room.datasets.search(
+        rows = await self.client.search(
             table=self.TABLE_NAME,
             where=where,
             limit=limit,
@@ -362,7 +361,7 @@ class ImagesDataset(ImageDatasetClient):
     async def read_data(self, *, image_id: str) -> Optional[bytes]:
         await self._ensure_ready()
 
-        rows = await self._room.datasets.search(
+        rows = await self.client.search(
             table=self.TABLE_NAME,
             where={"id": image_id},
             limit=1,
@@ -381,4 +380,4 @@ class ImagesDataset(ImageDatasetClient):
 
     async def optimize(self) -> None:
         await self._ensure_ready()
-        await self._room.datasets.optimize(table=self.TABLE_NAME)
+        await self.client.optimize(table=self.TABLE_NAME)

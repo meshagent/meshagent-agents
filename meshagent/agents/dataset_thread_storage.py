@@ -99,15 +99,25 @@ from .thread_storage import (
     ThreadListEvent,
     ThreadListPage,
     ThreadStorage,
+    thread_dir_for_namespace,
 )
 
 if TYPE_CHECKING:
     from .adapter import LLMAdapter
+    from meshagent.api.room_server_client import DatasetsClient
 
 logger = logging.getLogger("agent.dataset_thread_storage")
 
 _DATASET_THREAD_URL_PREFIX = "dataset://"
 _IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+
+
+def _is_uuid_like(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _infer_usage_model(usage: dict[str, float]) -> str:
@@ -408,6 +418,14 @@ class _ActiveImageGeneration:
 
 
 class DatasetThreadStorage(ThreadStorage):
+    @staticmethod
+    def _client_from_room(*, room: RoomClient | None, client: DatasetsClient | None):
+        if client is not None:
+            return client
+        if room is None:
+            raise ValueError("dataset thread storage requires a dataset client or room")
+        return room.datasets
+
     @classmethod
     def thread_list_path_for_dir(cls, *, thread_dir: str) -> str:
         normalized = thread_dir.strip().rstrip("/")
@@ -422,17 +440,23 @@ class DatasetThreadStorage(ThreadStorage):
     async def list_threads(
         cls,
         *,
-        room: RoomClient,
+        room: RoomClient | None = None,
+        client: DatasetsClient | None = None,
         thread_dir: str,
+        namespace: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> ThreadListPage:
+        datasets = cls._client_from_room(room=room, client=client)
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
             limit=limit,
             offset=offset,
         )
         entries = await cls._read_thread_list_entries(
-            room=room,
+            client=datasets,
             thread_dir=thread_dir,
         )
         sorted_entries = _sort_thread_list_entries(entries)
@@ -450,15 +474,21 @@ class DatasetThreadStorage(ThreadStorage):
     async def upsert_thread(
         cls,
         *,
-        room: RoomClient,
+        room: RoomClient | None = None,
+        client: DatasetsClient | None = None,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         name: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
     ) -> None:
+        datasets = cls._client_from_room(room=room, client=client)
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
         now = _now_iso()
         resolved_created_at = (
             created_at.strip()
@@ -470,12 +500,8 @@ class DatasetThreadStorage(ThreadStorage):
             if isinstance(modified_at, str) and modified_at.strip() != ""
             else resolved_created_at
         )
-        resolved_name = (
-            name.strip()
-            if isinstance(name, str) and name.strip() != ""
-            else cls._default_thread_name(path=path)
-        )
-        await room.datasets.merge(
+        resolved_name = cls.default_thread_name(path=path, name=name)
+        await datasets.merge(
             table=table_name,
             namespace=namespace,
             on="path",
@@ -493,14 +519,20 @@ class DatasetThreadStorage(ThreadStorage):
     async def delete_thread(
         cls,
         *,
-        room: RoomClient,
+        room: RoomClient | None = None,
+        client: DatasetsClient | None = None,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         delete_storage: bool = True,
     ) -> None:
+        datasets = cls._client_from_room(room=room, client=client)
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
-        await room.datasets.delete(
+        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        await datasets.delete(
             table=table_name,
             namespace=namespace,
             where=f"path = {_dataset_sql_string_literal(path)}",
@@ -510,7 +542,7 @@ class DatasetThreadStorage(ThreadStorage):
             path_parts = _normalize_path_parts(path=normalized_path.table_path)
             thread_table = path_parts[-1]
             thread_namespace = path_parts[:-1] if len(path_parts) > 1 else None
-            await room.datasets.drop_table(
+            await datasets.drop_table(
                 name=thread_table,
                 namespace=thread_namespace,
                 ignore_missing=True,
@@ -520,17 +552,23 @@ class DatasetThreadStorage(ThreadStorage):
     async def rename_thread(
         cls,
         *,
-        room: RoomClient,
+        room: RoomClient | None = None,
+        client: DatasetsClient | None = None,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         name: str,
     ) -> None:
         resolved_name = name.strip()
         if resolved_name == "":
             raise ValueError("thread name is required")
+        datasets = cls._client_from_room(room=room, client=client)
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
-        await room.datasets.update(
+        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        await datasets.update(
             table=table_name,
             namespace=namespace,
             where=f"path = {_dataset_sql_string_literal(path)}",
@@ -541,14 +579,20 @@ class DatasetThreadStorage(ThreadStorage):
     async def watch_threads(
         cls,
         *,
-        room: RoomClient,
+        room: RoomClient | None = None,
+        client: DatasetsClient | None = None,
         thread_dir: str,
+        namespace: str | None = None,
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]:
+        datasets = cls._client_from_room(room=room, client=client)
+        thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir, namespace=namespace
+        )
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
+        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
         previous: dict[str, ThreadListEntry] = {}
-        async for event in room.datasets.watch_table(
+        async for event in datasets.watch_table(
             table=table_name,
             namespace=namespace,
             poll_interval_seconds=poll_interval,
@@ -589,19 +633,19 @@ class DatasetThreadStorage(ThreadStorage):
     async def _read_thread_list_entries(
         cls,
         *,
-        room: RoomClient,
+        client: DatasetsClient,
         thread_dir: str,
     ) -> list[ThreadListEntry]:
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(room=room, thread_dir=thread_dir)
-        rows = await room.datasets.search(table=table_name, namespace=namespace)
+        await cls._ensure_thread_list_table(client=client, thread_dir=thread_dir)
+        rows = await client.search(table=table_name, namespace=namespace)
         return cls._entries_from_records(records=rows.to_pylist())
 
     @classmethod
     async def _ensure_thread_list_table(
         cls,
         *,
-        room: RoomClient,
+        client: DatasetsClient,
         thread_dir: str,
     ) -> None:
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
@@ -614,9 +658,9 @@ class DatasetThreadStorage(ThreadStorage):
             ]
         )
         try:
-            await room.datasets.inspect(table=table_name, namespace=namespace)
+            await client.inspect(table=table_name, namespace=namespace)
         except Exception:
-            await room.datasets.create_table_with_schema(
+            await client.create_table_with_schema(
                 name=table_name,
                 schema=schema,
                 mode="create_if_not_exists",
@@ -660,25 +704,37 @@ class DatasetThreadStorage(ThreadStorage):
         return entries
 
     @staticmethod
+    def default_thread_name(*, path: str, name: str | None = None) -> str:
+        provided_name = name.strip() if isinstance(name, str) else ""
+        if provided_name != "":
+            return provided_name
+        return DatasetThreadStorage._default_thread_name(path=path)
+
+    @staticmethod
     def _default_thread_name(*, path: str) -> str:
         normalized_path = path.strip()
         if normalized_path.startswith(_DATASET_THREAD_URL_PREFIX):
             normalized_path = normalized_path[len(_DATASET_THREAD_URL_PREFIX) :]
         filename = normalized_path.rstrip("/").rsplit("/", 1)[-1]
+        if filename.endswith(".thread"):
+            filename = filename[: -len(".thread")]
+        if _is_uuid_like(filename):
+            return "New Chat"
         normalized = filename.replace("-", " ").replace("_", " ").strip()
         return normalized.title() if normalized != "" else "New Chat"
 
     def __init__(
         self,
         *,
-        room: RoomClient,
+        room: RoomClient | None = None,
+        client: DatasetsClient | None = None,
         path: str,
         max_append_message_count: int = 25,
         optimize_after_append_count: int = 25,
         persist_deltas: bool = False,
         persist_audio_input: bool = False,
     ) -> None:
-        self._room = room
+        self._client = self._client_from_room(room=room, client=client)
         normalized_path = _normalize_dataset_thread_storage_path(path=path)
         self._path = normalized_path.url
         path_parts = _normalize_path_parts(path=normalized_path.table_path)
@@ -851,19 +907,19 @@ class DatasetThreadStorage(ThreadStorage):
         schema = self._schema()
         existing_schema: pa.Schema | None = None
         try:
-            existing_schema = await self._room.datasets.inspect(
+            existing_schema = await self._client.inspect(
                 table=self._table_name,
                 namespace=self._namespace,
             )
         except Exception:
-            await self._room.datasets.create_table_with_schema(
+            await self._client.create_table_with_schema(
                 name=self._table_name,
                 schema=schema,
                 mode="create_if_not_exists",
                 namespace=self._namespace,
             )
             with contextlib.suppress(Exception):
-                existing_schema = await self._room.datasets.inspect(
+                existing_schema = await self._client.inspect(
                     table=self._table_name,
                     namespace=self._namespace,
                 )
@@ -877,13 +933,13 @@ class DatasetThreadStorage(ThreadStorage):
             }
             if len(missing_columns) > 0:
                 with contextlib.suppress(Exception):
-                    await self._room.datasets.add_columns(
+                    await self._client.add_columns(
                         table=self._table_name,
                         new_columns=missing_columns,
                         namespace=self._namespace,
                     )
 
-        rows = await self._room.datasets.search(
+        rows = await self._client.search(
             table=self._table_name,
             namespace=self._namespace,
         )
@@ -2155,7 +2211,7 @@ class DatasetThreadStorage(ThreadStorage):
         if len(rows) == 0:
             return
         rows = sorted(rows, key=lambda stored: stored.sequence)
-        await self._room.datasets.insert(
+        await self._client.insert(
             table=self._table_name,
             namespace=self._namespace,
             records=[
@@ -2180,11 +2236,21 @@ class DatasetThreadStorage(ThreadStorage):
             return
         await self._flush_pending_insert_rows()
         updated_data = {**row.data, "turn_id": turn_id}
-        await self._room.datasets.update(
+        await self._client.merge(
             table=self._table_name,
             namespace=self._namespace,
-            where=f"sequence = {row.sequence}",
-            values={"turn_id": turn_id, "data": DatasetJson(updated_data)},
+            on="sequence",
+            records=[
+                {
+                    "turn_id": turn_id,
+                    "item_id": row.item_id,
+                    "type": row.message_type,
+                    "sequence": row.sequence,
+                    "timestamp": row.timestamp,
+                    "data": DatasetJson(updated_data),
+                    "attachment": row.attachment,
+                }
+            ],
         )
         row.turn_id = turn_id
         row.data = updated_data
@@ -2231,7 +2297,7 @@ class DatasetThreadStorage(ThreadStorage):
     async def _optimize_loop(self) -> None:
         while True:
             try:
-                await self._room.datasets.optimize(
+                await self._client.optimize(
                     table=self._table_name,
                     namespace=self._namespace,
                     config=DatasetOptimizeConfig(
@@ -2327,7 +2393,7 @@ class DatasetThreadStorage(ThreadStorage):
                 restored_messages=restored_messages,
             ),
         )
-        images_dataset = ImagesDataset(self._room)
+        images_dataset = ImagesDataset(self._client)
         for row in self._rows:
             for message in await self._messages_from_row_async(
                 row=row,

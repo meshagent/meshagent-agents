@@ -1,14 +1,11 @@
-from typing import cast
-
 import pyarrow as pa
 import pytest
 
-from meshagent.api import RoomClient
 from meshagent.agents.images_dataset import ImageDatasetClient, ImagesDataset
 
 
 def test_images_dataset_marks_data_column_as_image_content() -> None:
-    schema = ImagesDataset(room=cast(RoomClient, None))._schema()
+    schema = ImagesDataset(_FakeDatasets())._schema()
 
     assert pa.types.is_large_binary(schema.field("data").type)
     assert schema.field("data").metadata == {b"content-type": b"image/*"}
@@ -89,7 +86,7 @@ class _FakeRoom:
 @pytest.mark.asyncio
 async def test_images_dataset_uses_existing_table_with_different_schema() -> None:
     room = _FakeRoom()
-    dataset = ImagesDataset(room=cast(RoomClient, room))
+    dataset = ImagesDataset(room.datasets)
 
     await dataset._ensure_ready()
 
@@ -119,7 +116,7 @@ async def test_image_dataset_client_reads_dataset_uri_record() -> None:
     room.datasets.search_rows = [
         {"id": "image-1", "data": bytearray(b"image-bytes"), "mime_type": "image/png"}
     ]
-    client = ImageDatasetClient(room=cast(RoomClient, room))
+    client = ImageDatasetClient(room.datasets)
 
     record = await client.read_record_from_uri(
         "dataset://agents/demo/images?id=image-1"

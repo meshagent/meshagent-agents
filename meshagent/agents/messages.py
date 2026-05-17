@@ -33,6 +33,11 @@ AGENT_MESSAGE_THREAD_OPEN = "meshagent.agent.thread.open"
 AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
 AGENT_MESSAGE_THREAD_DELETE = "meshagent.agent.thread.delete"
 AGENT_MESSAGE_THREAD_RENAME = "meshagent.agent.thread.rename"
+AGENT_MESSAGE_THREAD_LIST = "meshagent.agent.thread.list"
+AGENT_EVENT_THREAD_LISTED = "meshagent.agent.thread.listed"
+AGENT_EVENT_THREAD_CREATED = "meshagent.agent.thread.created"
+AGENT_EVENT_THREAD_UPDATED = "meshagent.agent.thread.updated"
+AGENT_EVENT_THREAD_DELETED = "meshagent.agent.thread.deleted"
 AGENT_MESSAGE_PARTICIPANT_CONNECT = "meshagent.agent.participant.connect"
 AGENT_MESSAGE_PARTICIPANT_DISCONNECT = "meshagent.agent.participant.disconnect"
 AGENT_MESSAGE_CAPABILITIES_REQUEST = "meshagent.agent.capabilities_request"
@@ -220,6 +225,43 @@ class DeleteThread(AgentThreadMessage):
 class RenameThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_RENAME]
     name: str
+
+
+class ListThreads(AgentMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_LIST]
+    limit: int = 200
+    offset: int = 0
+
+
+class AgentThreadListEntry(BaseModel):
+    path: str
+    name: str
+    created_at: str = ""
+    modified_at: str = ""
+
+
+class ThreadsListed(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_LISTED]
+    source_message_id: str
+    threads: list[AgentThreadListEntry] = Field(default_factory=list)
+    total: int = 0
+    offset: int = 0
+    limit: int = 200
+
+
+class ThreadCreated(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_CREATED]
+    thread: AgentThreadListEntry
+
+
+class ThreadUpdated(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_UPDATED]
+    thread: AgentThreadListEntry
+
+
+class ThreadDeleted(AgentMessage):
+    type: Literal[AGENT_EVENT_THREAD_DELETED]
+    path: str
 
 
 class CapabilitiesRequest(AgentThreadMessage):
@@ -821,6 +863,11 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_PARTICIPANT_DISCONNECT: ParticipantDisconnect,
     AGENT_MESSAGE_THREAD_DELETE: DeleteThread,
     AGENT_MESSAGE_THREAD_RENAME: RenameThread,
+    AGENT_MESSAGE_THREAD_LIST: ListThreads,
+    AGENT_EVENT_THREAD_LISTED: ThreadsListed,
+    AGENT_EVENT_THREAD_CREATED: ThreadCreated,
+    AGENT_EVENT_THREAD_UPDATED: ThreadUpdated,
+    AGENT_EVENT_THREAD_DELETED: ThreadDeleted,
     AGENT_MESSAGE_CAPABILITIES_REQUEST: CapabilitiesRequest,
     AGENT_MESSAGE_CAPABILITIES_RESPONSE: CapabilitiesResponse,
     AGENT_MESSAGE_MODELS_REQUEST: ModelsRequest,

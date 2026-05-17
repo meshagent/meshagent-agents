@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 THREAD_PATH_EXISTS_TIMEOUT_SECONDS = 2.0
 
 
+def thread_dir_for_namespace(*, thread_dir: str, namespace: str | None) -> str:
+    if namespace is None or namespace == "":
+        return thread_dir
+    return posixpath.join(thread_dir, namespace)
+
+
 @dataclass(frozen=True, slots=True)
 class ThreadListEntry:
     name: str
@@ -95,6 +101,7 @@ class ThreadStorageRepository(Protocol):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> ThreadListPage: ...
@@ -105,6 +112,7 @@ class ThreadStorageRepository(Protocol):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         name: str | None = None,
         created_at: str | None = None,
@@ -117,6 +125,7 @@ class ThreadStorageRepository(Protocol):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         delete_storage: bool = True,
     ) -> None: ...
@@ -127,6 +136,7 @@ class ThreadStorageRepository(Protocol):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         path: str,
         name: str,
     ) -> None: ...
@@ -137,6 +147,7 @@ class ThreadStorageRepository(Protocol):
         *,
         room: RoomClient,
         thread_dir: str,
+        namespace: str | None = None,
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]: ...
 

@@ -132,6 +132,7 @@ class MsgpackWebSocketChatEncoding:
 
 class _ChatAttachmentPayload(BaseModel):
     path: str
+    name: str | None = None
 
 
 class _ChatMessagePayload(BaseModel):
@@ -924,6 +925,7 @@ class BaseChatChannel(ThreadedChannel):
                     AgentFileContent(
                         type="file",
                         url=normalized_url,
+                        name=attachment.name,
                     )
                 )
 
