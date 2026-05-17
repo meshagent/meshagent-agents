@@ -3420,6 +3420,55 @@ async def test_agent_supervisor_thread_open_with_load_replays_stored_messages_si
 
 
 @pytest.mark.asyncio
+async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_before_loaded() -> (
+    None
+):
+    thread_storage = _LifecycleThreadStorage(path="/threads/created")
+    replay_message = AgentTextContentDelta(
+        type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+        thread_id="/threads/created",
+        turn_id="turn-new",
+        item_id="new",
+        text="new",
+    )
+    thread_storage.messages.append(replay_message)
+    room = _DownloadRecordingRoom()
+    supervisor = _ReplayThreadCreatingSupervisor(
+        room=room,
+        thread_storage=thread_storage,
+    )
+    channel = _ThreadOpenResponseChannel()
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="user-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/created",
+                    load=True,
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(channel.direct_payloads) >= 2)
+        assert isinstance(channel.direct_payloads[0], AgentTextContentDelta)
+        assert channel.direct_payloads[0].item_id == replay_message.item_id
+        assert isinstance(channel.direct_payloads[1], ThreadLoaded)
+        assert [
+            message.data
+            for message in channel.received
+            if isinstance(message.data, (AgentTextContentDelta, ThreadLoaded))
+        ] == []
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_supervisor_tracks_open_threads_by_client_until_last_close() -> (
     None
 ):
@@ -3491,6 +3540,48 @@ async def test_agent_supervisor_tracks_open_threads_by_client_until_last_close()
             AGENT_MESSAGE_THREAD_CLOSE,
             AGENT_MESSAGE_THREAD_CLOSE,
         ]
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_forwards_load_open_for_already_open_thread() -> None:
+    supervisor = _OpenCloseThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    client = _ThreadParticipant(name="Client", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                sender=client,
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/shared",
+                ),
+            )
+        )
+
+        assert len(supervisor.created_processes) == 1
+        process = supervisor.created_processes[0]
+        await _wait_for(lambda: len(process.received) == 1)
+
+        await supervisor.route(
+            Message(
+                sender=client,
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/shared",
+                    load=True,
+                ),
+            )
+        )
+
+        await _wait_for(lambda: len(process.received) == 2)
+        assert process.received[1].data.type == AGENT_MESSAGE_THREAD_OPEN
+        assert isinstance(process.received[1].data, OpenThread)
+        assert process.received[1].data.load is True
     finally:
         await supervisor.stop()
 

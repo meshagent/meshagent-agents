@@ -355,6 +355,17 @@ class BaseChatChannel(ThreadedChannel):
         )
         return True
 
+    async def send_agent_message_to_participant_and_wait(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        return self.send_agent_message_to_participant(
+            participant=participant,
+            payload=payload,
+        )
+
     def _publish_thread_status_to_open_participants(
         self,
         *,
@@ -1918,6 +1929,19 @@ class WebSocketChatChannel(BaseChatChannel):
         payload: dict[str, Any],
         attachment: bytes | None = None,
     ) -> None:
+        self._send_agent_payload_task(
+            participant=participant,
+            payload=payload,
+            attachment=attachment,
+        )
+
+    def _send_agent_payload_task(
+        self,
+        *,
+        participant: Participant,
+        payload: dict[str, Any],
+        attachment: bytes | None = None,
+    ) -> asyncio.Task[None] | None:
         if attachment is not None:
             payload = {**payload, "data": attachment}
         try:
@@ -1928,7 +1952,7 @@ class WebSocketChatChannel(BaseChatChannel):
                 participant.id,
                 exc_info=True,
             )
-            return
+            return None
 
         participant_id = participant.id
         previous_task = self._send_tasks_by_participant_id.get(participant_id)
@@ -1958,6 +1982,22 @@ class WebSocketChatChannel(BaseChatChannel):
                 )
 
         task.add_done_callback(cleanup)
+        return task
+
+    async def send_agent_message_to_participant_and_wait(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        task = self._send_agent_payload_task(
+            participant=participant,
+            payload=payload.model_dump(mode="json"),
+        )
+        if task is None:
+            return False
+        await task
+        return True
 
     async def _send_agent_message_to_websockets_after(
         self,

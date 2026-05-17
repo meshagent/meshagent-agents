@@ -808,6 +808,17 @@ class Channel:
         del payload
         return False
 
+    async def send_agent_message_to_participant_and_wait(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        return self.send_agent_message_to_participant(
+            participant=participant,
+            payload=payload,
+        )
+
     def get_agent_toolkits(self) -> list[Toolkit]:
         return []
 
@@ -2056,7 +2067,7 @@ class AgentSupervisor:
                     thread_id=thread_message.thread_id,
                     client_id=client_id,
                 )
-                if thread_was_open:
+                if thread_was_open and thread_message.load is not True:
                     self._send_to_channels(routed_message)
                     return
             else:
@@ -4853,14 +4864,14 @@ class LLMAgentProcess(AgentProcess):
                     thread_storage=thread_storage,
                     since_turn=request.since_turn,
                 ):
-                    super().emit(
-                        sender=message.sender,
+                    await self._send_thread_open_response(
+                        request_message=message,
                         payload=self._agent_message_with_participant_name(
                             stored_message
                         ),
                     )
-            super().emit(
-                sender=message.sender,
+            await self._send_thread_open_response(
+                request_message=message,
                 payload=self._agent_message_with_participant_name(
                     ThreadLoaded(
                         type=AGENT_EVENT_THREAD_LOADED,
@@ -4906,6 +4917,24 @@ class LLMAgentProcess(AgentProcess):
             sender=message.sender,
             source=message.source,
         )
+
+    async def _send_thread_open_response(
+        self,
+        *,
+        request_message: Message,
+        payload: AgentMessage,
+    ) -> None:
+        source = request_message.source
+        sender = request_message.sender
+        if source is not None and sender is not None and isinstance(source, Channel):
+            sent = await source.send_agent_message_to_participant_and_wait(
+                participant=sender,
+                payload=payload,
+            )
+            if sent:
+                return
+
+        super().emit(sender=sender, payload=payload)
 
     @staticmethod
     def _stored_agent_messages_since_turn(
