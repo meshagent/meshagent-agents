@@ -23,7 +23,7 @@ from typing import (
 from urllib.parse import urlparse
 
 from meshagent.api import Participant
-from meshagent.api.messaging import FileContent
+from meshagent.api.messaging import Content, ErrorContent, FileContent
 from meshagent.agents.adapter import (
     LLMAdapter,
     LLMAudioFormat,
@@ -32,7 +32,7 @@ from meshagent.agents.adapter import (
     ToolCallApprovalRequest,
 )
 from meshagent.agents.context import AgentSessionContext, SessionUsage
-from meshagent.tools import ToolContext, Toolkit
+from meshagent.tools import FunctionTool, ToolContext, Toolkit
 from opentelemetry import trace
 from pydantic_core import from_json as pydantic_core_from_json
 from .thread_adapter import default_format_message
@@ -58,6 +58,8 @@ from .messages import (
     AGENT_MESSAGE_THREAD_START,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
+    AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED,
+    AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_THREAD_CREATED,
     AGENT_EVENT_THREAD_DELETED,
@@ -79,6 +81,7 @@ from .messages import (
     AGENT_MESSAGE_THREAD_CLEAR,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
+    AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
     AGENT_MESSAGE_SECRET_RESPONSE,
     AGENT_MESSAGE_TURN_INTERRUPT,
     AGENT_MESSAGE_TURN_START,
@@ -93,6 +96,10 @@ from .messages import (
     AgentTextContent,
     AgentToolCallArgumentsDelta,
     AgentToolCallApprovalRequested,
+    AgentClientToolCallCancelled,
+    AgentClientToolCallRequested,
+    AgentClientToolCallResponse,
+    ClientToolkitDescription,
     AgentSecretRequested,
     AgentSecretResponse,
     AgentThreadListEntry,
@@ -184,6 +191,7 @@ _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES = frozenset(
         AGENT_MESSAGE_THREAD_RENAME,
         AGENT_MESSAGE_TOOL_CALL_APPROVE,
         AGENT_MESSAGE_TOOL_CALL_REJECT,
+        AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
         AGENT_MESSAGE_SECRET_RESPONSE,
         AGENT_MESSAGE_TURN_INTERRUPT,
         AGENT_MESSAGE_TURN_START,
@@ -649,6 +657,7 @@ class Message:
     data: AgentMessage
     sender: Participant | None = None
     source: Channel | AgentProcess | None = None
+    to_participant_id: str | None = None
 
 
 _MessageT = TypeVar("_MessageT", bound=AgentMessage)
@@ -791,12 +800,25 @@ class Channel:
             except asyncio.QueueShutDown:
                 logger.debug("dropping channel message after queue shutdown")
 
-    def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
+    def emit(
+        self,
+        *,
+        sender: Participant | None,
+        payload: AgentMessage,
+        to_participant_id: str | None = None,
+    ) -> None:
         supervisor = self.supervisor
         if supervisor is None:
             return
 
-        supervisor.send(Message(data=payload, sender=sender, source=self))
+        supervisor.send(
+            Message(
+                data=payload,
+                sender=sender,
+                source=self,
+                to_participant_id=to_participant_id,
+            )
+        )
 
     def send_agent_message_to_participant(
         self,
@@ -819,7 +841,14 @@ class Channel:
             payload=payload,
         )
 
-    def get_agent_toolkits(self) -> list[Toolkit]:
+    def get_turn_toolkits(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str | None,
+    ) -> list[Toolkit]:
+        del thread_id
+        del turn_id
         return []
 
     def get_exposed_toolkits(self) -> list[Toolkit]:
@@ -975,6 +1004,22 @@ class AgentSupervisor:
             participants_by_id[fallback.id] = fallback
         return list(participants_by_id.values())
 
+    def _participant_for_targeted_message(
+        self,
+        *,
+        participant_id: str,
+        fallback: Participant | None = None,
+    ) -> Participant | None:
+        client_id = participant_id.strip()
+        if client_id == "":
+            return None
+        participant = self._participants_by_client_id.get(client_id)
+        if participant is not None:
+            return participant
+        if fallback is not None and fallback.id == client_id:
+            return fallback
+        return None
+
     def create_thread_process(self, thread_id: str) -> AgentProcess:
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement create_thread_process"
@@ -995,8 +1040,15 @@ class AgentSupervisor:
         *,
         sender: Participant | None,
         payload: AgentMessage,
+        to_participant_id: str | None = None,
     ) -> None:
-        self.send(Message(data=payload, sender=sender))
+        self.send(
+            Message(
+                data=payload,
+                sender=sender,
+                to_participant_id=to_participant_id,
+            )
+        )
 
     async def on_start(self) -> None:
         return None
@@ -1239,6 +1291,7 @@ class AgentSupervisor:
             data=data,
             sender=message.sender,
             source=message.source,
+            to_participant_id=message.to_participant_id,
         )
 
     @staticmethod
@@ -1360,6 +1413,12 @@ class AgentSupervisor:
             self._participant_connection_counts_by_client_id.get(client_id, 0) + 1
         )
 
+    def is_participant_connected(self, *, participant_id: str) -> bool:
+        client_id = participant_id.strip()
+        if client_id == "":
+            return False
+        return self._participant_connection_counts_by_client_id.get(client_id, 0) > 0
+
     async def _track_participant_disconnected(self, *, participant_id: str) -> None:
         client_id = participant_id.strip()
         if client_id == "":
@@ -1376,6 +1435,8 @@ class AgentSupervisor:
 
         self._participant_connection_counts_by_client_id.pop(client_id, None)
         self._participants_by_client_id.pop(client_id, None)
+        for process in list(self.processes):
+            await process.on_participant_disconnected(participant_id=client_id)
         thread_ids = list(self._open_thread_ids_by_client_id.pop(client_id, set()))
         for thread_id in thread_ids:
             client_ids = self._open_client_ids_by_thread_id.get(thread_id)
@@ -1398,6 +1459,28 @@ class AgentSupervisor:
                 self._open_thread_ids_by_client_id.pop(client_id, None)
 
     def _send_to_channels(self, message: Message) -> None:
+        to_participant_id = message.to_participant_id
+        if to_participant_id is not None:
+            participant = self._participant_for_targeted_message(
+                participant_id=to_participant_id,
+                fallback=message.sender,
+            )
+            if participant is None:
+                logger.debug(
+                    "dropping targeted agent message %s for disconnected participant %s",
+                    message.data.type,
+                    to_participant_id,
+                )
+                return
+            for channel in self.channels:
+                if message.source is channel:
+                    continue
+                channel.send_agent_message_to_participant(
+                    participant=participant,
+                    payload=message.data,
+                )
+            return
+
         for channel in self.channels:
             if message.source is channel:
                 continue
@@ -1619,6 +1702,10 @@ class AgentSupervisor:
         routed_message = message
         target_processes: list[AgentProcess] | None = None
         message_type = message.data.type
+        if message.to_participant_id is not None:
+            self._send_to_channels(message)
+            return
+
         if message_type == AGENT_MESSAGE_PARTICIPANT_CONNECT:
             participant_connect = _coerce_message_data(message.data, ParticipantConnect)
             self._track_participant_connected(
@@ -1725,7 +1812,9 @@ class AgentSupervisor:
                 voice=start_thread.voice,
                 output_modalities=start_thread.output_modalities,
                 instructions=start_thread.instructions,
+                mcp=start_thread.mcp,
                 toolkits=start_thread.toolkits,
+                client_toolkits=start_thread.client_toolkits,
                 tool_choice=start_thread.tool_choice,
             )
             error = await self.validate_turn_start(turn_start)
@@ -2374,6 +2463,10 @@ class AgentProcess:
         del message
         return None
 
+    async def on_participant_disconnected(self, *, participant_id: str) -> None:
+        del participant_id
+        return None
+
     async def run(self) -> None:
         while not self._stop.is_set():
             with contextlib.suppress(asyncio.QueueShutDown):
@@ -2426,6 +2519,37 @@ class _QueuedTurnMessage:
 class _PendingRealtimeAudioChunk:
     data: bytes
     format: AgentAudioFormat
+
+
+@dataclass(slots=True)
+class _PendingClientToolCall:
+    future: asyncio.Future[Content]
+    participant: Participant
+    thread_id: str
+    turn_id: str
+    request_id: str
+    toolkit: str
+    tool: str
+
+
+class _AgentMessageProxyClientTool(FunctionTool):
+    def __init__(
+        self,
+        *,
+        description: ClientToolkitDescription,
+        request_tool_call: Callable[[str, dict[str, Any]], Awaitable[Content]],
+    ) -> None:
+        self._request_tool_call = request_tool_call
+        super().__init__(
+            name=description.name,
+            title=description.title,
+            description=description.description,
+            input_schema=description.input_schema,
+        )
+
+    async def execute(self, context: ToolContext, **kwargs: Any) -> Content:
+        del context
+        return await self._request_tool_call(self.name, kwargs)
 
 
 class LLMAgentProcess(AgentProcess):
@@ -2494,6 +2618,7 @@ class LLMAgentProcess(AgentProcess):
             AGENT_MESSAGE_MODEL_CHANGE: self.on_model_change,
             AGENT_MESSAGE_TOOL_CALL_APPROVE: self.on_tool_call_approve,
             AGENT_MESSAGE_TOOL_CALL_REJECT: self.on_tool_call_reject,
+            AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE: self.on_client_tool_call_response,
             AGENT_MESSAGE_SECRET_RESPONSE: self.on_secret_response,
         }
         self._session_context: AgentSessionContext | None = None
@@ -2510,7 +2635,9 @@ class LLMAgentProcess(AgentProcess):
         self._pending_secret_requests: dict[
             str, asyncio.Future[AgentSecretResponse]
         ] = {}
+        self._pending_client_tool_calls: dict[str, _PendingClientToolCall] = {}
         self._active_turn_sender: Participant | None = None
+        self._active_turn_client_tool_owner_id: str | None = None
         self._active_turn_toolkits: list[Toolkit] | None = None
         self._usage_emitted_turn_ids: set[str] = set()
         self._pending_status_messages: list[_QueuedTurnMessage] = []
@@ -2533,6 +2660,7 @@ class LLMAgentProcess(AgentProcess):
         self._interrupt_source_message_id: str | None = None
         self._active_turn_toolkit_client_options: dict[str, dict[str, Any]] = {}
         self._active_turn_tool_choice: ToolChoice | None = None
+        self._client_tool_call_timeout_seconds = 300.0
         self._status_tool_call_accumulator = ToolCallAccumulator()
         self._status_text_by_item_id: dict[str, str] = {}
         self._status_text_phase_by_item_id: dict[
@@ -3461,6 +3589,160 @@ class LLMAgentProcess(AgentProcess):
             if not future.done():
                 future.cancel()
 
+    async def _send_agent_message_to_participant(
+        self,
+        *,
+        participant: Participant,
+        payload: AgentMessage,
+    ) -> bool:
+        supervisor = self.supervisor
+        if supervisor is None:
+            return False
+
+        if not supervisor.is_participant_connected(participant_id=participant.id):
+            return False
+
+        if supervisor.state == "started":
+            supervisor.send(
+                Message(
+                    data=payload,
+                    sender=participant,
+                    source=self,
+                    to_participant_id=participant.id,
+                )
+            )
+            return True
+
+        sent = False
+        for channel in supervisor.channels:
+            if await channel.send_agent_message_to_participant_and_wait(
+                participant=participant,
+                payload=payload,
+            ):
+                sent = True
+        return sent
+
+    async def _cancel_pending_client_tool_calls(
+        self,
+        *,
+        participant_id: str | None = None,
+        reason: str,
+    ) -> None:
+        pending_items = list(self._pending_client_tool_calls.items())
+        for request_id, pending in pending_items:
+            if participant_id is not None and pending.participant.id != participant_id:
+                continue
+            self._pending_client_tool_calls.pop(request_id, None)
+            if not pending.future.done():
+                pending.future.set_result(
+                    ErrorContent(
+                        text=f"client toolkit call cancelled: {reason}",
+                    )
+                )
+            with contextlib.suppress(Exception):
+                await self._send_agent_message_to_participant(
+                    participant=pending.participant,
+                    payload=AgentClientToolCallCancelled(
+                        type=AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED,
+                        thread_id=pending.thread_id,
+                        turn_id=pending.turn_id,
+                        request_id=pending.request_id,
+                        toolkit=pending.toolkit,
+                        tool=pending.tool,
+                        reason=reason,
+                    ),
+                )
+
+    async def on_participant_disconnected(self, *, participant_id: str) -> None:
+        await self._cancel_pending_client_tool_calls(
+            participant_id=participant_id,
+            reason="participant_disconnected",
+        )
+
+    async def _request_client_tool_call(
+        self,
+        *,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> Content:
+        turn_id = self._turn_id
+        thread_id = self.thread_id
+        participant = self._active_turn_sender
+        supervisor = self.supervisor
+        if turn_id is None or thread_id is None:
+            return ErrorContent(
+                text="client toolkit call requested without an active turn",
+            )
+        if participant is None:
+            return ErrorContent(
+                text="client toolkit call requested without a participant",
+            )
+        if supervisor is None or not supervisor.is_participant_connected(
+            participant_id=participant.id
+        ):
+            return ErrorContent(
+                text="client toolkit participant is not connected",
+            )
+
+        request_id = str(uuid.uuid4())
+        request_future: asyncio.Future[Content] = (
+            asyncio.get_running_loop().create_future()
+        )
+        pending = _PendingClientToolCall(
+            future=request_future,
+            participant=participant,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_id=request_id,
+            toolkit="client",
+            tool=tool,
+        )
+        self._pending_client_tool_calls[request_id] = pending
+        sent = await self._send_agent_message_to_participant(
+            participant=participant,
+            payload=AgentClientToolCallRequested(
+                type=AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                toolkit=pending.toolkit,
+                tool=tool,
+                arguments=arguments,
+            ),
+        )
+        if not sent:
+            self._pending_client_tool_calls.pop(request_id, None)
+            return ErrorContent(
+                text="client toolkit participant is not connected",
+            )
+
+        try:
+            return await asyncio.wait_for(
+                request_future,
+                timeout=self._client_tool_call_timeout_seconds,
+            )
+        except TimeoutError:
+            self._pending_client_tool_calls.pop(request_id, None)
+            await self._send_agent_message_to_participant(
+                participant=participant,
+                payload=AgentClientToolCallCancelled(
+                    type=AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    request_id=request_id,
+                    toolkit=pending.toolkit,
+                    tool=tool,
+                    reason="timeout",
+                ),
+            )
+            return ErrorContent(
+                text="client toolkit call timed out",
+            )
+        finally:
+            existing_pending = self._pending_client_tool_calls.get(request_id)
+            if existing_pending is pending:
+                del self._pending_client_tool_calls[request_id]
+
     async def request_user_secret(
         self,
         *,
@@ -3552,6 +3834,34 @@ class LLMAgentProcess(AgentProcess):
 
         request_future.set_result(response)
 
+    async def _resolve_client_tool_call_response(
+        self,
+        response: AgentClientToolCallResponse,
+        *,
+        sender: Participant | None,
+    ) -> None:
+        pending = self._pending_client_tool_calls.get(response.request_id)
+        if pending is None or pending.future.done():
+            return
+        if response.turn_id != pending.turn_id:
+            return
+        if sender is None or sender.id != pending.participant.id:
+            return
+
+        pending.future.set_result(response.response)
+
+    @staticmethod
+    def _resolve_turn_client_toolkits(
+        *,
+        turns: list[TurnStart | TurnSteer],
+    ) -> list[ClientToolkitDescription]:
+        configured_toolkits: list[ClientToolkitDescription] | None = None
+        for turn in turns:
+            if not isinstance(turn, TurnStart):
+                continue
+            configured_toolkits = turn.client_toolkits
+        return list(configured_toolkits or [])
+
     def _resolve_turn_toolkit_client_options(
         self,
         *,
@@ -3562,6 +3872,10 @@ class LLMAgentProcess(AgentProcess):
             if not isinstance(turn, TurnStart):
                 continue
             configured_options = {}
+            if turn.mcp is not None:
+                configured_options["mcp"] = {
+                    "servers": [*turn.mcp.servers],
+                }
             if turn.toolkits is None:
                 continue
             for toolkit_name, toolkit_config in turn.toolkits.items():
@@ -3656,7 +3970,6 @@ class LLMAgentProcess(AgentProcess):
                     name=toolkit.name,
                     title=toolkit.title,
                     description=toolkit.description,
-                    thumbnail_url=toolkit.thumbnail_url,
                     rules=[*toolkit.rules],
                     client_options=toolkit.client_options,
                     hidden=toolkit.hidden,
@@ -3696,7 +4009,15 @@ class LLMAgentProcess(AgentProcess):
                 supervisor = self.supervisor
                 if supervisor is not None:
                     for channel in supervisor.channels:
-                        combined_toolkits.extend(channel.get_agent_toolkits())
+                        turn_id = self._turn_id
+                        if turn_id is None and len(turns) > 0:
+                            turn_id = turns[-1].turn_id
+                        combined_toolkits.extend(
+                            channel.get_turn_toolkits(
+                                thread_id=self.thread_id,
+                                turn_id=turn_id,
+                            )
+                        )
 
             resolved_toolkits: list[Toolkit] = []
             for toolkit in combined_toolkits:
@@ -3707,6 +4028,29 @@ class LLMAgentProcess(AgentProcess):
                             if toolkit_client_options is None
                             else toolkit_client_options.get(toolkit.name)
                         )
+                    )
+                )
+
+            client_toolkits = self._resolve_turn_client_toolkits(turns=turns)
+            if len(client_toolkits) > 0:
+                resolved_toolkits.append(
+                    Toolkit(
+                        name="client",
+                        tools=[
+                            _AgentMessageProxyClientTool(
+                                description=description,
+                                request_tool_call=lambda tool, arguments: (
+                                    self._request_client_tool_call(
+                                        tool=tool,
+                                        arguments=arguments,
+                                    )
+                                ),
+                            )
+                            for description in client_toolkits
+                        ],
+                        title="Client",
+                        description="Client-side tools provided by the participant.",
+                        hidden=True,
                     )
                 )
 
@@ -4039,11 +4383,14 @@ class LLMAgentProcess(AgentProcess):
         queued_messages: list[_QueuedTurnMessage],
         session: AgentSessionContext,
         model: str,
-    ) -> tuple[Participant | None, list[Toolkit], ToolChoice | None]:
+    ) -> tuple[Participant | None, list[Toolkit], ToolChoice | None, str | None]:
         turns = [queued_message.request for queued_message in queued_messages]
         sender = self._sender_for_turn_batch(queued_messages=queued_messages)
         toolkit_client_options = self._resolve_turn_toolkit_client_options(turns=turns)
         tool_choice = self._resolve_turn_tool_choice(turns=turns)
+        client_tool_owner_id: str | None = None
+        if len(self._resolve_turn_client_toolkits(turns=turns)) > 0:
+            client_tool_owner_id = None if sender is None else sender.id
 
         await self._append_queued_turn_messages(
             session=session,
@@ -4056,7 +4403,7 @@ class LLMAgentProcess(AgentProcess):
             sender=sender,
             toolkit_client_options=toolkit_client_options,
         )
-        return sender, combined_toolkits, tool_choice
+        return sender, combined_toolkits, tool_choice, client_tool_owner_id
 
     async def _run_adapter_next(
         self,
@@ -4065,6 +4412,7 @@ class LLMAgentProcess(AgentProcess):
         sender: Participant | None,
         combined_toolkits: list[Toolkit],
         tool_choice: ToolChoice | None,
+        client_tool_owner_id: str | None,
         model: str,
         response_options: dict[str, Any] | None = None,
     ) -> None:
@@ -4371,6 +4719,7 @@ class LLMAgentProcess(AgentProcess):
 
         self._active_turn_sender = sender
         self._active_turn_toolkits = combined_toolkits
+        self._active_turn_client_tool_owner_id = client_tool_owner_id
         had_thread_id = "thread_id" in session.metadata
         previous_thread_id = session.metadata.get("thread_id")
         had_turn_id = "turn_id" in session.metadata
@@ -4463,6 +4812,7 @@ class LLMAgentProcess(AgentProcess):
             self._active_next_task = None
             self._active_turn_sender = None
             self._active_turn_toolkits = None
+            self._active_turn_client_tool_owner_id = None
             self._usage_emitted_turn_ids.discard(turn_id)
 
     async def _continue_interrupted_turn(
@@ -4485,7 +4835,12 @@ class LLMAgentProcess(AgentProcess):
 
         await self._remove_pending_status_messages(queued_messages=steer_messages)
         self.llm_adapter.on_turn_steer(context=session, interrupted=True)
-        sender, combined_toolkits, tool_choice = await self._prepare_turn_batch(
+        (
+            sender,
+            combined_toolkits,
+            tool_choice,
+            client_tool_owner_id,
+        ) = await self._prepare_turn_batch(
             queued_messages=steer_messages,
             session=session,
             model=model,
@@ -4495,6 +4850,7 @@ class LLMAgentProcess(AgentProcess):
             sender=sender,
             combined_toolkits=combined_toolkits,
             tool_choice=tool_choice,
+            client_tool_owner_id=client_tool_owner_id,
             model=model,
         )
         return True
@@ -4506,7 +4862,12 @@ class LLMAgentProcess(AgentProcess):
         session: AgentSessionContext,
         model: str,
     ) -> None:
-        sender, combined_toolkits, tool_choice = await self._prepare_turn_batch(
+        (
+            sender,
+            combined_toolkits,
+            tool_choice,
+            client_tool_owner_id,
+        ) = await self._prepare_turn_batch(
             queued_messages=queued_messages,
             session=session,
             model=model,
@@ -4519,6 +4880,7 @@ class LLMAgentProcess(AgentProcess):
             sender=sender,
             combined_toolkits=combined_toolkits,
             tool_choice=tool_choice,
+            client_tool_owner_id=client_tool_owner_id,
             model=model,
             response_options=response_options,
         )
@@ -4537,6 +4899,7 @@ class LLMAgentProcess(AgentProcess):
         self._interrupt_requested_turn_id = None
         self._interrupt_source_message_id = None
         self._cancel_pending_tool_call_approvals()
+        await self._cancel_pending_client_tool_calls(reason="turn_interrupted")
 
         if interrupt_source_message_id is not None:
             self.emit(
@@ -5186,6 +5549,29 @@ class LLMAgentProcess(AgentProcess):
             )
             return
 
+        client_tool_owner_id = self._active_turn_client_tool_owner_id
+        if client_tool_owner_id is not None and (
+            message.sender is None or message.sender.id != client_tool_owner_id
+        ):
+            rejection = self._turn_error(
+                message=(
+                    "turn is using client toolkits and can only be steered by "
+                    "the participant that started it"
+                ),
+                code="turn_owned_by_participant",
+            )
+            self.emit(
+                sender=message.sender,
+                payload=TurnSteerRejected(
+                    type=AGENT_EVENT_TURN_STEER_REJECTED,
+                    thread_id=turn.thread_id,
+                    turn_id=turn.turn_id,
+                    source_message_id=turn.message_id,
+                    error=rejection,
+                ),
+            )
+            return
+
         queued_message = _QueuedTurnMessage(
             sender=message.sender,
             request=turn,
@@ -5225,6 +5611,16 @@ class LLMAgentProcess(AgentProcess):
         active_next_task = self._active_next_task
         if active_next_task is not None:
             active_next_task.cancel()
+
+    async def on_client_tool_call_response(self, message: Message) -> None:
+        response = _coerce_message_data(message.data, AgentClientToolCallResponse)
+        if self._turn_id != response.turn_id:
+            return
+
+        await self._resolve_client_tool_call_response(
+            response,
+            sender=message.sender,
+        )
 
     async def on_realtime_audio_chunk(self, message: Message) -> None:
         chunk = _coerce_message_data(message.data, AgentRealtimeAudioChunk)
@@ -5533,6 +5929,7 @@ class LLMAgentProcess(AgentProcess):
         self._pending_realtime_audio_status_active = False
         self._cancel_pending_tool_call_approvals()
         self._cancel_pending_secret_requests()
+        await self._cancel_pending_client_tool_calls(reason="process_stopped")
         await self._clear_pending_status_messages()
         thread_status_publisher = self.thread_status_publisher
         if thread_status_publisher is not None:

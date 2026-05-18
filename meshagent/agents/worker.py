@@ -5,7 +5,9 @@ from meshagent.agents import AgentSessionContext
 from meshagent.agents.context import TaskContext
 from meshagent.tools import (
     LocalRoomTool,
+    RoomToolContext,
     Toolkit,
+    ToolContext,
 )
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from .adapter import LLMAdapter
@@ -13,7 +15,6 @@ import asyncio
 import contextlib
 from typing import Literal, Optional
 import json
-from meshagent.tools import ToolContext
 import logging
 
 from pathlib import Path
@@ -550,7 +551,8 @@ class Worker(SingleRoomAgent):
 
     async def get_message_toolkits(self, *, message: dict) -> list[Toolkit]:
         toolkits = await self.get_required_toolkits(
-            context=ToolContext(
+            context=RoomToolContext(
+                room=self.room,
                 caller=self.room.local_participant,
                 on_behalf_of=None,
             )

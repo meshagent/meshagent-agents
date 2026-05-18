@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 from meshagent.api.agent_content import (
     AgentContent,
@@ -76,6 +76,8 @@ AGENT_EVENT_TOOL_CALL_ENDED = "meshagent.agent.tool_call.ended"
 AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED = (
     "meshagent.agent.tool_call.approval_requested"
 )
+AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED = "meshagent.agent.client_tool_call.requested"
+AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED = "meshagent.agent.client_tool_call.cancelled"
 AGENT_EVENT_SECRET_REQUESTED = "meshagent.agent.secret.requested"
 AGENT_EVENT_THREAD_STATUS = "meshagent.agent.thread.status"
 AGENT_EVENT_CONNECTION_STATUS = "meshagent.agent.connection.status"
@@ -100,6 +102,7 @@ AGENT_EVENT_CONTEXT_COMPACTED = "meshagent.agent.context.compacted"
 AGENT_EVENT_USAGE_UPDATED = "meshagent.agent.usage.updated"
 AGENT_MESSAGE_TOOL_CALL_APPROVE = "meshagent.agent.tool_call.approve"
 AGENT_MESSAGE_TOOL_CALL_REJECT = "meshagent.agent.tool_call.reject"
+AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE = "meshagent.agent.client_tool_call.response"
 AGENT_MESSAGE_SECRET_RESPONSE = "meshagent.agent.secret.response"
 
 
@@ -127,6 +130,17 @@ class TurnToolkitConfig(BaseModel):
     client_options: dict[str, Any] | None = None
 
 
+class TurnMCPConfig(BaseModel):
+    servers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClientToolkitDescription(BaseModel):
+    name: str
+    title: str | None = None
+    description: str | None = None
+    input_schema: dict[str, Any]
+
+
 class StartThread(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_START]
     content: list[AgentInputContent] | None = None
@@ -141,6 +155,8 @@ class StartThread(AgentMessage):
         max_length=1,
     )
     instructions: Optional[str] = None
+    mcp: TurnMCPConfig | None = None
+    client_toolkits: list[ClientToolkitDescription] | None = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
 
@@ -158,8 +174,67 @@ class TurnStart(AgentThreadMessage):
         max_length=1,
     )
     instructions: Optional[str] = None
+    mcp: TurnMCPConfig | None = None
+    client_toolkits: list[ClientToolkitDescription] | None = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
+
+
+def scrub_agent_message_for_storage(message: AgentMessage) -> AgentMessage:
+    if not isinstance(message, (StartThread, TurnStart)):
+        return message
+
+    updated_mcp = message.mcp
+    updated_toolkits = message.toolkits
+    changed = False
+
+    if message.mcp is not None:
+        servers = []
+        for server in message.mcp.servers:
+            stored_server = dict(server)
+            if "authorization" in stored_server:
+                stored_server.pop("authorization")
+                changed = True
+            servers.append(stored_server)
+        if changed:
+            updated_mcp = TurnMCPConfig(servers=servers)
+
+    if message.toolkits is not None and "mcp" in message.toolkits:
+        mcp_toolkit = message.toolkits["mcp"]
+        client_options = mcp_toolkit.client_options
+        if isinstance(client_options, dict) and isinstance(
+            client_options.get("servers"), list
+        ):
+            servers = []
+            toolkits_changed = False
+            for server in client_options["servers"]:
+                if not isinstance(server, dict):
+                    servers.append(server)
+                    continue
+                stored_server = dict(server)
+                if "authorization" in stored_server:
+                    stored_server.pop("authorization")
+                    toolkits_changed = True
+                servers.append(stored_server)
+            if toolkits_changed:
+                updated_client_options = dict(client_options)
+                updated_client_options["servers"] = servers
+                updated_toolkits = dict(message.toolkits)
+                updated_toolkits["mcp"] = mcp_toolkit.model_copy(
+                    update={"client_options": updated_client_options},
+                    deep=True,
+                )
+                changed = True
+
+    if not changed:
+        return message
+    return cast(
+        AgentMessage,
+        message.model_copy(
+            update={"mcp": updated_mcp, "toolkits": updated_toolkits},
+            deep=True,
+        ),
+    )
 
 
 class TurnSteer(AgentThreadMessage):
@@ -283,7 +358,6 @@ class ToolkitCapabilities(BaseModel):
     name: str
     title: str | None = None
     description: str | None = None
-    thumbnail_url: str | None = None
     rules: list[str] = Field(default_factory=list)
     client_options: dict[str, Any] | None = None
     hidden: bool = False
@@ -603,6 +677,28 @@ class AgentToolCallApprovalRequested(AgentLLMMessage):
     arguments: Optional[dict[str, Any]] = None
 
 
+class AgentClientToolCallRequested(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED] = (
+        AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED
+    )
+    turn_id: str
+    request_id: str
+    toolkit: str
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentClientToolCallCancelled(AgentLLMMessage):
+    type: Literal[AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED] = (
+        AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED
+    )
+    turn_id: str
+    request_id: str
+    toolkit: str
+    tool: str
+    reason: str | None = None
+
+
 class AgentSecretOAuthRequest(BaseModel):
     secret_name: str
     client_secret_id: str | None = None
@@ -839,6 +935,21 @@ class RejectAgentToolCall(AgentThreadMessage):
     item_id: str
 
 
+class AgentClientToolCallResponse(AgentThreadMessage):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    type: Literal[AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE] = (
+        AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE
+    )
+    turn_id: str
+    request_id: str
+    response: Content
+
+    @field_serializer("response", when_used="json")
+    def _serialize_response(self, response: Content) -> dict[str, Any]:
+        return response.to_json()
+
+
 class AgentSecretResponse(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_SECRET_RESPONSE]
     turn_id: str
@@ -902,6 +1013,8 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_TOOL_CALL_LOG_DELTA: AgentToolCallLogDelta,
     AGENT_EVENT_TOOL_CALL_ENDED: AgentToolCallEnded,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED: AgentToolCallApprovalRequested,
+    AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED: AgentClientToolCallRequested,
+    AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED: AgentClientToolCallCancelled,
     AGENT_EVENT_SECRET_REQUESTED: AgentSecretRequested,
     AGENT_EVENT_THREAD_STATUS: AgentThreadStatus,
     AGENT_EVENT_CONNECTION_STATUS: AgentConnectionStatus,
@@ -924,6 +1037,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_EVENT_USAGE_UPDATED: AgentUsageUpdated,
     AGENT_MESSAGE_TOOL_CALL_APPROVE: ApproveAgentToolCall,
     AGENT_MESSAGE_TOOL_CALL_REJECT: RejectAgentToolCall,
+    AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE: AgentClientToolCallResponse,
     AGENT_MESSAGE_SECRET_RESPONSE: AgentSecretResponse,
 }
 
@@ -942,5 +1056,9 @@ def parse_agent_message(data: dict[str, Any]) -> AgentMessage:
         result = payload.get("result")
         if isinstance(result, dict):
             payload["result"] = unpack_content_parts(header=result, payload=b"")
+    elif model is AgentClientToolCallResponse:
+        response = payload.get("response")
+        if isinstance(response, dict):
+            payload["response"] = unpack_content_parts(header=response, payload=b"")
 
     return model.model_validate(payload)

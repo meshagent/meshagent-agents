@@ -59,8 +59,6 @@ class RemoteRoomTool(LocalRoomTool):
         title=None,
         description=None,
         rules=None,
-        thumbnail_url=None,
-        pricing: Optional[str] = None,
         participant_id: Optional[str] = None,
         on_behalf_of_id: Optional[str] = None,
         defs: Optional[dict] = None,
@@ -85,8 +83,6 @@ class RemoteRoomTool(LocalRoomTool):
             title=title,
             description=description,
             rules=rules,
-            thumbnail_url=thumbnail_url,
-            pricing=pricing,
             defs=defs,
             strict=True if strict is None else strict,
         )
@@ -98,7 +94,6 @@ class RemoteRoomTool(LocalRoomTool):
             participant_id=self._participant_id,
             on_behalf_of_id=self._on_behalf_of_id,
             input=kwargs,
-            caller_context=context.caller_context,
         )
 
         if isinstance(result, AsyncIterable):
@@ -537,10 +532,8 @@ class SingleRoomAgent:
                             output_spec=tool_description.output_spec,
                             output_schema=tool_description.output_schema,
                             title=tool_description.title,
-                            thumbnail_url=tool_description.thumbnail_url,
                             participant_id=toolkit_participant_id,
                             defs=tool_description.defs,
-                            pricing=tool_description.pricing,
                             strict=tool_description.strict,
                         )
                         remote_room_tools.append(tool)
@@ -567,10 +560,8 @@ class SingleRoomAgent:
                             output_spec=tool_description.output_spec,
                             output_schema=tool_description.output_schema,
                             title=tool_description.title,
-                            thumbnail_url=tool_description.thumbnail_url,
                             participant_id=toolkit_participant_id,
                             defs=tool_description.defs,
-                            pricing=tool_description.pricing,
                             strict=tool_description.strict,
                         )
                         remote_room_tools.append(tool)
@@ -579,7 +570,6 @@ class SingleRoomAgent:
                     name=toolkit.name,
                     title=toolkit.title,
                     description=toolkit.description,
-                    thumbnail_url=toolkit.thumbnail_url,
                     room=self.room,
                     tools=remote_room_tools,
                 )

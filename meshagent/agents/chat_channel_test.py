@@ -442,7 +442,10 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
 
     await channel.start(supervisor)
     try:
-        agent_toolkits = channel.get_agent_toolkits()
+        agent_toolkits = channel.get_turn_toolkits(
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+        )
         assert len(agent_toolkits) == 1
         agent_tool_names = {tool.name for tool in agent_toolkits[0].tools}
         assert agent_tool_names == {
@@ -933,7 +936,10 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
     try:
         new_thread_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "new_thread"
         )
         result = await new_thread_tool.execute(
@@ -1037,7 +1043,10 @@ async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
     try:
         new_thread_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "new_thread"
         )
         result = await new_thread_tool.execute(
@@ -1092,7 +1101,10 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
     try:
         new_thread_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "new_thread"
         )
         result = await new_thread_tool.execute(
@@ -1143,7 +1155,10 @@ async def test_chat_channel_new_thread_rejects_empty_message_without_attachments
     try:
         new_thread_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "new_thread"
         )
 
@@ -1177,18 +1192,15 @@ async def test_chat_channel_attach_file_emits_file_content_events() -> None:
     try:
         attach_file_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "attach_file"
         )
 
         result = await attach_file_tool.execute(
-            context=ToolContext(
-                caller=caller,
-                caller_context={
-                    "thread_id": "/threads/test.thread",
-                    "turn_id": "turn-1",
-                },
-            ),
+            context=ToolContext(caller=caller),
             path="docs/report.pdf",
         )
 
@@ -1255,18 +1267,15 @@ async def test_chat_channel_attach_file_publishes_file_content_to_open_participa
 
         attach_file_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "attach_file"
         )
 
         await attach_file_tool.execute(
-            context=ToolContext(
-                caller=caller,
-                caller_context={
-                    "thread_id": "/threads/test.thread",
-                    "turn_id": "turn-1",
-                },
-            ),
+            context=ToolContext(caller=caller),
             path="docs/report.pdf",
         )
 
@@ -1298,7 +1307,10 @@ async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
     try:
         attach_file_tool = next(
             tool
-            for tool in channel.get_agent_toolkits()[0].tools
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
             if tool.name == "attach_file"
         )
 
@@ -1307,13 +1319,7 @@ async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
             match=r"attach_file could not find a room file at docs/missing\.pdf",
         ):
             await attach_file_tool.execute(
-                context=ToolContext(
-                    caller=caller,
-                    caller_context={
-                        "thread_id": "/threads/test.thread",
-                        "turn_id": "turn-1",
-                    },
-                ),
+                context=ToolContext(caller=caller),
                 path="docs/missing.pdf",
             )
 
@@ -1334,7 +1340,13 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
 
     await channel.start(supervisor)
     try:
-        tool_names = {tool.name for tool in channel.get_agent_toolkits()[0].tools}
+        tool_names = {
+            tool.name
+            for tool in channel.get_turn_toolkits(
+                thread_id="/threads/test.thread",
+                turn_id="turn-1",
+            )[0].tools
+        }
         assert tool_names == {
             "new_thread",
             "attach_file",

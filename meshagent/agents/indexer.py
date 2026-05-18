@@ -128,7 +128,6 @@ class RagTool(LocalRoomTool):
         title="RAG search",
         description="perform a RAG search",
         rules=None,
-        thumbnail_url=None,
         embedder: Optional[Embedder] = None,
     ):
         self.table = table
@@ -145,7 +144,6 @@ class RagTool(LocalRoomTool):
             title=title,
             description=description,
             rules=rules,
-            thumbnail_url=thumbnail_url,
         )
 
         self._embedder = embedder

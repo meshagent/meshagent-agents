@@ -10,7 +10,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
 from urllib.parse import parse_qs, urlparse
 
 import pyarrow as pa
@@ -91,6 +91,7 @@ from .messages import (
     TurnSteered,
     TurnSteerRejected,
     parse_agent_message,
+    scrub_agent_message_for_storage,
 )
 from .stream_content_accumulator import accumulate_text_delta
 from .thread_adapter import default_format_message
@@ -2087,6 +2088,7 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         message: AgentThreadMessage,
     ) -> tuple[dict[str, Any], bytes | None]:
+        message = cast(AgentThreadMessage, scrub_agent_message_for_storage(message))
         if isinstance(message, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)):
             stored_message = message.model_copy(update={"data": b""})
             return stored_message.model_dump(mode="json"), message.data

@@ -56,7 +56,6 @@ class _FakeAgentsClient:
         input: Any,
         participant_id: str | None = None,
         on_behalf_of_id: str | None = None,
-        caller_context: dict | None = None,
     ) -> Any:
         self.calls.append(
             {
@@ -65,7 +64,6 @@ class _FakeAgentsClient:
                 "input": input,
                 "participant_id": participant_id,
                 "on_behalf_of_id": on_behalf_of_id,
-                "caller_context": caller_context,
             }
         )
         return self._response
@@ -120,10 +118,7 @@ async def test_remote_room_tool_raises_if_remote_room_tool_returns_iterable() ->
     fake_agents = _FakeAgentsClient(response=_FakeIterableResult())
     room = _FakeRoom(agents=fake_agents)
     caller = _FakeParticipant(participant_id="caller-id", name="caller")
-    context = ToolContext(
-        caller=caller,
-        caller_context={"chat": {"id": "chat-1"}},
-    )
+    context = ToolContext(caller=caller)
     tool = RemoteRoomTool(
         room=room,
         toolkit_name="remote_tools",
@@ -140,7 +135,6 @@ async def test_remote_room_tool_raises_if_remote_room_tool_returns_iterable() ->
         await tool.execute(context=context)
 
     assert len(fake_agents.calls) == 1
-    assert fake_agents.calls[0]["caller_context"] == {"chat": {"id": "chat-1"}}
 
 
 @pytest.mark.asyncio

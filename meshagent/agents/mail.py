@@ -1,6 +1,7 @@
 from meshagent.agents.worker import Worker
 from meshagent.tools import (
     ToolContext,
+    RoomToolContext,
     FunctionTool,
     LocalRoomTool,
     Toolkit,
@@ -653,9 +654,9 @@ class MailBot(Worker):
         thread_context: MailThreadContext,
     ) -> list[Toolkit]:
         toolkits = await self.get_required_toolkits(
-            context=ToolContext(
+            context=RoomToolContext(
                 caller=self.room.local_participant,
-                caller_context={"chat": thread_context.chat.to_json()},
+                room=self.room,
             )
         )
 

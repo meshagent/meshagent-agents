@@ -259,30 +259,6 @@ class AgentSessionContext:
             "previous_response_id": self.previous_response_id,
         }
 
-    def to_tool_caller_context(
-        self, *, item_id: str | None = None
-    ) -> dict[str, object]:
-        caller_context: dict[str, object] = {"chat": self.to_json()}
-
-        thread_id = self.metadata.get("thread_id")
-        if isinstance(thread_id, str):
-            normalized_thread_id = thread_id.strip()
-            if normalized_thread_id != "":
-                caller_context["thread_id"] = normalized_thread_id
-
-        turn_id = self.metadata.get("turn_id")
-        if isinstance(turn_id, str):
-            normalized_turn_id = turn_id.strip()
-            if normalized_turn_id != "":
-                caller_context["turn_id"] = normalized_turn_id
-
-        if isinstance(item_id, str):
-            normalized_item_id = item_id.strip()
-            if normalized_item_id != "":
-                caller_context["item_id"] = normalized_item_id
-
-        return caller_context
-
     @classmethod
     def from_json(cls, json: dict):
         return cls(

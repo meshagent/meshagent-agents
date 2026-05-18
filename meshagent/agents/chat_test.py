@@ -692,14 +692,6 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     tool = await _new_thread_tool(bot)
     context = ToolContext(
         caller=Participant(id="caller-id", attributes={"name": "alice"}),
-        caller_context={
-            "chat": {
-                "messages": [{"role": "user", "content": "prior context"}],
-                "system_role": None,
-                "previous_messages": [],
-                "previous_response_id": None,
-            }
-        },
     )
     result = await tool.execute(
         context=context,
@@ -715,7 +707,6 @@ async def test_new_thread_tool_uses_adapter_created_context_for_thread_naming() 
     await bot._wait_for_thread_list_background_tasks()
     assert adapter.last_context_type is _SessionRequiredContext
     assert [m.get("content") for m in adapter.last_messages] == [
-        "prior context",
         "Name this from adapter context",
     ]
 

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import AsyncIterable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
 
-from meshagent.api import RemoteParticipant, RoomClient, RoomException
+from meshagent.api import Participant, RemoteParticipant, RoomClient, RoomException
 from meshagent.api.http import new_client_session
+from meshagent.api.messaging import ErrorContent, JsonContent, ensure_content
+from meshagent.tools import FunctionTool, ToolContext, Toolkit
 
 from .chat_channel import (
     DEFAULT_WEBSOCKET_MAX_MSG_SIZE,
@@ -17,6 +19,7 @@ from .chat_channel import (
     WebSocketChatEncoding,
 )
 from .messages import (
+    AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_CONNECTION_STATUS,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -29,6 +32,7 @@ from .messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEER_REJECTED,
     AGENT_EVENT_TURN_STEERED,
+    AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
     AGENT_MESSAGE_MODEL_CHANGE,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_MODELS_RESPONSE,
@@ -38,6 +42,8 @@ from .messages import (
     AGENT_MESSAGE_THREAD_RENAME,
     AgentAudioGenerationDelta,
     AgentAudioTranscriptionDelta,
+    AgentClientToolCallRequested,
+    AgentClientToolCallResponse,
     AgentFileContent,
     AgentFileContentDelta,
     AgentImageGenerationCompleted,
@@ -53,6 +59,7 @@ from .messages import (
     AgentToolCallArgumentsDelta,
     AgentToolCallLogDelta,
     ChangeModel,
+    ClientToolkitDescription,
     CloseThread,
     DeleteThread,
     ModelsRequest,
@@ -172,54 +179,6 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
         return
 
 
-def _chat_thread_path_for_dir(thread_dir: str) -> str:
-    if thread_dir.startswith("dataset://") or thread_dir.startswith("tmp://"):
-        return f"{thread_dir.rstrip('/')}/main"
-    return f"{thread_dir.rstrip('/')}/main.thread"
-
-
-def _default_chat_thread_path_for_agent(participant_name: str) -> str | None:
-    normalized_agent_name = _normalized_string(participant_name)
-    if normalized_agent_name is None:
-        return None
-    return f".threads/{normalized_agent_name}/main.thread"
-
-
-def _participant_chat_threading_mode(
-    *,
-    participant: RemoteParticipant,
-) -> str | None:
-    return _normalized_string(participant.get_attribute("meshagent.chatbot.threading"))
-
-
-def _participant_supports_agent_messages(*, participant: RemoteParticipant) -> bool:
-    return participant.get_attribute("supports_agent_messages") is True
-
-
-def _participant_chat_thread_path(
-    *,
-    participant: RemoteParticipant,
-    participant_name: str,
-) -> str:
-    thread_path = _normalized_string(
-        participant.get_attribute("meshagent.chatbot.thread-path")
-    )
-    if thread_path is not None:
-        return thread_path
-
-    thread_dir = _normalized_string(
-        participant.get_attribute("meshagent.chatbot.thread-dir")
-    )
-    if thread_dir is not None:
-        return _chat_thread_path_for_dir(thread_dir)
-
-    default_thread_path = _default_chat_thread_path_for_agent(participant_name)
-    if default_thread_path is not None:
-        return default_thread_path
-
-    return ".threads/main.thread"
-
-
 class BaseChatClient(ABC):
     def __init__(self, *, timeout: float = 30) -> None:
         self._timeout = timeout
@@ -259,7 +218,7 @@ class BaseChatClient(ABC):
     @abstractmethod
     async def _send_agent_message(self, payload: AgentMessage) -> None: ...
 
-    def create_thread_session(
+    def _create_thread_session(
         self,
         *,
         thread_path: str | None = None,
@@ -273,10 +232,6 @@ class BaseChatClient(ABC):
             close_client_on_close=close_client_on_close,
             timeout=self._timeout,
         )
-        if session.has_thread_path:
-            self._register_thread_session(session)
-        else:
-            self._pending_thread_sessions.add(session)
         return session
 
     async def open_thread(
@@ -286,7 +241,7 @@ class BaseChatClient(ABC):
         local_participant_name: str | None = None,
         close_client_on_close: bool = False,
     ) -> ChatThreadSession:
-        session = self.create_thread_session(
+        session = self._create_thread_session(
             thread_path=thread_path,
             local_participant_name=local_participant_name,
             close_client_on_close=close_client_on_close,
@@ -301,11 +256,18 @@ class BaseChatClient(ABC):
         local_participant_name: str | None = None,
         close_client_on_close: bool = False,
         on_pending_session: Callable[[ChatThreadSession], None] | None = None,
+        client_toolkits: list[Toolkit] | None = None,
     ) -> ChatThreadSession:
-        session = self.create_thread_session(
+        session = self._create_thread_session(
             local_participant_name=local_participant_name,
             close_client_on_close=close_client_on_close,
         )
+        if client_toolkits is not None:
+            payload = payload.model_copy(
+                update={
+                    "client_toolkits": session.register_client_toolkits(client_toolkits)
+                }
+            )
         await session.send(payload)
         if on_pending_session is not None:
             on_pending_session(session)
@@ -414,7 +376,12 @@ class ChatThreadSession:
         self._last_completed_turn_id: str | None = None
         self._current_model: AgentModelChanged | None = None
         self._models_response: ModelsResponse | None = None
+        self._client_toolkits_by_tool_name: dict[str, Toolkit] = {}
         self._closed = False
+        if self.has_thread_path:
+            self._client._register_thread_session(self)
+        else:
+            self._client._pending_thread_sessions.add(self)
 
     async def __aenter__(self) -> ChatThreadSession:
         return self
@@ -477,6 +444,36 @@ class ChatThreadSession:
         self, callback: Callable[[AcceptedAgentInput], None] | None
     ) -> None:
         self._accepted_input_callback = callback
+
+    def register_client_toolkits(
+        self, client_toolkits: list[Toolkit]
+    ) -> list[ClientToolkitDescription]:
+        descriptions: list[ClientToolkitDescription] = []
+        for toolkit in client_toolkits:
+            for tool in toolkit.get_tools():
+                if not isinstance(tool, FunctionTool):
+                    raise RoomException(
+                        "client toolkits only support FunctionTool tools"
+                    )
+                input_schema = tool.input_schema
+                if input_schema is None:
+                    raise RoomException(
+                        f"client tool '{tool.name}' is missing required input schema"
+                    )
+                if tool.name in self._client_toolkits_by_tool_name:
+                    raise RoomException(
+                        f"client tool '{tool.name}' has already been registered"
+                    )
+                self._client_toolkits_by_tool_name[tool.name] = toolkit
+                descriptions.append(
+                    ClientToolkitDescription(
+                        name=tool.name,
+                        title=tool.title,
+                        description=tool.description,
+                        input_schema=input_schema,
+                    )
+                )
+        return descriptions
 
     async def open(
         self,
@@ -854,6 +851,9 @@ class ChatThreadSession:
             return
         if payload.get("thread_id") != self._thread_path:
             return
+        if payload_type == AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED:
+            task = asyncio.create_task(self._respond_to_client_tool_call(payload))
+            task.add_done_callback(_consume_task_exception)
         try:
             agent_message = parse_agent_message(payload)
         except Exception:
@@ -909,6 +909,46 @@ class ChatThreadSession:
             self._events.put_nowait(payload)
         if payload_type == AGENT_EVENT_TURN_ENDED:
             self._clear_local_turn(payload.get("turn_id"))
+
+    async def _respond_to_client_tool_call(self, payload: dict[str, Any]) -> None:
+        try:
+            request = AgentClientToolCallRequested.model_validate(payload)
+        except Exception:
+            return
+        try:
+            response = await self._invoke_client_tool(request)
+        except Exception as exc:
+            response = ErrorContent(text=str(exc))
+        await self.send(
+            AgentClientToolCallResponse(
+                type=AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
+                thread_id=self.thread_path,
+                turn_id=request.turn_id,
+                request_id=request.request_id,
+                response=response,
+            )
+        )
+
+    async def _invoke_client_tool(self, request: AgentClientToolCallRequested) -> Any:
+        if request.toolkit != "client":
+            raise RoomException(f"unsupported client toolkit proxy '{request.toolkit}'")
+        toolkit = self._client_toolkits_by_tool_name.get(request.tool)
+        if toolkit is None:
+            raise RoomException(f"client tool '{request.tool}' is not registered")
+        participant_name = self._local_participant_name or "client"
+        response = await toolkit.invoke(
+            context=ToolContext(
+                caller=Participant(
+                    id=participant_name,
+                    attributes={"name": participant_name},
+                )
+            ),
+            name=request.tool,
+            input=JsonContent(json=request.arguments),
+        )
+        if isinstance(response, AsyncIterable):
+            raise RoomException("client tools must return non-streaming responses")
+        return ensure_content(response)
 
     def on_event(self, message: AgentMessage) -> None:
         del message
@@ -1098,42 +1138,6 @@ class MessagingChatClient(BaseChatClient):
     @property
     def remote_participant_name(self) -> str:
         return self._participant_name
-
-    def resolve_thread_path(self, thread_path: str | None) -> str | None:
-        normalized_thread_path = _normalized_string(thread_path)
-        if normalized_thread_path is not None:
-            return normalized_thread_path
-        if self._participant is None:
-            raise RoomException("chat client not started")
-        if _participant_chat_threading_mode(
-            participant=self._participant
-        ) == "default-new" and _participant_supports_agent_messages(
-            participant=self._participant
-        ):
-            return None
-        return _participant_chat_thread_path(
-            participant=self._participant,
-            participant_name=self._participant_name,
-        )
-
-    async def open_resolved_thread(
-        self,
-        thread_path: str | None,
-        *,
-        local_participant_name: str | None = None,
-        close_client_on_close: bool = False,
-    ) -> ChatThreadSession:
-        resolved_thread_path = self.resolve_thread_path(thread_path)
-        if resolved_thread_path is None:
-            return self.create_thread_session(
-                local_participant_name=local_participant_name,
-                close_client_on_close=close_client_on_close,
-            )
-        return await self.open_thread(
-            resolved_thread_path,
-            local_participant_name=local_participant_name,
-            close_client_on_close=close_client_on_close,
-        )
 
     async def _start_transport(self) -> None:
         self._room.on("room.status", self._on_room_status)
@@ -1509,7 +1513,7 @@ class LocalChatClient(BaseChatClient):
         self._events = events
         self._on_close = on_close
         self._receive_task: asyncio.Task[None] | None = None
-        self._thread_session = self.create_thread_session(thread_path=thread_path)
+        self._thread_session = self._create_thread_session(thread_path=thread_path)
 
     @property
     def thread_session(self) -> ChatThreadSession:

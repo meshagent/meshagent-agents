@@ -191,11 +191,16 @@ class BaseChatChannel(ThreadedChannel):
     def _uses_explicit_thread_dir_for_thread_list(self) -> bool:
         return True
 
-    def get_agent_toolkits(self) -> list[Toolkit]:
+    def get_turn_toolkits(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> list[Toolkit]:
         return [
             Toolkit(
                 name="chat",
-                tools=self._build_chat_tools(),
+                tools=self._build_chat_tools(thread_id=thread_id, turn_id=turn_id),
             )
         ]
 
@@ -965,30 +970,6 @@ class BaseChatChannel(ThreadedChannel):
     def _active_turn_id(self, *, thread_id: str) -> str | None:
         return self._active_turn_ids_by_thread.get(thread_id)
 
-    def _thread_and_turn_id_from_tool_context(
-        self, *, context: ToolContext
-    ) -> tuple[str, str]:
-        caller_context = context.caller_context
-        if not isinstance(caller_context, dict):
-            raise RoomException(
-                "chat tool requires thread_id and turn_id in caller_context"
-            )
-
-        raw_thread_id = caller_context.get("thread_id")
-        if not isinstance(raw_thread_id, str) or raw_thread_id.strip() == "":
-            raise RoomException("chat tool requires a non-empty thread_id")
-        thread_id = raw_thread_id.strip()
-
-        raw_turn_id = caller_context.get("turn_id")
-        if isinstance(raw_turn_id, str) and raw_turn_id.strip() != "":
-            return thread_id, raw_turn_id.strip()
-
-        turn_id = self._active_turn_id(thread_id=thread_id)
-        if turn_id is None:
-            raise RoomException("attach_file requires an active turn")
-
-        return thread_id, turn_id
-
     @classmethod
     def _normalize_agent_message_payload(
         cls,
@@ -1390,7 +1371,12 @@ class BaseChatChannel(ThreadedChannel):
 
         return NewThreadTool()
 
-    def _make_attach_file_tool(self) -> FunctionTool:
+    def _make_attach_file_tool(
+        self,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> FunctionTool:
         outer = self
 
         @tool(
@@ -1398,9 +1384,17 @@ class BaseChatChannel(ThreadedChannel):
             description="attach a room file path or URL to the current thread so the user can see it",
         )
         async def attach_file(context: ToolContext, path: str) -> None:
-            thread_id, turn_id = outer._thread_and_turn_id_from_tool_context(
-                context=context
-            )
+            if thread_id is None or thread_id.strip() == "":
+                raise RoomException("chat tool requires a non-empty thread_id")
+            resolved_thread_id = thread_id.strip()
+            if turn_id is not None and turn_id.strip() != "":
+                resolved_turn_id = turn_id.strip()
+            else:
+                active_turn_id = outer._active_turn_id(thread_id=resolved_thread_id)
+                if active_turn_id is None:
+                    raise RoomException("attach_file requires an active turn")
+                resolved_turn_id = active_turn_id
+
             normalized_url = outer._normalize_attachment_url(path=path)
             if normalized_url is None:
                 raise RoomException("attach_file requires a non-empty path")
@@ -1425,21 +1419,21 @@ class BaseChatChannel(ThreadedChannel):
             for payload in (
                 AgentFileContentStarted(
                     type=AGENT_EVENT_FILE_CONTENT_STARTED,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=resolved_thread_id,
+                    turn_id=resolved_turn_id,
                     item_id=item_id,
                 ),
                 AgentFileContentDelta(
                     type=AGENT_EVENT_FILE_CONTENT_DELTA,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=resolved_thread_id,
+                    turn_id=resolved_turn_id,
                     item_id=item_id,
                     url=normalized_url,
                 ),
                 AgentFileContentEnded(
                     type=AGENT_EVENT_FILE_CONTENT_ENDED,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=resolved_thread_id,
+                    turn_id=resolved_turn_id,
                     item_id=item_id,
                 ),
             ):
@@ -1449,10 +1443,15 @@ class BaseChatChannel(ThreadedChannel):
 
         return attach_file
 
-    def _build_chat_tools(self) -> list[FunctionTool]:
+    def _build_chat_tools(
+        self,
+        *,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> list[FunctionTool]:
         return [
             self._make_new_thread_tool(),
-            self._make_attach_file_tool(),
+            self._make_attach_file_tool(thread_id=thread_id, turn_id=turn_id),
             *self._build_thread_list_tools(),
         ]
 
@@ -1462,7 +1461,10 @@ class BaseChatChannel(ThreadedChannel):
             name="chat",
             description=f"tools for interacting with {local_name}",
             public=False,
-            tools=self._build_chat_tools(),
+            tools=[
+                self._make_new_thread_tool(),
+                *self._build_thread_list_tools(),
+            ],
             validation_mode="content_types",
         )
 

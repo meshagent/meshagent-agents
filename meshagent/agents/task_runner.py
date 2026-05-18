@@ -3,6 +3,7 @@ from meshagent.tools import (
     Toolkit,
     LocalRoomTool,
     ToolContext,
+    RoomToolContext,
 )
 from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 from meshagent.api import Participant
@@ -169,7 +170,8 @@ class TaskRunner(SingleRoomAgent):
         try:
             runner = RunTaskTool(agent=self, room=room)
             response = await runner.execute(
-                context=ToolContext(
+                context=RoomToolContext(
+                    room=room,
                     caller=caller or room.local_participant,
                 ),
                 attachment=attachment,

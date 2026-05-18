@@ -1901,7 +1901,7 @@ class MeshagentPackage(PythonPackage):
                     return "\n".join(rules) if len(rules) > 0 else None
 
                 async def _turn_toolkits_builder(participant, model, turns):
-                    del participant, turns
+                    del participant
                     toolkits: list[Toolkit] = []
                     storage_toolkit = (
                         self_package._storage_toolkit(
@@ -2099,7 +2099,13 @@ class MeshagentPackage(PythonPackage):
                         toolkits.append(computer_toolkit)
                     for channel in self.channels:
                         if channel.state == "started":
-                            toolkits.extend(channel.get_agent_toolkits())
+                            turn_id = turns[-1].turn_id if len(turns) > 0 else None
+                            toolkits.extend(
+                                channel.get_turn_toolkits(
+                                    thread_id=thread_id,
+                                    turn_id=turn_id,
+                                )
+                            )
                     toolkits.append(thread_storage.make_toolkit())
                     return toolkits
 

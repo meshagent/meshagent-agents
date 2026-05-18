@@ -91,7 +91,14 @@ class ToolkitChannel(Channel):
             AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
         }
 
-    def get_agent_toolkits(self) -> list[Toolkit]:
+    def get_turn_toolkits(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> list[Toolkit]:
+        del thread_id
+        del turn_id
         return []
 
     def get_exposed_toolkits(self) -> list[Toolkit]:

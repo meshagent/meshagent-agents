@@ -149,8 +149,19 @@ class MailChannel(ThreadedChannel):
             AGENT_EVENT_THREAD_CLEARED,
         }
 
-    def get_agent_toolkits(self) -> list[Toolkit]:
-        return [Toolkit(name="mail", tools=[self._make_new_email_thread_tool()])]
+    def get_turn_toolkits(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> list[Toolkit]:
+        del turn_id
+        return [
+            Toolkit(
+                name="mail",
+                tools=[self._make_new_email_thread_tool(thread_id=thread_id)],
+            )
+        ]
 
     async def on_start(self) -> None:
         await self.publish_thread_attributes()
@@ -682,23 +693,11 @@ class MailChannel(ThreadedChannel):
             return _MAIL_TABLE_NAME, namespace
         return self._flat_mail_table_name(), None
 
-    def _thread_id_from_tool_context(self, *, context: ToolContext) -> str:
-        caller_context = context.caller_context
-        if not isinstance(caller_context, dict):
-            raise RoomException("mail tool requires a thread_id in caller_context")
-
-        thread_id = caller_context.get("thread_id")
-        if not isinstance(thread_id, str) or thread_id.strip() == "":
-            raise RoomException("mail tool requires a non-empty thread_id")
-        return thread_id
-
     async def _attachment_files_from_paths(
         self,
         *,
-        context: ToolContext,
         attachments: list[str],
     ) -> list[FileContent]:
-        del context
         files: list[FileContent] = []
         for attachment_path in attachments:
             try:
@@ -714,7 +713,11 @@ class MailChannel(ThreadedChannel):
                 ) from exc
         return files
 
-    def _make_new_email_thread_tool(self) -> FunctionTool:
+    def _make_new_email_thread_tool(
+        self,
+        *,
+        thread_id: str | None = None,
+    ) -> FunctionTool:
         outer = self
 
         class NewEmailThreadTool(FunctionTool):
@@ -748,13 +751,15 @@ class MailChannel(ThreadedChannel):
                 body: str,
                 attachments: list[str],
             ) -> dict[str, Any]:
-                thread_id = outer._thread_id_from_tool_context(context=context)
+                del context
+                if thread_id is None or thread_id.strip() == "":
+                    raise RoomException("mail tool requires a non-empty thread_id")
+                resolved_thread_id = thread_id.strip()
                 files = await outer._attachment_files_from_paths(
-                    context=context,
                     attachments=attachments,
                 )
                 await outer.start_thread(
-                    thread_id=thread_id,
+                    thread_id=resolved_thread_id,
                     to_address=to,
                     subject=subject,
                     body=body,

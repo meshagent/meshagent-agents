@@ -713,13 +713,13 @@ async def test_new_email_thread_tool_uses_current_thread_id(
     await channel.start(_RecordingSupervisor())  # type: ignore[arg-type]
     try:
         room.storage.uploaded["notes.txt"] = b"hello"
-        toolkit = channel.get_agent_toolkits()[0]
+        toolkit = channel.get_turn_toolkits(
+            thread_id=".threads/assistant/customer.thread",
+            turn_id="turn-1",
+        )[0]
         new_thread_tool = toolkit.tools[0]
         await new_thread_tool.execute(
-            ToolContext(
-                caller=room.local_participant,
-                caller_context={"thread_id": ".threads/assistant/customer.thread"},
-            ),
+            ToolContext(caller=room.local_participant),
             to="customer@example.com",
             subject="Follow up",
             body="Here is the update.",

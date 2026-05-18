@@ -15,6 +15,7 @@ import meshagent.agents.process as process_module
 import meshagent.agents.process_thread_adapter as process_thread_adapter_module
 import meshagent.agents.thread_adapter as thread_adapter_module
 from meshagent.agents import MeshDocumentThreadStorage
+from meshagent.agents.dataset_thread_storage import DatasetThreadStorage
 from meshagent.agents.thread_status_publisher import (
     AgentMessageThreadStatusPublisher,
     ParticipantAttributeThreadStatusPublisher,
@@ -37,6 +38,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TOOL_CALL_PENDING,
     AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
+    AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED,
     AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
@@ -74,6 +76,7 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_REALTIME_AUDIO_COMMIT,
     AGENT_MESSAGE_TOOL_CALL_APPROVE,
     AGENT_MESSAGE_TOOL_CALL_REJECT,
+    AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
     AGENT_MESSAGE_TURN_INTERRUPT,
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
@@ -99,6 +102,9 @@ from meshagent.agents.messages import (
     AgentTextContentEnded,
     AgentTextContentStarted,
     AgentToolCallArgumentsDelta,
+    AgentClientToolCallCancelled,
+    AgentClientToolCallRequested,
+    AgentClientToolCallResponse,
     AgentToolCallLogDelta,
     AgentToolCallLogLine,
     AgentToolCallPending,
@@ -124,6 +130,7 @@ from meshagent.agents.messages import (
     ThreadUpdated,
     TurnStart,
     StartThread,
+    ClientToolkitDescription,
     TurnStartRejected,
     TurnEnded,
     TurnInterrupted,
@@ -133,6 +140,8 @@ from meshagent.agents.messages import (
     TurnSteerAccepted,
     TurnSteer,
     TurnSteerRejected,
+    TurnMCPConfig,
+    TurnToolkitConfig,
 )
 from meshagent.agents.process import (
     AgentProcess,
@@ -146,7 +155,14 @@ from meshagent.agents.process import (
 from meshagent.agents.thread_adapter import ThreadAdapter
 from meshagent.agents.thread_storage import ThreadListEntry, ThreadListPage
 from meshagent.api import MeshDocument, Participant, RemoteParticipant
-from meshagent.api.messaging import BinaryContent, FileContent, JsonContent, TextContent
+from meshagent.api.messaging import (
+    BinaryContent,
+    Content,
+    ErrorContent,
+    FileContent,
+    JsonContent,
+    TextContent,
+)
 from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
 
 
@@ -1045,6 +1061,47 @@ class _RecordingLLMAdapter(LLMAdapter[dict[str, Any]]):
         )
         if event_handler is not None:
             event_handler({"type": "adapter.event", "call_index": len(self.calls) - 1})
+        self.call_event.set()
+        return {"ok": True}
+
+
+class _ClientToolkitInvokingLLMAdapter(_RecordingLLMAdapter):
+    def __init__(self) -> None:
+        super().__init__(session=_LifecycleSession())
+        self.tool_request_started = asyncio.Event()
+        self.result: Content | None = None
+
+    async def create_response(
+        self,
+        *,
+        context: AgentSessionContext,
+        caller,
+        toolkits: list[Toolkit],
+        output_schema: dict | None = None,
+        event_handler=None,
+        steering_callback=None,
+        model: str | None = None,
+        on_behalf_of=None,
+        options: dict | None = None,
+        tool_choice: ToolChoice | None = None,
+    ) -> Any:
+        del context
+        del output_schema
+        del event_handler
+        del steering_callback
+        del model
+        del on_behalf_of
+        del options
+        del tool_choice
+        client_toolkit = next(
+            toolkit for toolkit in toolkits if toolkit.name == "client"
+        )
+        self.tool_request_started.set()
+        self.result = await client_toolkit.invoke(
+            context=ToolContext(caller=caller),
+            name="pick_color",
+            input=JsonContent(json={"color": "blue"}),
+        )
         self.call_event.set()
         return {"ok": True}
 
@@ -4605,6 +4662,218 @@ def test_agent_tool_call_ended_serializes_result_and_error() -> None:
         "message": "failed",
         "code": "tool_failed",
     }
+
+
+def _client_toolkit_description() -> ClientToolkitDescription:
+    return ClientToolkitDescription(
+        name="pick_color",
+        description="Pick a color.",
+        input_schema={
+            "type": "object",
+            "properties": {"color": {"type": "string"}},
+            "required": ["color"],
+            "additionalProperties": False,
+        },
+    )
+
+
+async def _start_client_toolkit_process(
+    *,
+    adapter: _ClientToolkitInvokingLLMAdapter,
+    sender: Participant | None,
+    connect_sender: bool = True,
+    client_tool_call_timeout_seconds: float | None = None,
+) -> tuple[_RecordingSupervisor, _ParticipantRoutingChannel, LLMAgentProcess]:
+    supervisor = _RecordingSupervisor()
+    channel = _ParticipantRoutingChannel()
+    supervisor.channels.append(channel)
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+    supervisor.add_process(process)
+    await process.start(supervisor)
+    if client_tool_call_timeout_seconds is not None:
+        process._client_tool_call_timeout_seconds = client_tool_call_timeout_seconds
+    if sender is not None and connect_sender:
+        supervisor._track_participant_connected(
+            participant_id=sender.id,
+            sender=sender,
+        )
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "use client tool"}],
+                client_toolkits=[_client_toolkit_description()],
+            ),
+            sender=sender,
+        )
+    )
+    return supervisor, channel, process
+
+
+@pytest.mark.asyncio
+async def test_client_toolkit_request_targets_turn_start_participant() -> None:
+    sender = _ThreadParticipant(name="User", participant_id="client-1")
+    other = _ThreadParticipant(name="Other", participant_id="client-2")
+    adapter = _ClientToolkitInvokingLLMAdapter()
+    supervisor, channel, process = await _start_client_toolkit_process(
+        adapter=adapter,
+        sender=sender,
+    )
+    supervisor._track_participant_connected(participant_id=other.id, sender=other)
+
+    try:
+        await asyncio.wait_for(adapter.tool_request_started.wait(), timeout=1)
+        await _wait_for(
+            lambda: (
+                len(channel.direct_payloads_by_participant_id.get(sender.id, [])) == 1
+            )
+        )
+
+        assert channel.direct_payloads_by_participant_id.get(other.id, []) == []
+        request = channel.direct_payloads_by_participant_id[sender.id][0]
+        assert isinstance(request, AgentClientToolCallRequested)
+        assert request.type == AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED
+        assert request.toolkit == "client"
+        assert request.tool == "pick_color"
+        assert request.arguments == {"color": "blue"}
+
+        process.send(
+            Message(
+                data=AgentClientToolCallResponse(
+                    type=AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
+                    thread_id="thread-1",
+                    turn_id=request.turn_id,
+                    request_id=request.request_id,
+                    response=JsonContent(json={"selected": "blue"}),
+                ),
+                sender=sender,
+            )
+        )
+
+        await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+        assert isinstance(adapter.result, JsonContent)
+        assert adapter.result.json == {"selected": "blue"}
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_client_toolkit_fails_fast_when_participant_is_offline() -> None:
+    sender = _ThreadParticipant(name="User", participant_id="client-1")
+    adapter = _ClientToolkitInvokingLLMAdapter()
+    supervisor, channel, process = await _start_client_toolkit_process(
+        adapter=adapter,
+        sender=sender,
+        connect_sender=False,
+    )
+
+    try:
+        await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+        assert channel.direct_payloads_by_participant_id == {}
+        assert isinstance(adapter.result, ErrorContent)
+        assert adapter.result.text == "client toolkit participant is not connected"
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_client_toolkit_disconnect_cancels_pending_call() -> None:
+    sender = _ThreadParticipant(name="User", participant_id="client-1")
+    adapter = _ClientToolkitInvokingLLMAdapter()
+    supervisor, channel, process = await _start_client_toolkit_process(
+        adapter=adapter,
+        sender=sender,
+    )
+
+    try:
+        await asyncio.wait_for(adapter.tool_request_started.wait(), timeout=1)
+        await _wait_for(
+            lambda: (
+                len(channel.direct_payloads_by_participant_id.get(sender.id, [])) == 1
+            )
+        )
+        await supervisor._track_participant_disconnected(participant_id=sender.id)
+
+        await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+        assert isinstance(adapter.result, ErrorContent)
+        assert "participant_disconnected" in adapter.result.text
+        payloads = channel.direct_payloads_by_participant_id[sender.id]
+        assert len(payloads) == 1
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_client_toolkit_timeout_cancels_pending_call() -> None:
+    sender = _ThreadParticipant(name="User", participant_id="client-1")
+    adapter = _ClientToolkitInvokingLLMAdapter()
+    supervisor, channel, process = await _start_client_toolkit_process(
+        adapter=adapter,
+        sender=sender,
+        client_tool_call_timeout_seconds=0.01,
+    )
+
+    try:
+        await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+        assert isinstance(adapter.result, ErrorContent)
+        assert adapter.result.text == "client toolkit call timed out"
+        payloads = channel.direct_payloads_by_participant_id[sender.id]
+        assert isinstance(payloads[1], AgentClientToolCallCancelled)
+        assert payloads[1].reason == "timeout"
+    finally:
+        await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_client_toolkit_turn_rejects_steering_from_other_participants() -> None:
+    sender = _ThreadParticipant(name="User", participant_id="client-1")
+    other = _ThreadParticipant(name="Other", participant_id="client-2")
+    adapter = _ClientToolkitInvokingLLMAdapter()
+    supervisor, _channel, process = await _start_client_toolkit_process(
+        adapter=adapter,
+        sender=sender,
+    )
+
+    try:
+        await asyncio.wait_for(adapter.tool_request_started.wait(), timeout=1)
+        turn_started = next(
+            message.data
+            for message in supervisor.sent
+            if message.data.type == AGENT_EVENT_TURN_STARTED
+        )
+        assert isinstance(turn_started, TurnStarted)
+        process.send(
+            Message(
+                data=TurnSteer(
+                    type=AGENT_MESSAGE_TURN_STEER,
+                    thread_id="thread-1",
+                    turn_id=turn_started.turn_id,
+                    content=[{"type": "text", "text": "steer"}],
+                ),
+                sender=other,
+            )
+        )
+
+        await _wait_for(
+            lambda: any(
+                message.data.type == AGENT_EVENT_TURN_STEER_REJECTED
+                for message in supervisor.sent
+            )
+        )
+        rejection = next(
+            message.data
+            for message in supervisor.sent
+            if message.data.type == AGENT_EVENT_TURN_STEER_REJECTED
+        )
+        assert isinstance(rejection, TurnSteerRejected)
+        assert rejection.error.code == "turn_owned_by_participant"
+    finally:
+        await process.stop(supervisor)
 
 
 @pytest.mark.asyncio
@@ -11445,3 +11714,125 @@ async def test_llm_agent_process_thread_adapter_restore_prefers_message_role(
         ]
     finally:
         await process.stop(supervisor)
+
+
+def test_llm_agent_process_resolves_typed_turn_mcp_config() -> None:
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="/threads/test.thread",
+        llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
+    )
+
+    options = process._resolve_turn_toolkit_client_options(
+        turns=[
+            TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="/threads/test.thread",
+                mcp=TurnMCPConfig(
+                    servers=[
+                        {
+                            "server_label": "docs",
+                            "server_url": "https://mcp.example.test/mcp",
+                            "authorization": "Bearer secret-token",
+                        }
+                    ]
+                ),
+                content=[{"type": "text", "text": "use docs"}],
+            )
+        ],
+    )
+
+    assert options == {
+        "mcp": {
+            "servers": [
+                {
+                    "server_label": "docs",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": "Bearer secret-token",
+                }
+            ]
+        }
+    }
+
+
+def test_dataset_thread_storage_strips_mcp_authorization_from_saved_rows() -> None:
+    message = TurnStart(
+        type=AGENT_MESSAGE_TURN_START,
+        thread_id="/threads/test.thread",
+        mcp=TurnMCPConfig(
+            servers=[
+                {
+                    "server_label": "docs",
+                    "server_url": "https://mcp.example.test/mcp",
+                    "authorization": "Bearer secret-token",
+                    "headers": {"x-safe": "kept"},
+                }
+            ]
+        ),
+        content=[{"type": "text", "text": "use docs"}],
+    )
+
+    data, attachment = DatasetThreadStorage._message_row_data_and_attachment(
+        message=message
+    )
+
+    assert attachment is None
+    assert data["mcp"] == {
+        "servers": [
+            {
+                "server_label": "docs",
+                "server_url": "https://mcp.example.test/mcp",
+                "headers": {"x-safe": "kept"},
+            }
+        ]
+    }
+    assert message.mcp is not None
+    assert message.mcp.servers[0]["authorization"] == "Bearer secret-token"
+
+
+def test_dataset_thread_storage_strips_legacy_mcp_authorization_from_saved_rows() -> (
+    None
+):
+    message = TurnStart(
+        type=AGENT_MESSAGE_TURN_START,
+        thread_id="/threads/test.thread",
+        toolkits={
+            "mcp": TurnToolkitConfig(
+                client_options={
+                    "servers": [
+                        {
+                            "server_label": "docs",
+                            "server_url": "https://mcp.example.test/mcp",
+                            "authorization": "Bearer secret-token",
+                        }
+                    ]
+                }
+            )
+        },
+        content=[{"type": "text", "text": "use docs"}],
+    )
+
+    data, attachment = DatasetThreadStorage._message_row_data_and_attachment(
+        message=message
+    )
+
+    assert attachment is None
+    assert data["toolkits"] == {
+        "mcp": {
+            "client_options": {
+                "servers": [
+                    {
+                        "server_label": "docs",
+                        "server_url": "https://mcp.example.test/mcp",
+                    }
+                ]
+            }
+        }
+    }
+    assert message.toolkits is not None
+    assert message.toolkits["mcp"].client_options is not None
+    assert (
+        message.toolkits["mcp"].client_options["servers"][0]["authorization"]
+        == "Bearer secret-token"
+    )

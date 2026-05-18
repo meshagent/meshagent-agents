@@ -15,6 +15,7 @@ from meshagent.api.messaging import JsonContent
 from meshagent.tools import (
     Toolkit,
     ToolContext,
+    RoomToolContext,
     FunctionTool,
 )
 from meshagent.agents.adapter import LLMAdapter
@@ -205,9 +206,6 @@ class ChatThreadContext:
     @property
     def context_id(self) -> str:
         return self.session.id
-
-    def to_caller_context(self) -> dict:
-        return {"chat": self.session.to_json()}
 
 
 @dataclass
@@ -757,11 +755,6 @@ class ChatBotBase(SingleRoomAgent, ABC):
         adapter = self.thread_name_adapter()
         if adapter is not None:
             session = adapter.create_session()
-            caller_context = context.caller_context
-            if isinstance(caller_context, dict):
-                raw_chat_context = caller_context.get("chat")
-                if isinstance(raw_chat_context, dict):
-                    session = type(session).from_json(raw_chat_context)
             cloned_context = session.copy()
             async with cloned_context:
                 cloned_context.replace_rules(rules=self._thread_name_rules)
@@ -944,11 +937,11 @@ class ChatBotBase(SingleRoomAgent, ABC):
         self, *, thread_context: ChatThreadContext, participant: RemoteParticipant
     ) -> list[Toolkit]:
         toolkits = await self.get_required_toolkits(
-            context=ToolContext(
+            context=RoomToolContext(
                 caller=self.room.local_participant,
                 on_behalf_of=participant,
-                caller_context=thread_context.to_caller_context(),
                 event_handler=thread_context.emit,
+                room=self.room,
             )
         )
 
