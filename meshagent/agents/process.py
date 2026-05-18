@@ -1210,11 +1210,11 @@ class AgentSupervisor:
         process = self._process_for_thread(thread_id=thread_id)
         if process is None:
             return
-        if process in self.processes:
-            self.processes.remove(process)
         if process.supervisor is self:
             with contextlib.suppress(ValueError):
                 await process.stop(self)
+        if process in self.processes:
+            self.processes.remove(process)
 
     async def _stop_thread_process_when_idle(self, *, thread_id: str) -> None:
         process = self._process_for_thread(thread_id=thread_id)
