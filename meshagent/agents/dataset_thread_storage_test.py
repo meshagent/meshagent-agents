@@ -2139,9 +2139,11 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
             "timestamp": datetime(2026, 3, 11, tzinfo=timezone.utc),
             "data": json.dumps(
                 {
-                    "kind": "message",
-                    "role": "assistant",
-                    "status": "completed",
+                    "type": AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    "thread_id": "dataset://threads/demo",
+                    "message_id": "assistant-message-1",
+                    "turn_id": "turn-1",
+                    "item_id": "assistant-message-1",
                     "text": "answer",
                 }
             ),
@@ -2153,11 +2155,11 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
             "timestamp": datetime(2026, 3, 10, tzinfo=timezone.utc),
             "data": json.dumps(
                 {
-                    "kind": "message",
-                    "role": "user",
-                    "status": "completed",
+                    "type": AGENT_MESSAGE_TURN_START,
+                    "thread_id": "dataset://threads/demo",
+                    "message_id": "first",
                     "sender_name": "caller",
-                    "text": "question",
+                    "content": [{"type": "text", "text": "question"}],
                 }
             ),
         },
@@ -2166,14 +2168,11 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
     await storage.start()
     await storage.wait_until_ready()
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context)
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
     await storage.stop()
 
     assert context.messages == [
-        {
-            "role": "user",
-            "content": "caller said at 2026-03-10T00:00:00Z: question",
-        },
+        {"role": "user", "content": "question"},
         {"role": "assistant", "content": "answer"},
     ]
 

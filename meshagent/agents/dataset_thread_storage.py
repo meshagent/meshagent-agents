@@ -31,12 +31,8 @@ from .context import AgentSessionContext, SessionUsage
 from .images_dataset import ImagesDataset
 from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
-    AGENT_EVENT_FILE_CONTENT_ENDED,
     AGENT_EVENT_REASONING_CONTENT_DELTA,
-    AGENT_EVENT_REASONING_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
-    AGENT_EVENT_TEXT_CONTENT_ENDED,
-    AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
@@ -94,7 +90,6 @@ from .messages import (
     scrub_agent_message_for_storage,
 )
 from .stream_content_accumulator import accumulate_text_delta
-from .thread_adapter import default_format_message
 from .thread_storage import (
     ThreadListEntry,
     ThreadListEvent,
@@ -2460,240 +2455,11 @@ class DatasetThreadStorage(ThreadStorage):
             context.previous_response_id = None
             return
 
-        kind = data.get("kind")
-        if kind == "compaction":
-            message = self._stored_agent_message(value=data.get("message"))
-            if (
-                isinstance(message, AgentContextCompacted)
-                and message.messages is not None
-            ):
-                context.messages.clear()
-                context.messages.extend(deepcopy(message.messages))
-                context.previous_messages.clear()
-                context.previous_response_id = None
-            return
-
-        role = data.get("role")
-        text = data.get("text")
-        if kind == "message" and isinstance(text, str) and text != "":
-            if role == "assistant":
-                context.append_assistant_message(text)
-            else:
-                sender_name = data.get("sender_name")
-                context.append_user_message(
-                    default_format_message(
-                        user_name=sender_name
-                        if isinstance(sender_name, str)
-                        else "user",
-                        message=text,
-                        iso_timestamp=row.timestamp,
-                    )
-                )
-
-        attachments = data.get("attachments")
-        if isinstance(attachments, list):
-            for attachment in attachments:
-                if not isinstance(attachment, str) or attachment.strip() == "":
-                    continue
-                if role == "assistant":
-                    context.append_assistant_message(
-                        f"assistant attached a file available at {attachment}"
-                    )
-                else:
-                    sender_name = data.get("sender_name")
-                    context.append_user_message(
-                        f"{sender_name if isinstance(sender_name, str) else 'a user'} "
-                        f"attached a file available at {attachment}"
-                    )
-
-        urls = data.get("urls")
-        if kind == "file" and isinstance(urls, list):
-            for url in urls:
-                if not isinstance(url, str) or url.strip() == "":
-                    continue
-                context.append_assistant_message(
-                    f"assistant attached a file available at {url}"
-                )
-
     def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:
         data = row.data
         raw_message = self._stored_agent_message(value=data, attachment=row.attachment)
         if raw_message is not None:
             return [raw_message]
-
-        kind = data.get("kind")
-        message = self._stored_agent_message(value=data.get("message"))
-        if message is not None:
-            if kind == "compaction" and isinstance(message, AgentContextCompacted):
-                return [message]
-            if kind == "usage" and isinstance(message, AgentUsageUpdated):
-                return [message]
-            if kind == "event" and isinstance(message, AgentThreadEvent):
-                return [message]
-            if kind == "image_generation" and isinstance(
-                message,
-                (
-                    AgentImageGenerationStarted,
-                    AgentImageGenerationPartial,
-                    AgentImageGenerationCompleted,
-                    AgentImageGenerationFailed,
-                ),
-            ):
-                return [message]
-
-        if kind == "message":
-            role = data.get("role")
-            if role == "user":
-                request = self._stored_agent_message(value=data.get("request"))
-                if isinstance(request, (TurnStart, TurnSteer)):
-                    sender_name = data.get("sender_name")
-                    if isinstance(sender_name, str) and sender_name.strip() != "":
-                        return [request.model_copy(update={"sender_name": sender_name})]
-                    return [request]
-                return []
-
-            text = data.get("text")
-            if not isinstance(text, str) or text == "":
-                return []
-            turn_id = row.turn_id or row.item_id
-            sender_name = data.get("sender_name")
-            phase = data.get("phase")
-            return [
-                AgentTextContentDelta(
-                    type=AGENT_EVENT_TEXT_CONTENT_DELTA,
-                    thread_id=self.path,
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                    text=text,
-                    sender_name=sender_name if isinstance(sender_name, str) else None,
-                    phase=phase if phase in {"commentary", "final_answer"} else None,
-                ),
-                AgentTextContentEnded(
-                    type=AGENT_EVENT_TEXT_CONTENT_ENDED,
-                    thread_id=self.path,
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                    phase=phase if phase in {"commentary", "final_answer"} else None,
-                ),
-            ]
-
-        if kind == "reasoning":
-            text = data.get("text")
-            if not isinstance(text, str) or text == "":
-                return []
-            turn_id = row.turn_id or row.item_id
-            sender_name = data.get("sender_name")
-            return [
-                AgentReasoningContentDelta(
-                    type=AGENT_EVENT_REASONING_CONTENT_DELTA,
-                    thread_id=self.path,
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                    text=text,
-                    sender_name=sender_name if isinstance(sender_name, str) else None,
-                ),
-                AgentReasoningContentEnded(
-                    type=AGENT_EVENT_REASONING_CONTENT_ENDED,
-                    thread_id=self.path,
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                ),
-            ]
-
-        if kind == "file":
-            urls = data.get("urls")
-            if not isinstance(urls, list):
-                return []
-            turn_id = row.turn_id or row.item_id
-            messages: list[AgentThreadMessage] = []
-            sender_name = data.get("sender_name")
-            for url in urls:
-                if not isinstance(url, str) or url.strip() == "":
-                    continue
-                messages.append(
-                    AgentFileContentDelta(
-                        type=AGENT_EVENT_FILE_CONTENT_DELTA,
-                        thread_id=self.path,
-                        turn_id=turn_id,
-                        item_id=row.item_id,
-                        url=url,
-                        sender_name=sender_name
-                        if isinstance(sender_name, str)
-                        else None,
-                    )
-                )
-            if len(messages) == 0:
-                return []
-            messages.append(
-                AgentFileContentEnded(
-                    type=AGENT_EVENT_FILE_CONTENT_ENDED,
-                    thread_id=self.path,
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                )
-            )
-            return messages
-
-        if kind == "tool_call":
-            turn_id = row.turn_id or row.item_id
-            namespace = data.get("namespace")
-            call_id = data.get("call_id")
-            toolkit = data.get("toolkit")
-            tool = data.get("tool")
-            arguments = data.get("arguments")
-            if not isinstance(namespace, str) or namespace.strip() == "":
-                namespace = "meshagent"
-            if not isinstance(call_id, str):
-                call_id = None
-            if not isinstance(toolkit, str) or toolkit.strip() == "":
-                toolkit = "tool"
-            if not isinstance(tool, str) or tool.strip() == "":
-                tool = "tool"
-            if not isinstance(arguments, dict):
-                arguments = None
-
-            messages = [
-                AgentToolCallStarted(
-                    type=AGENT_EVENT_TOOL_CALL_STARTED,
-                    thread_id=self.path,
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                    namespace=namespace,
-                    call_id=call_id,
-                    toolkit=toolkit,
-                    tool=tool,
-                    arguments=arguments,
-                )
-            ]
-            logs = data.get("logs")
-            if isinstance(logs, list):
-                log_message = self._tool_log_delta_from_stored_lines(
-                    turn_id=turn_id,
-                    item_id=row.item_id,
-                    namespace=namespace,
-                    call_id=call_id,
-                    logs=logs,
-                )
-                if log_message is not None:
-                    messages.append(log_message)
-
-            if isinstance(message, AgentToolCallEnded):
-                messages.append(message)
-            else:
-                messages.append(
-                    AgentToolCallEnded(
-                        type=AGENT_EVENT_TOOL_CALL_ENDED,
-                        thread_id=self.path,
-                        turn_id=turn_id,
-                        item_id=row.item_id,
-                        namespace=namespace,
-                        call_id=call_id,
-                        result=None,
-                        error=None,
-                    )
-                )
-            return messages
-
         return []
 
     async def _messages_from_row_async(
