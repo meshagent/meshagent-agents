@@ -22,6 +22,12 @@ __all__ = [
     "AgentTextContent",
 ]
 
+CHANNEL_SENDER_NAME_DESCRIPTION = (
+    "Optional display name for the sender. For messages received over a chat "
+    "channel, this is filled by the server from the authenticated participant "
+    "and any client-supplied value is ignored."
+)
+
 AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
 AGENT_MESSAGE_TURN_INTERRUPT = "meshagent.agent.turn.interrupt"
@@ -109,7 +115,10 @@ AGENT_MESSAGE_SECRET_RESPONSE = "meshagent.agent.secret.response"
 class AgentMessage(BaseModel):
     type: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    sender_name: str | None = None
+    sender_name: str | None = Field(
+        default=None,
+        description=CHANNEL_SENDER_NAME_DESCRIPTION,
+    )
 
 
 class AgentThreadMessage(AgentMessage):
@@ -146,7 +155,10 @@ class StartThread(AgentMessage):
     content: list[AgentInputContent] | None = None
     name: str | None = None
     realtime_protocol: Literal["websocket", "webrtc"] | None = None
-    sender_name: str | None = None
+    sender_name: str | None = Field(
+        default=None,
+        description=CHANNEL_SENDER_NAME_DESCRIPTION,
+    )
     provider: Optional[str] = None
     model: Optional[str] = None
     voice: str | None = None
@@ -165,7 +177,10 @@ class TurnStart(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_START]
     turn_id: str | None = None
     content: list[AgentInputContent] = Field(default_factory=list)
-    sender_name: str | None = None
+    sender_name: str | None = Field(
+        default=None,
+        description=CHANNEL_SENDER_NAME_DESCRIPTION,
+    )
     provider: Optional[str] = None
     model: Optional[str] = None
     voice: str | None = None
@@ -241,7 +256,10 @@ class TurnSteer(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_TURN_STEER]
     content: list[AgentInputContent]
     turn_id: str
-    sender_name: str | None = None
+    sender_name: str | None = Field(
+        default=None,
+        description=CHANNEL_SENDER_NAME_DESCRIPTION,
+    )
 
 
 class TurnInterrupt(AgentThreadMessage):

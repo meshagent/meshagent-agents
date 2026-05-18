@@ -507,6 +507,10 @@ class BaseChatChannel(ThreadedChannel):
     def _on_agent_message(
         self, *, agent_message: AgentMessage, sender: Participant
     ) -> None:
+        agent_message = self._with_channel_sender_name(
+            message=agent_message,
+            sender=sender,
+        )
         self._track_inbound_agent_message(message=agent_message, sender=sender)
         self._broadcast_inbound_turn_input(message=agent_message, sender=sender)
         if (
@@ -521,6 +525,27 @@ class BaseChatChannel(ThreadedChannel):
             )
         self.emit(sender=sender, payload=agent_message)
 
+    @staticmethod
+    def _channel_sender_name(*, sender: Participant) -> str | None:
+        sender_name = sender.get_attribute("name")
+        if not isinstance(sender_name, str) or sender_name.strip() == "":
+            return None
+        return sender_name.strip()
+
+    @classmethod
+    def _with_channel_sender_name(
+        cls,
+        *,
+        message: AgentMessage,
+        sender: Participant,
+    ) -> AgentMessage:
+        if not isinstance(message, (StartThread, TurnStart, TurnSteer)):
+            return message
+
+        return message.model_copy(
+            update={"sender_name": cls._channel_sender_name(sender=sender)}
+        )
+
     def _track_inbound_agent_message(
         self,
         *,
@@ -532,7 +557,7 @@ class BaseChatChannel(ThreadedChannel):
 
         self._track_turn_input_payload(
             message=message,
-            sender_name=sender.get_attribute("name"),
+            sender_name=message.sender_name,
         )
 
     def _track_turn_input_payload(
@@ -611,6 +636,10 @@ class BaseChatChannel(ThreadedChannel):
             return False
 
         control_message = model.model_validate(payload)
+        control_message = self._with_channel_sender_name(
+            message=control_message,
+            sender=sender,
+        )
         if isinstance(control_message, StartThread):
             if self._supervisor_handles_start_thread():
                 self.emit(
@@ -748,7 +777,7 @@ class BaseChatChannel(ThreadedChannel):
         self._register_open_participant(thread_id=path, participant_id=sender.id)
         self._track_turn_input_payload(
             message=turn_start,
-            sender_name=start_thread.sender_name or sender.get_attribute("name"),
+            sender_name=start_thread.sender_name,
         )
         self._send_agent_payload_nowait(
             participant=sender,

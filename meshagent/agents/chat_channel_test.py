@@ -336,6 +336,18 @@ class _RejectingStartSupervisor(_RecordingSupervisor):
         return AgentError(message="unknown model", code="unknown_model")
 
 
+class _ThreadIdSupervisor(_RecordingSupervisor):
+    async def create_thread_id(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del start_thread
+        del sender
+        return "/threads/custom.thread"
+
+
 class _RealtimeConnectionSupervisor(_RecordingSupervisor):
     def __init__(self) -> None:
         super().__init__()
@@ -545,6 +557,7 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
                     "payload": {
                         "type": AGENT_MESSAGE_THREAD_START,
                         "message_id": "start-thread-1",
+                        "sender_name": "spoofed-client-name",
                         "provider": "anthropic",
                         "model": "claude-sonnet-4-5",
                         "content": [
@@ -581,6 +594,7 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert turn.message_id == "start-thread-1"
         assert turn.thread_id == result_path
         assert turn.turn_id == status_payload["turn_id"]
+        assert turn.sender_name == "Jesse"
         assert turn.provider == "anthropic"
         assert turn.model == "claude-sonnet-4-5"
         assert turn.content == [
@@ -593,6 +607,46 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
         assert entries[0].get_attribute("name") == "Plan this friendly thread"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_replaces_start_thread_sender_name_before_supervisor_route() -> (
+    None
+):
+    caller = _FakeParticipant(name="Jesse", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = MessagingChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+    supervisor = _ThreadIdSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "sender_name": "spoofed-client-name",
+                        "content": [
+                            {"type": "text", "text": "Plan this friendly thread"},
+                        ],
+                    }
+                },
+            )
+        )
+
+        assert len(supervisor.sent) == 1
+        routed = supervisor.sent[0].data
+        assert isinstance(routed, StartThread)
+        assert routed.sender_name == "Jesse"
     finally:
         await channel.stop(supervisor)
 
@@ -2484,6 +2538,7 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
                         "type": AGENT_MESSAGE_TURN_START,
                         "thread_id": "/threads/test.thread",
                         "message_id": "user-message-1",
+                        "sender_name": "spoofed-client-name",
                         "content": [{"type": "text", "text": "hello"}],
                     }
                 },
@@ -2493,6 +2548,7 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
         assert len(supervisor.sent) == 2
         assert isinstance(supervisor.sent[0].data, OpenThread)
         assert isinstance(supervisor.sent[1].data, TurnStart)
+        assert supervisor.sent[1].data.sender_name == "sender"
         assert len(room.messaging.sent_messages) == 1
         input_payload = room.messaging.sent_messages[0]["message"]
         assert room.messaging.sent_messages[0]["to"] == viewer
@@ -2626,6 +2682,7 @@ async def test_chat_channel_agent_open_replays_pending_turn_steer_as_accepted() 
                         "thread_id": "/threads/test.thread",
                         "turn_id": "turn-1",
                         "message_id": "user-message-2",
+                        "sender_name": "spoofed-client-name",
                         "content": [{"type": "text", "text": "wait"}],
                     }
                 },
@@ -2711,6 +2768,7 @@ async def test_chat_channel_publishes_turn_steered_with_tracked_input_to_open_pa
         assert len(supervisor.sent) == 2
         assert isinstance(supervisor.sent[0].data, OpenThread)
         assert isinstance(supervisor.sent[1].data, TurnSteer)
+        assert supervisor.sent[1].data.sender_name == "sender"
         assert len(room.messaging.sent_messages) == 1
         input_payload = room.messaging.sent_messages[0]["message"]
         assert room.messaging.sent_messages[0]["to"] == viewer
@@ -3227,6 +3285,7 @@ async def test_websocket_chat_channel_routes_decoded_agent_message_with_particip
             agent_message=TurnStart(
                 type=AGENT_MESSAGE_TURN_START,
                 thread_id="thread-1",
+                sender_name="spoofed-client-name",
                 content=[AgentTextContent(type="text", text="hello")],
             ),
         )
@@ -3236,6 +3295,7 @@ async def test_websocket_chat_channel_routes_decoded_agent_message_with_particip
     assert len(supervisor.sent) == 1
     assert supervisor.sent[0].sender is caller
     assert isinstance(supervisor.sent[0].data, TurnStart)
+    assert supervisor.sent[0].data.sender_name == "Caller"
 
 
 @pytest.mark.asyncio
