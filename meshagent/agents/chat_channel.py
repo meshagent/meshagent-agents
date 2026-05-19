@@ -1913,6 +1913,20 @@ class WebSocketChatChannel(BaseChatChannel):
                     )
                     break
         finally:
+            close_code = websocket.close_code
+            exception = websocket.exception()
+            if exception is not None or close_code not in (
+                None,
+                aiohttp.WSCloseCode.OK,
+                aiohttp.WSCloseCode.GOING_AWAY,
+            ):
+                logger.warning(
+                    "websocket chat connection closed unexpectedly for participant %s: "
+                    "close_code=%s exception=%r",
+                    participant.id,
+                    close_code,
+                    exception,
+                )
             self._unregister_connection(connection=connection)
 
         return websocket
