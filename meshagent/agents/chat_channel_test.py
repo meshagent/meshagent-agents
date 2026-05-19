@@ -3119,6 +3119,13 @@ async def test_websocket_chat_channel_default_authorization_uses_headers() -> No
     assert result.get_attribute("name") == "Caller"
 
 
+def test_websocket_chat_channel_does_not_expose_legacy_chat_toolkit() -> None:
+    room = _FakeRoom()
+    channel = WebSocketChatChannel(room=room)
+
+    assert channel.get_exposed_toolkits() == []
+
+
 def test_websocket_chat_channel_accepts_token_subprotocols_for_response() -> None:
     room = _FakeRoom()
     channel = WebSocketChatChannel(room=room, protocols=("meshagent.msgpack",))

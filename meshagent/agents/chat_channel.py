@@ -1782,6 +1782,9 @@ class WebSocketChatChannel(BaseChatChannel):
         self._send_tasks: set[asyncio.Task[None]] = set()
         self._send_tasks_by_participant_id: dict[str, asyncio.Task[None]] = {}
 
+    def get_exposed_toolkits(self) -> list[Toolkit]:
+        return []
+
     async def on_stop(self) -> None:
         connections = [
             connection
