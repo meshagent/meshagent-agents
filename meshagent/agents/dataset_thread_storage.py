@@ -21,6 +21,7 @@ from meshagent.api import (
     DatasetOptimizeConfig,
     LANCE_ZSTD_FIELD_METADATA,
     Participant,
+    RoomException,
     RoomClient,
 )
 from meshagent.api.messaging import TextContent
@@ -935,10 +936,7 @@ class DatasetThreadStorage(ThreadStorage):
                         namespace=self._namespace,
                     )
 
-        rows = await self._client.search(
-            table=self._table_name,
-            namespace=self._namespace,
-        )
+        rows = await self._search_ready_rows()
         self._rows = sorted(
             [
                 row
@@ -952,6 +950,20 @@ class DatasetThreadStorage(ThreadStorage):
         )
         self._next_sequence = max((row.sequence for row in self._rows), default=-1) + 1
         self._ready = True
+
+    async def _search_ready_rows(self) -> pa.Table:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2.0
+        while True:
+            try:
+                return await self._client.search(
+                    table=self._table_name,
+                    namespace=self._namespace,
+                )
+            except RoomException as ex:
+                if "does not exist" not in str(ex) or loop.time() >= deadline:
+                    raise
+                await asyncio.sleep(0.05)
 
     @staticmethod
     def _stored_row_from_record(
