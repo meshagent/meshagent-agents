@@ -87,6 +87,7 @@ from .threaded_channel import ThreadedChannel
 DEFAULT_WEBSOCKET_MAX_MSG_SIZE = int(
     os.getenv("MESHAGENT_AGENT_WEBSOCKET_MAX_MSG_SIZE", str(64 * 1024 * 1024))
 )
+DEFAULT_WEBSOCKET_CHAT_PROTOCOLS = ("meshagent-msgpack",)
 _LARGE_AGENT_WEBSOCKET_MESSAGE_LOG_BYTES = int(
     os.getenv("MESHAGENT_AGENT_WEBSOCKET_LARGE_MESSAGE_LOG_BYTES", str(1024 * 1024))
 )
@@ -1745,7 +1746,7 @@ class WebSocketChatChannel(BaseChatChannel):
         room: RoomClient,
         authorize: WebSocketAuthorizeHook | None = None,
         encoding: WebSocketChatEncoding | None = None,
-        protocols: tuple[str, ...] = (),
+        protocols: tuple[str, ...] = DEFAULT_WEBSOCKET_CHAT_PROTOCOLS,
         on_participant_counts_changed: Callable[[dict[str, int]], None] | None = None,
         heartbeat: float | None = 30.0,
         receive_timeout: float | None = None,

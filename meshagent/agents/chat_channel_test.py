@@ -3128,7 +3128,7 @@ def test_websocket_chat_channel_does_not_expose_legacy_chat_toolkit() -> None:
 
 def test_websocket_chat_channel_accepts_token_subprotocols_for_response() -> None:
     room = _FakeRoom()
-    channel = WebSocketChatChannel(room=room, protocols=("meshagent.msgpack",))
+    channel = WebSocketChatChannel(room=room, protocols=("meshagent-msgpack",))
     request = make_mocked_request(
         "GET",
         "/agent",
@@ -3140,10 +3140,30 @@ def test_websocket_chat_channel_accepts_token_subprotocols_for_response() -> Non
     )
 
     assert channel._response_protocols(request) == (
-        "meshagent.msgpack",
+        "meshagent-msgpack",
         "meshagent-token.jwt-value",
         "bearer.other-token",
     )
+
+
+def test_websocket_chat_channel_advertises_msgpack_subprotocols_by_default() -> None:
+    room = _FakeRoom()
+    channel = WebSocketChatChannel(room=room)
+    request = make_mocked_request("GET", "/agent")
+
+    assert channel._response_protocols(request) == ("meshagent-msgpack",)
+
+
+def test_websocket_chat_channel_uses_canonical_msgpack_subprotocol() -> None:
+    room = _FakeRoom()
+    channel = WebSocketChatChannel(room=room, protocols=("meshagent-msgpack",))
+    request = make_mocked_request(
+        "GET",
+        "/agent",
+        headers={"Sec-WebSocket-Protocol": "meshagent-msgpack"},
+    )
+
+    assert channel._response_protocols(request) == ("meshagent-msgpack",)
 
 
 def test_websocket_chat_channel_assigns_unique_connection_participant_ids() -> None:
