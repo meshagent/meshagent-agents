@@ -5,14 +5,25 @@ import pytest
 from aiohttp import web
 
 from meshagent.agents.chat_channel import MsgpackWebSocketChatEncoding
-from meshagent.agents.chat_client import ChatThreadSession, WebSocketChatClient
+from meshagent.agents.chat_client import (
+    BaseChatClient,
+    ChatThreadSession,
+    WebSocketChatClient,
+)
 from meshagent.agents.messages import (
     AGENT_EVENT_CONNECTION_STATUS,
+    AGENT_EVENT_THREAD_CREATED,
+    AGENT_EVENT_THREAD_LISTED,
     AGENT_EVENT_THREAD_LOADED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
+    AgentThreadListEntry,
+    AgentMessage,
     AgentConnectionStatus,
+    ThreadCreated,
     ThreadLoaded,
+    ThreadsListed,
     TurnEnded,
     parse_agent_message,
 )
@@ -43,6 +54,25 @@ async def _receive_until(
                 return payload
 
 
+class _RecordingChatClient(BaseChatClient):
+    def __init__(self) -> None:
+        super().__init__(timeout=1)
+        self.sent: list[dict[str, Any]] = []
+
+    @property
+    def remote_participant_name(self) -> str:
+        return "assistant"
+
+    async def _start_transport(self) -> None:
+        return None
+
+    async def _stop_transport(self) -> None:
+        return None
+
+    async def _send_agent_message(self, payload: AgentMessage) -> None:
+        self.sent.append(payload.model_dump(mode="json"))
+
+
 @pytest.mark.asyncio
 async def test_thread_loaded_message_round_trips() -> None:
     loaded = ThreadLoaded(
@@ -58,6 +88,101 @@ async def test_thread_loaded_message_round_trips() -> None:
     assert parsed.thread_id == "/threads/test.thread"
     assert parsed.source_message_id == "open-1"
     assert parsed.since_turn == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_lists_threads_with_agent_message() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path=None)
+
+    async def respond() -> None:
+        await _wait_for(lambda: len(client.sent) == 1)
+        request = client.sent[0]
+        assert request["type"] == AGENT_MESSAGE_THREAD_LIST
+        client._handle_agent_payload(
+            ThreadsListed(
+                type=AGENT_EVENT_THREAD_LISTED,
+                source_message_id=request["message_id"],
+                threads=[
+                    AgentThreadListEntry(
+                        path="/threads/one.thread",
+                        name="One",
+                    )
+                ],
+                total=1,
+                offset=0,
+                limit=100,
+            ).model_dump(mode="json")
+        )
+
+    response_task = asyncio.create_task(respond())
+    try:
+        response = await session.list_threads(limit=100, offset=0)
+    finally:
+        await response_task
+
+    assert [thread.name for thread in response.threads] == ["One"]
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_notifies_thread_list_event_listeners() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path=None)
+    events: list[dict[str, Any]] = []
+
+    unsubscribe = session.add_event_listener(events.append)
+    client._handle_agent_payload(
+        ThreadCreated(
+            type=AGENT_EVENT_THREAD_CREATED,
+            thread=AgentThreadListEntry(
+                path="/threads/new.thread",
+                name="New",
+            ),
+        ).model_dump(mode="json")
+    )
+    unsubscribe()
+    client._handle_agent_payload(
+        ThreadCreated(
+            type=AGENT_EVENT_THREAD_CREATED,
+            thread=AgentThreadListEntry(
+                path="/threads/ignored.thread",
+                name="Ignored",
+            ),
+        ).model_dump(mode="json")
+    )
+
+    assert [event["thread"]["name"] for event in events] == ["New"]
+
+
+@pytest.mark.asyncio
+async def test_chat_client_thread_list_event_listener_survives_session_close() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path=None)
+    events: list[dict[str, Any]] = []
+
+    unsubscribe = client.add_event_listener(events.append)
+    await session.close(close_client=False)
+    client._handle_agent_payload(
+        ThreadCreated(
+            type=AGENT_EVENT_THREAD_CREATED,
+            thread=AgentThreadListEntry(
+                path="/threads/new.thread",
+                name="New",
+            ),
+        ).model_dump(mode="json")
+    )
+    unsubscribe()
+    client._handle_agent_payload(
+        ThreadCreated(
+            type=AGENT_EVENT_THREAD_CREATED,
+            thread=AgentThreadListEntry(
+                path="/threads/ignored.thread",
+                name="Ignored",
+            ),
+        ).model_dump(mode="json")
+    )
+
+    assert [event["thread"]["name"] for event in events] == ["New"]
 
 
 @pytest.mark.asyncio

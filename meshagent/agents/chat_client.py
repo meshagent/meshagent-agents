@@ -23,8 +23,12 @@ from .messages import (
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_CONNECTION_STATUS,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
+    AGENT_EVENT_THREAD_CREATED,
+    AGENT_EVENT_THREAD_DELETED,
+    AGENT_EVENT_THREAD_LISTED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
+    AGENT_EVENT_THREAD_UPDATED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_START_REJECTED,
@@ -38,6 +42,7 @@ from .messages import (
     AGENT_MESSAGE_MODELS_RESPONSE,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_DELETE,
+    AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_RENAME,
     AgentAudioGenerationDelta,
@@ -62,11 +67,13 @@ from .messages import (
     ClientToolkitDescription,
     CloseThread,
     DeleteThread,
+    ListThreads,
     ModelsRequest,
     ModelsResponse,
     OpenThread,
     RenameThread,
     StartThread,
+    ThreadsListed,
     TurnEnded,
     ThreadStarted,
     TurnStart,
@@ -185,6 +192,7 @@ class BaseChatClient(ABC):
         self._thread_sessions: dict[str, ChatThreadSession] = {}
         self._pending_thread_sessions: set[ChatThreadSession] = set()
         self._connection_status: AgentConnectionStatus | None = None
+        self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
 
     async def __aenter__(self) -> BaseChatClient:
         await self.start()
@@ -240,13 +248,15 @@ class BaseChatClient(ABC):
         *,
         local_participant_name: str | None = None,
         close_client_on_close: bool = False,
+        load: bool | None = None,
+        since_turn: str | None = None,
     ) -> ChatThreadSession:
         session = self._create_thread_session(
             thread_path=thread_path,
             local_participant_name=local_participant_name,
             close_client_on_close=close_client_on_close,
         )
-        await session.open()
+        await session.open(load=load, since_turn=since_turn)
         return session
 
     async def start_thread(
@@ -287,6 +297,19 @@ class BaseChatClient(ABC):
     async def send(self, payload: AgentMessage) -> None:
         await self._send_agent_message(payload)
 
+    def add_event_listener(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        self._event_listeners.append(callback)
+
+        def _unsubscribe() -> None:
+            try:
+                self._event_listeners.remove(callback)
+            except ValueError:
+                pass
+
+        return _unsubscribe
+
     @property
     def connection_status(self) -> AgentConnectionStatus | None:
         return self._connection_status
@@ -324,11 +347,24 @@ class BaseChatClient(ABC):
 
     def _handle_agent_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
-        if payload_type in (AGENT_EVENT_THREAD_STARTED, AGENT_MESSAGE_MODELS_RESPONSE):
+        if payload_type in (
+            AGENT_EVENT_THREAD_STARTED,
+            AGENT_MESSAGE_MODELS_RESPONSE,
+            AGENT_EVENT_THREAD_LISTED,
+        ):
             for session in self._all_sessions():
                 if session._handles_threadless_payload(payload):
                     session._handle_agent_payload(payload)
                     return
+        if payload_type in (
+            AGENT_EVENT_THREAD_CREATED,
+            AGENT_EVENT_THREAD_UPDATED,
+            AGENT_EVENT_THREAD_DELETED,
+        ):
+            self._emit_event(payload)
+            for session in self._all_sessions():
+                session._handle_agent_payload(payload)
+            return
 
         thread_id = payload.get("thread_id")
         if isinstance(thread_id, str):
@@ -342,6 +378,10 @@ class BaseChatClient(ABC):
             *self._thread_sessions.values(),
             *self._pending_thread_sessions,
         )
+
+    def _emit_event(self, payload: dict[str, Any]) -> None:
+        for callback in tuple(self._event_listeners):
+            callback(payload)
 
 
 class ChatThreadSession:
@@ -377,6 +417,7 @@ class ChatThreadSession:
         self._current_model: AgentModelChanged | None = None
         self._models_response: ModelsResponse | None = None
         self._client_toolkits_by_tool_name: dict[str, Toolkit] = {}
+        self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._closed = False
         if self.has_thread_path:
             self._client._register_thread_session(self)
@@ -445,6 +486,19 @@ class ChatThreadSession:
     ) -> None:
         self._accepted_input_callback = callback
 
+    def add_event_listener(
+        self, callback: Callable[[dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        self._event_listeners.append(callback)
+
+        def _unsubscribe() -> None:
+            try:
+                self._event_listeners.remove(callback)
+            except ValueError:
+                pass
+
+        return _unsubscribe
+
     def register_client_toolkits(
         self, client_toolkits: list[Toolkit]
     ) -> list[ClientToolkitDescription]:
@@ -506,6 +560,31 @@ class ChatThreadSession:
                 name=name,
             )
         )
+
+    async def list_threads(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> ThreadsListed:
+        payload = ListThreads(
+            type=AGENT_MESSAGE_THREAD_LIST,
+            limit=limit,
+            offset=offset,
+        )
+        await self.send(payload)
+        try:
+            async with asyncio.timeout(self._timeout):
+                while True:
+                    event = await self.receive()
+                    if event.get("type") != AGENT_EVENT_THREAD_LISTED:
+                        continue
+                    response = ThreadsListed.model_validate(event)
+                    if response.source_message_id != payload.message_id:
+                        continue
+                    return response
+        except asyncio.TimeoutError as exc:
+            raise RoomException("timed out waiting for thread list") from exc
 
     async def close(self, *, close_client: bool | None = None) -> None:
         if self._closed:
@@ -726,6 +805,9 @@ class ChatThreadSession:
         if active_model is not None:
             self._current_model = active_model
 
+    def apply_models_response(self, response: ModelsResponse) -> None:
+        self._apply_models_response(response)
+
     @staticmethod
     def _active_model_from_models_response(
         response: ModelsResponse,
@@ -797,12 +879,23 @@ class ChatThreadSession:
     def _handles_threadless_payload(self, payload: dict[str, Any]) -> bool:
         payload_type = payload.get("type")
         source_message_id = payload.get("source_message_id")
-        if payload_type in (AGENT_EVENT_THREAD_STARTED, AGENT_MESSAGE_MODELS_RESPONSE):
+        if payload_type in (
+            AGENT_EVENT_THREAD_STARTED,
+            AGENT_MESSAGE_MODELS_RESPONSE,
+            AGENT_EVENT_THREAD_LISTED,
+        ):
             return self._is_local_source_message(source_message_id)
         return False
 
     def _handle_agent_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
+        if payload_type in (
+            AGENT_EVENT_THREAD_CREATED,
+            AGENT_EVENT_THREAD_UPDATED,
+            AGENT_EVENT_THREAD_DELETED,
+        ):
+            self._emit_event(payload)
+            return
         if payload_type == AGENT_EVENT_CONNECTION_STATUS:
             try:
                 connection_status = AgentConnectionStatus.model_validate(payload)
@@ -843,6 +936,11 @@ class ChatThreadSession:
             task.add_done_callback(_consume_task_exception)
             return
         if payload_type == AGENT_MESSAGE_MODELS_RESPONSE:
+            if not self._is_local_source_message(payload.get("source_message_id")):
+                return
+            self._events.put_nowait(payload)
+            return
+        if payload_type == AGENT_EVENT_THREAD_LISTED:
             if not self._is_local_source_message(payload.get("source_message_id")):
                 return
             self._events.put_nowait(payload)
@@ -909,6 +1007,10 @@ class ChatThreadSession:
             self._events.put_nowait(payload)
         if payload_type == AGENT_EVENT_TURN_ENDED:
             self._clear_local_turn(payload.get("turn_id"))
+
+    def _emit_event(self, payload: dict[str, Any]) -> None:
+        for callback in tuple(self._event_listeners):
+            callback(payload)
 
     async def _respond_to_client_tool_call(self, payload: dict[str, Any]) -> None:
         try:

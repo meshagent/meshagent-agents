@@ -3119,6 +3119,26 @@ async def test_websocket_chat_channel_default_authorization_uses_headers() -> No
     assert result.get_attribute("name") == "Caller"
 
 
+def test_websocket_chat_channel_accepts_token_subprotocols_for_response() -> None:
+    room = _FakeRoom()
+    channel = WebSocketChatChannel(room=room, protocols=("meshagent.msgpack",))
+    request = make_mocked_request(
+        "GET",
+        "/agent",
+        headers={
+            "Sec-WebSocket-Protocol": (
+                "meshagent-token.jwt-value, bearer.other-token, ignored"
+            ),
+        },
+    )
+
+    assert channel._response_protocols(request) == (
+        "meshagent.msgpack",
+        "meshagent-token.jwt-value",
+        "bearer.other-token",
+    )
+
+
 def test_websocket_chat_channel_assigns_unique_connection_participant_ids() -> None:
     participant = Participant(
         id="caller-id",

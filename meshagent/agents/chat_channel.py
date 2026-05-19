@@ -1797,6 +1797,21 @@ class WebSocketChatChannel(BaseChatChannel):
         self._send_tasks_by_participant_id.clear()
         await super().on_stop()
 
+    def _response_protocols(self, request: web.Request) -> tuple[str, ...]:
+        protocols = [*self._protocols]
+        requested_protocols = request.headers.get("Sec-WebSocket-Protocol")
+        if requested_protocols is None:
+            return tuple(protocols)
+
+        for protocol in requested_protocols.split(","):
+            normalized = protocol.strip()
+            if normalized[:16].casefold() == "meshagent-token.":
+                protocols.append(normalized)
+            elif normalized[:7].casefold() == "bearer.":
+                protocols.append(normalized)
+
+        return tuple(protocols)
+
     def participant_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for participant in self._participants_by_id.values():
@@ -1849,7 +1864,7 @@ class WebSocketChatChannel(BaseChatChannel):
 
         websocket = web.WebSocketResponse(
             heartbeat=self._heartbeat,
-            protocols=self._protocols,
+            protocols=self._response_protocols(request),
             receive_timeout=self._receive_timeout,
             max_msg_size=self._max_msg_size,
             compress=self._compress,
