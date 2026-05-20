@@ -73,7 +73,7 @@ from meshagent.agents.messages import (
     TurnSteer,
     TurnSteerAccepted,
 )
-from meshagent.api import DatasetJson, Participant
+from meshagent.api import DatasetJson, Participant, RoomException
 from meshagent.api.messaging import BinaryContent, JsonContent, TextContent
 
 
@@ -300,6 +300,33 @@ class _BlockingInsertDatasets(_FakeDatasets):
         await super().insert(table=table, records=records, namespace=namespace)
 
 
+class _EventuallyVisibleSearchDatasets(_FakeDatasets):
+    def __init__(self, *, missing_searches: int) -> None:
+        super().__init__()
+        self._missing_searches = missing_searches
+        self.search_calls = 0
+
+    async def search(
+        self,
+        *,
+        table: str,
+        namespace: list[str] | None = None,
+        where: str | dict[str, Any] | None = None,
+        limit: int | None = None,
+        select: list[str] | None = None,
+    ) -> pa.Table:
+        self.search_calls += 1
+        if self.search_calls <= self._missing_searches:
+            raise RoomException(f"Table {table!r} does not exist", status_code=404)
+        return await super().search(
+            table=table,
+            namespace=namespace,
+            where=where,
+            limit=limit,
+            select=select,
+        )
+
+
 class _FakeRoom:
     def __init__(self, datasets: _FakeDatasets | None = None) -> None:
         self.datasets = datasets or _FakeDatasets()
@@ -462,6 +489,21 @@ async def test_dataset_thread_storage_start_does_not_wait_for_dataset_setup() ->
 
     thread_rows = datasets.rows[(("threads",), "demo")]
     assert _row_data(thread_rows[0])["message_id"] == "audio-commit-1"
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_waits_for_created_table_to_be_searchable() -> (
+    None
+):
+    datasets = _EventuallyVisibleSearchDatasets(missing_searches=3)
+    room = _FakeRoom(datasets=datasets)
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+
+    await storage.wait_until_ready()
+
+    assert storage._ready
+    assert datasets.search_calls == 4
+    assert len(datasets.create_calls) == 4
 
 
 @pytest.mark.asyncio

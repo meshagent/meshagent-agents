@@ -936,7 +936,7 @@ class DatasetThreadStorage(ThreadStorage):
                         namespace=self._namespace,
                     )
 
-        rows = await self._search_ready_rows()
+        rows = await self._search_ready_rows(schema=schema)
         self._rows = sorted(
             [
                 row
@@ -951,9 +951,9 @@ class DatasetThreadStorage(ThreadStorage):
         self._next_sequence = max((row.sequence for row in self._rows), default=-1) + 1
         self._ready = True
 
-    async def _search_ready_rows(self) -> pa.Table:
+    async def _search_ready_rows(self, *, schema: pa.Schema) -> pa.Table:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 2.0
+        deadline = loop.time() + 15.0
         while True:
             try:
                 return await self._client.search(
@@ -963,6 +963,13 @@ class DatasetThreadStorage(ThreadStorage):
             except RoomException as ex:
                 if "does not exist" not in str(ex) or loop.time() >= deadline:
                     raise
+                with contextlib.suppress(Exception):
+                    await self._client.create_table_with_schema(
+                        name=self._table_name,
+                        schema=schema,
+                        mode="create_if_not_exists",
+                        namespace=self._namespace,
+                    )
                 await asyncio.sleep(0.05)
 
     @staticmethod
