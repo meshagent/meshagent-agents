@@ -22,6 +22,7 @@ from meshagent.tools import FunctionTool, ToolContext, Toolkit, tool
 from meshagent.tools.strict_schema import ensure_strict_json_schema
 
 from .adapter import LLMAdapter
+from .web_participant import WebParticipant
 from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_FILE_CONTENT_ENDED,
@@ -1932,15 +1933,11 @@ class WebSocketChatChannel(BaseChatChannel):
         return websocket
 
     @staticmethod
-    def _participant_for_websocket_connection(participant: Participant) -> Participant:
+    def _participant_for_websocket_connection(
+        participant: Participant,
+    ) -> WebParticipant:
         connection_id = uuid.uuid4().hex
-        attributes = participant.attributes
-        attributes["base_participant_id"] = participant.id
-        attributes["websocket_connection_id"] = connection_id
-        return Participant(
-            id=f"{participant.id}:websocket:{connection_id}",
-            attributes=attributes,
-        )
+        return WebParticipant(participant=participant, connection_id=connection_id)
 
     def _handle_websocket_agent_message(
         self,

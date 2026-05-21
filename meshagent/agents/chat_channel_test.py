@@ -13,6 +13,7 @@ from meshagent.agents.chat_channel import (
     MsgpackWebSocketChatEncoding,
     WebSocketChatChannel,
 )
+from meshagent.agents.web_participant import WebParticipant
 import meshagent.agents.thread_storage as thread_storage_module
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.messages import (
@@ -3166,7 +3167,7 @@ def test_websocket_chat_channel_uses_canonical_msgpack_subprotocol() -> None:
     assert channel._response_protocols(request) == ("meshagent-msgpack",)
 
 
-def test_websocket_chat_channel_assigns_unique_connection_participant_ids() -> None:
+def test_websocket_chat_channel_preserves_authorized_participant_id() -> None:
     participant = Participant(
         id="caller-id",
         attributes={"name": "Caller", "role": "user"},
@@ -3175,9 +3176,13 @@ def test_websocket_chat_channel_assigns_unique_connection_participant_ids() -> N
     first = WebSocketChatChannel._participant_for_websocket_connection(participant)
     second = WebSocketChatChannel._participant_for_websocket_connection(participant)
 
-    assert first.id != second.id
-    assert first.id.startswith("caller-id:websocket:")
-    assert second.id.startswith("caller-id:websocket:")
+    assert isinstance(first, WebParticipant)
+    assert isinstance(second, WebParticipant)
+    assert first.id == "caller-id"
+    assert second.id == "caller-id"
+    assert first.get_attribute("websocket_connection_id") != second.get_attribute(
+        "websocket_connection_id"
+    )
     assert first.get_attribute("base_participant_id") == "caller-id"
     assert first.get_attribute("name") == "Caller"
     assert first.get_attribute("role") == "user"

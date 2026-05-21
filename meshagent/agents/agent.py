@@ -25,6 +25,7 @@ from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
 
 from meshagent.api.room_server_client import RoomClient
 from .context import AgentSessionContext
+from .web_participant import WebParticipant
 import logging
 import asyncio
 import warnings
@@ -40,6 +41,12 @@ def _participant_error_label(participant: Participant) -> str:
         parts.append(f"name={participant_name.strip()}")
 
     return f"participant({', '.join(parts)})"
+
+
+def _room_participant_id_for_toolkit_listing(participant: Participant) -> str | None:
+    if isinstance(participant, WebParticipant):
+        return None
+    return participant.id
 
 
 class AgentException(RoomException):
@@ -470,15 +477,21 @@ class SingleRoomAgent:
         for toolkit_description in visible_tools:
             toolkits_by_name[toolkit_description.name] = (toolkit_description, None)
 
-        if context.on_behalf_of is not None:
+        tool_target_room_participant_id = _room_participant_id_for_toolkit_listing(
+            tool_target
+        )
+        if (
+            context.on_behalf_of is not None
+            and tool_target_room_participant_id is not None
+        ):
             participant_tools = await self._room.agents.list_toolkits(
-                participant_id=tool_target.id
+                participant_id=tool_target_room_participant_id
             )
 
             for toolkit_description in participant_tools:
                 toolkits_by_name[toolkit_description.name] = (
                     toolkit_description,
-                    tool_target.id,
+                    tool_target_room_participant_id,
                 )
 
         for required_toolkit in self.requires:

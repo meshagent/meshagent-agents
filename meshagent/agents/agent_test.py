@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 
 from meshagent.agents.agent import RemoteRoomTool, SingleRoomAgent
+from meshagent.agents.web_participant import WebParticipant
 from meshagent.api import (
     Participant,
     RequiredToolkit,
@@ -281,6 +282,54 @@ async def test_single_room_agent_required_toolkit_finds_public_room_toolkit() ->
     assert fake_agents.list_toolkit_calls == [
         {"participant_id": None, "participant_name": None},
         {"participant_id": "user-id", "participant_name": None},
+    ]
+    assert fake_agents.calls[0]["toolkit"] == "PersonalAssistant"
+    assert fake_agents.calls[0]["tool"] == "lookup"
+    assert fake_agents.calls[0]["participant_id"] is None
+    assert fake_agents.calls[0]["on_behalf_of_id"] == "user-id"
+
+
+@pytest.mark.asyncio
+async def test_single_room_agent_forwards_web_participant_on_behalf_of_id() -> None:
+    tool_description = ToolDescription(
+        name="lookup",
+        title="",
+        description="",
+        input_spec=ToolContentSpec(
+            types=["json"],
+            schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+    )
+    toolkit_description = ToolkitDescription(
+        name="PersonalAssistant",
+        title="",
+        description="",
+        tools=[tool_description],
+    )
+    fake_agents = _FakeAgentsClient(response=None, toolkits=[toolkit_description])
+    room = _FakeRoom(agents=fake_agents)
+    agent = SingleRoomAgent(
+        name="helper",
+        requires=[RequiredToolkit(name="PersonalAssistant", tools=["lookup"])],
+    )
+    agent._room = room
+    caller = Participant(id="caller-id", attributes={"name": "Caller Agent"})
+    web_participant = WebParticipant(
+        participant=Participant(id="user-id", attributes={"name": "Ada"}),
+        connection_id="connection-id",
+    )
+    context = ToolContext(caller=caller, on_behalf_of=web_participant)
+
+    toolkits = await agent.get_required_toolkits(context)
+
+    assert len(toolkits) == 1
+    await toolkits[0].tools[0].execute(context=context)
+    assert fake_agents.list_toolkit_calls == [
+        {"participant_id": None, "participant_name": None},
     ]
     assert fake_agents.calls[0]["toolkit"] == "PersonalAssistant"
     assert fake_agents.calls[0]["tool"] == "lookup"

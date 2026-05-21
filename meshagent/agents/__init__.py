@@ -31,6 +31,7 @@ from .chat_channel import (
     WebSocketChatChannel,
     WebSocketChatEncoding,
 )
+from .web_participant import WebParticipant
 from .chat_client import (
     AcceptedAgentInput,
     BaseChatClient,
@@ -97,6 +98,7 @@ __all__ = [
     MsgpackWebSocketChatEncoding,
     WebSocketChatChannel,
     WebSocketChatEncoding,
+    WebParticipant,
     AcceptedAgentInput,
     BaseChatClient,
     ChatThreadSession,
