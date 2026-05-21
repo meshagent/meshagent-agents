@@ -2097,15 +2097,6 @@ class MeshagentPackage(PythonPackage):
                             include_goto_tool=self_package._computer_use_config.allow_goto_url,
                         )
                         toolkits.append(computer_toolkit)
-                    for channel in self.channels:
-                        if channel.state == "started":
-                            turn_id = turns[-1].turn_id if len(turns) > 0 else None
-                            toolkits.extend(
-                                channel.get_turn_toolkits(
-                                    thread_id=thread_id,
-                                    turn_id=turn_id,
-                                )
-                            )
                     toolkits.append(thread_storage.make_toolkit())
                     return toolkits
 

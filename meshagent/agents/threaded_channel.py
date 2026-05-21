@@ -709,6 +709,7 @@ class ThreadedChannel(Channel):
         while len(self._thread_list_background_tasks) > 0:
             tasks = list(self._thread_list_background_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0)
 
     async def _new_thread_path(self) -> str:
         storage_path = self._thread_path_for_name(

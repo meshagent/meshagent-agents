@@ -163,7 +163,7 @@ from meshagent.api.messaging import (
     JsonContent,
     TextContent,
 )
-from meshagent.tools import LocalRoomTool, ToolContext, Toolkit
+from meshagent.tools import LocalRoomTool, ToolContext, Toolkit, tool
 
 
 class _LifecycleChannel(Channel):
@@ -181,6 +181,128 @@ class _LifecycleChannel(Channel):
     async def on_stop(self) -> None:
         self.stopped += 1
         self.stop_event.set()
+
+
+def test_supervisor_rejects_duplicate_channel_turn_tools() -> None:
+    @tool(name="attach_file")
+    async def attach_file(path: str) -> None:
+        del path
+
+    @tool(name="list_threads")
+    async def list_threads() -> JsonContent:
+        return JsonContent(json={"threads": []})
+
+    @tool(name="grep_thread_list")
+    async def grep_thread_list(pattern: str) -> JsonContent:
+        del pattern
+        return JsonContent(json={"threads": []})
+
+    @tool(name="channel_specific")
+    async def channel_specific() -> None:
+        return None
+
+    class _ThreadToolChannel(Channel):
+        def __init__(self, tools) -> None:
+            super().__init__()
+            self._tools = tools
+
+        def get_turn_toolkits(
+            self,
+            *,
+            thread_id: str,
+            turn_id: str | None,
+        ) -> list[Toolkit]:
+            assert thread_id == "/threads/current.thread"
+            assert turn_id == "turn-1"
+            return [Toolkit(name="chat", tools=[*self._tools])]
+
+    supervisor = AgentSupervisor()
+    supervisor.add_channel(
+        _ThreadToolChannel([attach_file, list_threads, grep_thread_list])
+    )
+    supervisor.add_channel(
+        _ThreadToolChannel(
+            [attach_file, list_threads, grep_thread_list, channel_specific]
+        )
+    )
+
+    with pytest.raises(ValueError, match="duplicate turn tool registered: chat"):
+        supervisor.get_turn_toolkits(
+            thread_id="/threads/current.thread",
+            turn_id="turn-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_supervisor_registers_thread_list_tools_only_with_thread_storage() -> (
+    None
+):
+    supervisor = _ListThreadSupervisor()
+
+    without_storage = supervisor.get_turn_toolkits(
+        thread_id="/threads/current.thread",
+        turn_id="turn-1",
+        thread_storage=None,
+    )
+    assert without_storage == []
+
+    with_storage = supervisor.get_turn_toolkits(
+        thread_id="/threads/current.thread",
+        turn_id="turn-1",
+        thread_storage=_LifecycleThreadStorage(path="/threads/current.thread"),
+    )
+    assert [toolkit.name for toolkit in with_storage] == ["chat"]
+    assert {tool.name for tool in with_storage[0].tools} == {
+        "list_threads",
+        "grep_thread_list",
+    }
+
+    caller = RemoteParticipant(id="caller-id")
+    list_tool = next(
+        tool for tool in with_storage[0].tools if tool.name == "list_threads"
+    )
+    result = await list_tool.execute(context=ToolContext(caller=caller))
+
+    assert isinstance(result, JsonContent)
+    assert result.json["threads"] == [
+        {
+            "path": "/threads/one.thread",
+            "name": "One",
+            "created_at": "2026-01-01T00:00:00Z",
+            "modified_at": "2026-01-02T00:00:00Z",
+        }
+    ]
+
+
+def test_supervisor_rejects_channel_thread_tool_duplicate_when_thread_storage_exists() -> (
+    None
+):
+    @tool(name="list_threads")
+    async def list_threads() -> JsonContent:
+        return JsonContent(json={"threads": []})
+
+    class _ThreadToolChannel(Channel):
+        def get_turn_toolkits(
+            self,
+            *,
+            thread_id: str,
+            turn_id: str | None,
+        ) -> list[Toolkit]:
+            del thread_id
+            del turn_id
+            return [Toolkit(name="chat", tools=[list_threads])]
+
+    supervisor = AgentSupervisor()
+    supervisor.add_channel(_ThreadToolChannel())
+
+    with pytest.raises(
+        ValueError, match="duplicate turn tool registered: chat.list_threads"
+    ):
+        supervisor.get_turn_toolkits(
+            thread_id="/threads/current.thread",
+            turn_id="turn-1",
+            thread_storage=_LifecycleThreadStorage(path="/threads/current.thread"),
+        )
 
 
 def test_agent_model_info_includes_modalities() -> None:
@@ -6131,6 +6253,39 @@ async def test_llm_agent_process_uses_builder_returned_room_bound_toolkits() -> 
 
     assert isinstance(result, TextContent)
     assert result.text == room.local_participant.id
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_adds_supervisor_toolkits_with_custom_builder() -> None:
+    room = _DownloadRecordingRoom()
+    adapter = _RecordingLLMAdapter()
+    supervisor = AgentSupervisor()
+    thread_storage = _LifecycleThreadStorage(path="/threads/test.thread")
+
+    async def _build_toolkits(sender, model, turns) -> list[Toolkit]:
+        del sender
+        del model
+        del turns
+        return [Toolkit(name="dynamic", tools=[])]
+
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="/threads/test.thread",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+        turn_toolkits_builder=_build_toolkits,
+    )
+
+    await process.start(supervisor)
+    try:
+        toolkits = await process._build_turn_toolkits(
+            model="default-model",
+            turns=[],
+        )
+    finally:
+        await process.stop(supervisor)
+
+    assert [toolkit.name for toolkit in toolkits] == ["dynamic", "chat"]
 
 
 @pytest.mark.asyncio

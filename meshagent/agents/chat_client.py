@@ -22,6 +22,10 @@ from .messages import (
     AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_CONNECTION_STATUS,
+    AGENT_EVENT_AUDIO_GENERATION_DELTA,
+    AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
+    AGENT_EVENT_FILE_CONTENT_DELTA,
+    AGENT_EVENT_REASONING_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_THREAD_CREATED,
     AGENT_EVENT_THREAD_DELETED,
@@ -36,6 +40,8 @@ from .messages import (
     AGENT_EVENT_TURN_STEER_ACCEPTED,
     AGENT_EVENT_TURN_STEER_REJECTED,
     AGENT_EVENT_TURN_STEERED,
+    AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+    AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
     AGENT_MESSAGE_MODEL_CHANGE,
     AGENT_MESSAGE_MODELS_REQUEST,
@@ -414,6 +420,7 @@ class ChatThreadSession:
         self._remote_source_message_ids: set[str] = set()
         self._remote_turn_output_parts: dict[str, list[str]] = {}
         self._last_completed_turn_id: str | None = None
+        self._merged_delta_message_ids: set[str] = set()
         self._current_model: AgentModelChanged | None = None
         self._models_response: ModelsResponse | None = None
         self._client_toolkits_by_tool_name: dict[str, Toolkit] = {}
@@ -726,6 +733,11 @@ class ChatThreadSession:
         | AgentToolCallArgumentsDelta
         | AgentToolCallLogDelta,
     ) -> None:
+        normalized_message_id = _normalized_string(message.message_id)
+        if normalized_message_id is not None:
+            if normalized_message_id in self._merged_delta_message_ids:
+                return
+            self._merged_delta_message_ids.add(normalized_message_id)
         key = f"{message.type}:{message.item_id}"
         existing_index = self._message_indexes.get(key)
         if existing_index is None:
@@ -949,6 +961,8 @@ class ChatThreadSession:
             return
         if payload.get("thread_id") != self._thread_path:
             return
+        if self._is_duplicate_delta_payload(payload):
+            return
         if payload_type == AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED:
             task = asyncio.create_task(self._respond_to_client_tool_call(payload))
             task.add_done_callback(_consume_task_exception)
@@ -1007,6 +1021,21 @@ class ChatThreadSession:
             self._events.put_nowait(payload)
         if payload_type == AGENT_EVENT_TURN_ENDED:
             self._clear_local_turn(payload.get("turn_id"))
+
+    def _is_duplicate_delta_payload(self, payload: dict[str, Any]) -> bool:
+        payload_type = payload.get("type")
+        if payload_type not in (
+            AGENT_EVENT_AUDIO_GENERATION_DELTA,
+            AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
+            AGENT_EVENT_FILE_CONTENT_DELTA,
+            AGENT_EVENT_REASONING_CONTENT_DELTA,
+            AGENT_EVENT_TEXT_CONTENT_DELTA,
+            AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA,
+            AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+        ):
+            return False
+        message_id = _normalized_string(payload.get("message_id"))
+        return message_id is not None and message_id in self._merged_delta_message_ids
 
     def _emit_event(self, payload: dict[str, Any]) -> None:
         for callback in tuple(self._event_listeners):

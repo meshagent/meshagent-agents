@@ -23,7 +23,7 @@ from typing import (
 from urllib.parse import urlparse
 
 from meshagent.api import Participant
-from meshagent.api.messaging import Content, ErrorContent, FileContent
+from meshagent.api.messaging import Content, ErrorContent, FileContent, JsonContent
 from meshagent.agents.adapter import (
     LLMAdapter,
     LLMAudioFormat,
@@ -32,7 +32,7 @@ from meshagent.agents.adapter import (
     ToolCallApprovalRequest,
 )
 from meshagent.agents.context import AgentSessionContext, SessionUsage
-from meshagent.tools import FunctionTool, ToolContext, Toolkit
+from meshagent.tools import FunctionTool, ToolContext, Toolkit, tool
 from opentelemetry import trace
 from pydantic_core import from_json as pydantic_core_from_json
 from .thread_adapter import default_format_message
@@ -956,6 +956,192 @@ class AgentSupervisor:
 
     def add_process(self, process: AgentProcess) -> None:
         self.processes.append(process)
+
+    def get_turn_toolkits(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str | None,
+        thread_storage: ThreadStorage | None = None,
+    ) -> list[Toolkit]:
+        toolkits: list[Toolkit] = []
+        seen_tools: set[tuple[str, str]] = set()
+
+        def append_toolkit(toolkit: Toolkit) -> None:
+            for toolkit_tool in toolkit.tools:
+                key = (toolkit.name, toolkit_tool.name)
+                if key in seen_tools:
+                    raise ValueError(
+                        f"duplicate turn tool registered: {toolkit.name}.{toolkit_tool.name}"
+                    )
+                seen_tools.add(key)
+            toolkits.append(toolkit)
+
+        if thread_storage is not None:
+            append_toolkit(self._make_thread_list_toolkit())
+
+        for channel in self.channels:
+            for toolkit in channel.get_turn_toolkits(
+                thread_id=thread_id,
+                turn_id=turn_id,
+            ):
+                append_toolkit(toolkit)
+
+        return toolkits
+
+    def _make_thread_list_toolkit(self) -> Toolkit:
+        read_file_hint = (
+            "Use read_file with a thread path to read that thread's contents."
+        )
+        outer = self
+
+        def to_json_entry(entry: ThreadListEntry) -> dict[str, str]:
+            return {
+                "name": str(entry.name),
+                "path": str(entry.path),
+                "modified_at": str(entry.modified_at),
+                "created_at": str(entry.created_at),
+            }
+
+        @tool(
+            name="list_threads",
+            description="lists recent threads sorted by last modified date (newest first). Use read_file with a thread path to read that thread's contents.",
+        )
+        async def list_threads(
+            context: ToolContext,
+            *,
+            limit: int = 20,
+            offset: int = 0,
+        ) -> JsonContent:
+            normalized_offset = max(0, int(offset))
+            normalized_limit = max(1, min(200, int(limit)))
+            page = await outer.list_threads(
+                list_threads=ListThreads(
+                    type=AGENT_MESSAGE_THREAD_LIST,
+                    limit=normalized_limit,
+                    offset=normalized_offset,
+                ),
+                sender=context.on_behalf_of or context.caller,
+            )
+
+            if page.total == 0:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total": 0,
+                        "offset": normalized_offset,
+                        "limit": normalized_limit,
+                        "message": "no threads were found in the thread list",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            if len(page.threads) == 0:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total": page.total,
+                        "offset": normalized_offset,
+                        "limit": normalized_limit,
+                        "message": "no threads were found for the requested limit/offset",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            return JsonContent(
+                json={
+                    "threads": [to_json_entry(entry) for entry in page.threads],
+                    "total": page.total,
+                    "offset": normalized_offset,
+                    "limit": normalized_limit,
+                    "sort": "modified_at_desc",
+                    "read_file_hint": read_file_hint,
+                }
+            )
+
+        @tool(
+            name="grep_thread_list",
+            description="searches the thread list for matching thread names and paths. Use read_file with a thread path to read that thread's contents.",
+        )
+        async def grep_thread_list(
+            context: ToolContext,
+            *,
+            pattern: str,
+            ignore_case: bool = True,
+        ) -> JsonContent:
+            needle = pattern.strip()
+            if needle == "":
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": needle,
+                        "ignore_case": ignore_case,
+                        "message": "pattern is required",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            flags = re.IGNORECASE if ignore_case else 0
+            try:
+                matcher = re.compile(needle, flags)
+            except re.error as ex:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": needle,
+                        "ignore_case": ignore_case,
+                        "error": "invalid_regex_pattern",
+                        "message": f"invalid regex pattern: {ex}",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            matches: list[dict[str, str]] = []
+            page = await outer.list_threads(
+                list_threads=ListThreads(
+                    type=AGENT_MESSAGE_THREAD_LIST,
+                    limit=200,
+                    offset=0,
+                ),
+                sender=context.on_behalf_of or context.caller,
+            )
+            for entry in page.threads:
+                haystack = (
+                    f"{entry.name}\n{entry.path}\n"
+                    f"{entry.created_at}\n{entry.modified_at}"
+                )
+                if matcher.search(haystack) is not None:
+                    matches.append(to_json_entry(entry))
+
+            if len(matches) == 0:
+                return JsonContent(
+                    json={
+                        "threads": [],
+                        "total_matches": 0,
+                        "pattern": needle,
+                        "ignore_case": ignore_case,
+                        "message": "no matching threads were found",
+                        "read_file_hint": read_file_hint,
+                    }
+                )
+
+            return JsonContent(
+                json={
+                    "threads": matches,
+                    "total_matches": len(matches),
+                    "pattern": needle,
+                    "ignore_case": ignore_case,
+                    "read_file_hint": read_file_hint,
+                }
+            )
+
+        return Toolkit(
+            name="chat",
+            tools=[list_threads, grep_thread_list],
+            validation_mode="content_types",
+        )
 
     @property
     def thread_isolation(self) -> ThreadIsolationMode:
@@ -4006,18 +4192,19 @@ class LLMAgentProcess(AgentProcess):
                 )
             else:
                 combined_toolkits = [*self._toolkits]
-                supervisor = self.supervisor
-                if supervisor is not None:
-                    for channel in supervisor.channels:
-                        turn_id = self._turn_id
-                        if turn_id is None and len(turns) > 0:
-                            turn_id = turns[-1].turn_id
-                        combined_toolkits.extend(
-                            channel.get_turn_toolkits(
-                                thread_id=self.thread_id,
-                                turn_id=turn_id,
-                            )
-                        )
+
+            supervisor = self.supervisor
+            if supervisor is not None:
+                turn_id = self._turn_id
+                if turn_id is None and len(turns) > 0:
+                    turn_id = turns[-1].turn_id
+                combined_toolkits.extend(
+                    supervisor.get_turn_toolkits(
+                        thread_id=self.thread_id,
+                        turn_id=turn_id,
+                        thread_storage=self.thread_storage,
+                    )
+                )
 
             resolved_toolkits: list[Toolkit] = []
             for toolkit in combined_toolkits:

@@ -96,7 +96,7 @@ from meshagent.agents.messages import (
 )
 from meshagent.agents.process import AgentSupervisor, Message
 from meshagent.api import Participant, RoomException, RoomMessage
-from meshagent.api.messaging import EmptyContent, JsonContent, TextContent
+from meshagent.api.messaging import EmptyContent, TextContent
 from meshagent.tools import ToolContext
 
 
@@ -436,7 +436,7 @@ def _assert_uuid_thread_table_url(*, path: str, prefix: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_start() -> (
+async def test_chat_channel_provides_attach_file_turn_tool_without_thread_tools() -> (
     None
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
@@ -461,73 +461,43 @@ async def test_chat_channel_exposes_chat_toolkits_and_new_thread_emits_turn_star
         )
         assert len(agent_toolkits) == 1
         agent_tool_names = {tool.name for tool in agent_toolkits[0].tools}
-        assert agent_tool_names == {
-            "new_thread",
-            "attach_file",
-            "list_threads",
-            "grep_thread_list",
-        }
+        assert agent_tool_names == {"attach_file"}
 
         remote_toolkit = channel.make_toolkit()
-        assert {tool.name for tool in remote_toolkit.tools} == agent_tool_names
+        assert remote_toolkit.tools == []
         assert remote_toolkit.validation_mode == "content_types"
-
-        new_thread_tool = next(
-            tool for tool in agent_toolkits[0].tools if tool.name == "new_thread"
-        )
-        context = ToolContext(caller=caller)
-        result = await new_thread_tool.execute(
-            context=context,
-            message={
-                "text": "Plan this friendly thread",
-                "attachments": [{"path": "uploads/plan.md"}],
-            },
-        )
-
-        assert isinstance(result, JsonContent)
-        result_path = result.json["path"]
-        result_message_id = result.json["message_id"]
-        assert isinstance(result_message_id, str)
-        assert result_message_id != ""
-        assert isinstance(result_path, str)
-        _assert_uuid_thread_path(path=result_path, prefix="/threads/chat/")
-
-        assert len(supervisor.sent) == 1
-        sent = supervisor.sent[0]
-        assert sent.sender is caller
-        assert sent.source is channel
-        turn = sent.data
-        assert isinstance(turn, TurnStart)
-        assert turn.message_id == result_message_id
-        assert turn.type == AGENT_MESSAGE_TURN_START
-        assert turn.thread_id == result_path
-        assert turn.content == [
-            AgentTextContent(type="text", text="Plan this friendly thread"),
-            AgentFileContent(type="file", url="room:///uploads/plan.md"),
-        ]
-
-        entries = sync.document.root.get_children()
-        assert entries == []
-        await channel._wait_for_thread_list_background_tasks()
-        await _drain_background_tasks()
-        entries = sync.document.root.get_children()
-        assert len(entries) == 1
-        assert entries[0].get_attribute("path") == result_path
-        assert entries[0].get_attribute("name") == "Plan this friendly thread"
-
-        list_threads_tool = next(
-            tool for tool in agent_toolkits[0].tools if tool.name == "list_threads"
-        )
-        list_result = await list_threads_tool.execute(
-            context=context,
-            limit=20,
-            offset=0,
-        )
-        assert isinstance(list_result, JsonContent)
-        assert list_result.json["total"] == 1
-        assert list_result.json["threads"][0]["path"] == result_path
+        assert channel.get_exposed_toolkits() == []
     finally:
         await channel.stop(supervisor)
+
+
+def test_supervisor_get_turn_toolkits_has_single_chat_toolkit_with_websocket_and_chat_channels() -> (
+    None
+):
+    room = _FakeRoom(messaging_enabled=True, sync=_FakeSync())
+    supervisor = AgentSupervisor()
+    supervisor.add_channel(
+        MessagingChatChannel(
+            room=room,
+            threading_mode="default-new",
+            thread_dir="/threads/chat",
+        )
+    )
+    supervisor.add_channel(
+        WebSocketChatChannel(
+            room=room,
+            threading_mode="default-new",
+            thread_dir="/threads/chat",
+        )
+    )
+
+    toolkits = supervisor.get_turn_toolkits(
+        thread_id="/threads/test.thread",
+        turn_id="turn-1",
+    )
+
+    assert [toolkit.name for toolkit in toolkits] == ["chat"]
+    assert {tool.name for tool in toolkits[0].tools} == {"attach_file"}
 
 
 @pytest.mark.asyncio
@@ -989,27 +959,26 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
 
     await channel.start(supervisor)
     try:
-        new_thread_tool = next(
-            tool
-            for tool in channel.get_turn_toolkits(
-                thread_id="/threads/test.thread",
-                turn_id="turn-1",
-            )[0].tools
-            if tool.name == "new_thread"
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
         )
-        result = await new_thread_tool.execute(
-            context=ToolContext(caller=caller),
-            message={"text": "hello"},
-        )
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
 
-        assert isinstance(result, JsonContent)
-        result_path = result.json["path"]
+        result_path = room.messaging.sent_messages[0]["message"]["thread_id"]
         assert isinstance(result_path, str)
-        result_message_id = result.json["message_id"]
-        assert isinstance(result_message_id, str)
-        assert result_message_id != ""
         assert len(supervisor.sent) == 1
-        assert supervisor.sent[0].data.message_id == result_message_id
+        assert supervisor.sent[0].data.message_id == "start-thread-1"
         _assert_uuid_thread_table_url(
             path=result_path,
             prefix="dataset://agents/dataset/threads/",
@@ -1017,8 +986,6 @@ async def test_agent_chat_channel_dataset_thread_urls_are_canonical() -> None:
         assert "dataset:///" not in result_path
         assert storage.exists_calls == []
 
-        await channel._wait_for_thread_list_background_tasks()
-        await _drain_background_tasks()
         assert sync.document.root.get_children() == []
         assert len(datasets.records) == 1
         assert datasets.records[0]["path"] == result_path
@@ -1096,21 +1063,23 @@ async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
 
     await channel.start(supervisor)
     try:
-        new_thread_tool = next(
-            tool
-            for tool in channel.get_turn_toolkits(
-                thread_id="/threads/test.thread",
-                turn_id="turn-1",
-            )[0].tools
-            if tool.name == "new_thread"
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
         )
-        result = await new_thread_tool.execute(
-            context=ToolContext(caller=caller),
-            message={"text": "hello"},
-        )
+        await channel._wait_for_thread_list_background_tasks()
+        await _drain_background_tasks()
 
-        assert isinstance(result, JsonContent)
-        result_path = result.json["path"]
+        result_path = room.messaging.sent_messages[0]["message"]["thread_id"]
         assert isinstance(result_path, str)
         _assert_uuid_thread_table_url(
             path=result_path,
@@ -1119,8 +1088,6 @@ async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
         assert "tmp:///" not in result_path
         assert storage.exists_calls == []
 
-        await channel._wait_for_thread_list_background_tasks()
-        await _drain_background_tasks()
         entries = sync.document.root.get_children()
         assert len(entries) == 1
         assert entries[0].get_attribute("path") == result_path
@@ -1133,7 +1100,7 @@ async def test_agent_chat_channel_tmp_thread_urls_are_canonical() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_for_llm_naming() -> (
+async def test_chat_channel_start_thread_uses_message_text_and_attachment_names_for_llm_naming() -> (
     None
 ):
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
@@ -1154,29 +1121,28 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
 
     await channel.start(supervisor)
     try:
-        new_thread_tool = next(
-            tool
-            for tool in channel.get_turn_toolkits(
-                thread_id="/threads/test.thread",
-                turn_id="turn-1",
-            )[0].tools
-            if tool.name == "new_thread"
-        )
-        result = await new_thread_tool.execute(
-            context=ToolContext(caller=caller),
-            message={
-                "text": "Plan the release work",
-                "attachments": [
-                    {"path": "uploads/release-plan.md"},
-                    {"path": "uploads/screenshot.png"},
-                ],
-            },
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "content": [
+                            {"type": "text", "text": "Plan the release work"},
+                            {"type": "file", "url": "uploads/release-plan.md"},
+                            {"type": "file", "url": "uploads/screenshot.png"},
+                        ],
+                    }
+                },
+            )
         )
 
-        assert isinstance(result, JsonContent)
-        assert isinstance(result.json["path"], str)
-        assert isinstance(result.json["message_id"], str)
         await channel._wait_for_thread_list_background_tasks()
+        assert len(room.messaging.sent_messages) >= 1
+        result_path = room.messaging.sent_messages[0]["message"]["thread_id"]
+        assert isinstance(result_path, str)
         assert adapter.prompts == [
             "Message:\nPlan the release work\n\nAttachments:\n- release-plan.md\n- screenshot.png"
         ]
@@ -1189,9 +1155,7 @@ async def test_chat_channel_new_thread_uses_message_text_and_attachment_names_fo
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_new_thread_rejects_empty_message_without_attachments() -> (
-    None
-):
+async def test_chat_channel_does_not_expose_new_thread_tool() -> None:
     caller = _FakeParticipant(name="caller", participant_id="caller-id")
     sync = _FakeSync()
     room = _FakeRoom(
@@ -1208,26 +1172,15 @@ async def test_chat_channel_new_thread_rejects_empty_message_without_attachments
 
     await channel.start(supervisor)
     try:
-        new_thread_tool = next(
-            tool
+        turn_tool_names = {
+            tool.name
             for tool in channel.get_turn_toolkits(
                 thread_id="/threads/test.thread",
                 turn_id="turn-1",
             )[0].tools
-            if tool.name == "new_thread"
-        )
-
-        with pytest.raises(
-            RoomException,
-            match="requires non-empty text or at least one attachment",
-        ):
-            await new_thread_tool.execute(
-                context=ToolContext(caller=caller),
-                message={"text": "   ", "attachments": [{"path": "  "}]},
-            )
-
-        assert supervisor.sent == []
-        assert sync.document.root.get_children() == []
+        }
+        assert "new_thread" not in turn_tool_names
+        assert "new_thread" not in {tool.name for tool in channel.make_toolkit().tools}
     finally:
         await channel.stop(supervisor)
 
@@ -1385,7 +1338,7 @@ async def test_chat_channel_attach_file_raises_for_missing_room_file() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_channel_default_new_exposes_thread_list_tools_without_explicit_thread_dir() -> (
+async def test_chat_channel_default_new_publishes_thread_list_attrs_without_explicit_thread_dir() -> (
     None
 ):
     sync = _FakeSync()
@@ -1402,12 +1355,7 @@ async def test_chat_channel_default_new_exposes_thread_list_tools_without_explic
                 turn_id="turn-1",
             )[0].tools
         }
-        assert tool_names == {
-            "new_thread",
-            "attach_file",
-            "list_threads",
-            "grep_thread_list",
-        }
+        assert tool_names == {"attach_file"}
         assert channel.make_toolkit().validation_mode == "content_types"
         assert (
             "meshagent.chatbot.thread-list",
@@ -3125,6 +3073,10 @@ def test_websocket_chat_channel_does_not_expose_legacy_chat_toolkit() -> None:
     channel = WebSocketChatChannel(room=room)
 
     assert channel.get_exposed_toolkits() == []
+    assert (
+        channel.get_turn_toolkits(thread_id="/threads/test.thread", turn_id="turn-1")
+        == []
+    )
 
 
 def test_websocket_chat_channel_accepts_token_subprotocols_for_response() -> None:

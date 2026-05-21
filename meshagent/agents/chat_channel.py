@@ -5,7 +5,6 @@ import contextlib
 import inspect
 import logging
 import os
-import re
 import uuid
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -16,10 +15,8 @@ import aiohttp
 import msgpack
 from aiohttp import web
 from meshagent.api import Participant, RoomClient, RoomException, RoomMessage
-from meshagent.api.messaging import JsonContent
 from pydantic import BaseModel, ValidationError
 from meshagent.tools import FunctionTool, ToolContext, Toolkit, tool
-from meshagent.tools.strict_schema import ensure_strict_json_schema
 
 from .adapter import LLMAdapter
 from .web_participant import WebParticipant
@@ -132,17 +129,6 @@ class MsgpackWebSocketChatEncoding:
         return parse_agent_message(payload)
 
 
-class _ChatAttachmentPayload(BaseModel):
-    path: str
-    name: str | None = None
-
-
-class _ChatMessagePayload(BaseModel):
-    path: str
-    text: str = ""
-    attachments: list[_ChatAttachmentPayload] | None = None
-
-
 class _PathMessagePayload(BaseModel):
     path: str
 
@@ -207,7 +193,7 @@ class BaseChatChannel(ThreadedChannel):
         ]
 
     def get_exposed_toolkits(self) -> list[Toolkit]:
-        return [self.make_toolkit()]
+        return []
 
     def handles(self, message: Message) -> bool:
         message_type = message.data.type
@@ -947,37 +933,6 @@ class BaseChatChannel(ThreadedChannel):
 
         return normalized
 
-    @classmethod
-    def _content_from_chat_message(
-        cls,
-        *,
-        payload: _ChatMessagePayload,
-    ) -> list[AgentTextContent | AgentFileContent]:
-        content: list[AgentTextContent | AgentFileContent] = []
-
-        if payload.text.strip() != "":
-            content.append(
-                AgentTextContent(
-                    type="text",
-                    text=payload.text,
-                )
-            )
-
-        if payload.attachments is not None:
-            for attachment in payload.attachments:
-                normalized_url = cls._normalize_attachment_url(path=attachment.path)
-                if normalized_url is None:
-                    continue
-                content.append(
-                    AgentFileContent(
-                        type="file",
-                        url=normalized_url,
-                        name=attachment.name,
-                    )
-                )
-
-        return content
-
     @staticmethod
     def _text_and_attachments_from_content(
         *,
@@ -1141,266 +1096,11 @@ class BaseChatChannel(ThreadedChannel):
 
         return parse_agent_message(payload)
 
-    def _build_thread_list_tools(self) -> list[FunctionTool]:
-        if self._thread_list_dir() is None:
-            return []
-
-        read_file_hint = (
-            "Use read_file with a thread path to read that thread's contents."
-        )
-        outer = self
-
-        def to_json_entry(entry) -> dict[str, str]:
-            return {
-                "name": str(entry.name),
-                "path": str(entry.path),
-                "modified_at": str(entry.modified_at),
-                "created_at": str(entry.created_at),
-            }
-
-        @tool(
-            name="list_threads",
-            description="lists recent threads sorted by last modified date (newest first). Use read_file with a thread path to read that thread's contents.",
-        )
-        async def list_threads(*, limit: int = 20, offset: int = 0) -> JsonContent:
-            normalized_offset = max(0, int(offset))
-            normalized_limit = max(1, min(200, int(limit)))
-
-            page = await outer.list_threads(
-                limit=normalized_limit,
-                offset=normalized_offset,
-            )
-            if page.total == 0:
-                return JsonContent(
-                    json={
-                        "threads": [],
-                        "total": 0,
-                        "offset": normalized_offset,
-                        "limit": normalized_limit,
-                        "message": "no threads were found in the thread list",
-                        "read_file_hint": read_file_hint,
-                    }
-                )
-
-            if len(page.threads) == 0:
-                return JsonContent(
-                    json={
-                        "threads": [],
-                        "total": page.total,
-                        "offset": normalized_offset,
-                        "limit": normalized_limit,
-                        "message": "no threads were found for the requested limit/offset",
-                        "read_file_hint": read_file_hint,
-                    }
-                )
-
-            return JsonContent(
-                json={
-                    "threads": [to_json_entry(entry) for entry in page.threads],
-                    "total": page.total,
-                    "offset": normalized_offset,
-                    "limit": normalized_limit,
-                    "sort": "modified_at_desc",
-                    "read_file_hint": read_file_hint,
-                }
-            )
-
-        @tool(
-            name="grep_thread_list",
-            description="searches the thread list for matching thread names and paths. Use read_file with a thread path to read that thread's contents.",
-        )
-        async def grep_thread_list(
-            *, pattern: str, ignore_case: bool = True
-        ) -> JsonContent:
-            needle = pattern.strip()
-            if needle == "":
-                return JsonContent(
-                    json={
-                        "threads": [],
-                        "total_matches": 0,
-                        "pattern": needle,
-                        "ignore_case": ignore_case,
-                        "message": "pattern is required",
-                        "read_file_hint": read_file_hint,
-                    }
-                )
-
-            flags = re.IGNORECASE if ignore_case else 0
-            try:
-                matcher = re.compile(needle, flags)
-            except re.error as ex:
-                return JsonContent(
-                    json={
-                        "threads": [],
-                        "total_matches": 0,
-                        "pattern": needle,
-                        "ignore_case": ignore_case,
-                        "error": "invalid_regex_pattern",
-                        "message": f"invalid regex pattern: {ex}",
-                        "read_file_hint": read_file_hint,
-                    }
-                )
-
-            matches: list[dict[str, str]] = []
-            page = await outer.list_threads(limit=200, offset=0)
-            for entry in page.threads:
-                haystack = (
-                    f"{entry.name}\n{entry.path}\n"
-                    f"{entry.created_at}\n{entry.modified_at}"
-                )
-                if matcher.search(haystack) is None:
-                    continue
-                matches.append(to_json_entry(entry))
-
-            if len(matches) == 0:
-                return JsonContent(
-                    json={
-                        "threads": [],
-                        "total_matches": 0,
-                        "pattern": needle,
-                        "ignore_case": ignore_case,
-                        "message": "no matching threads were found",
-                        "read_file_hint": read_file_hint,
-                    }
-                )
-
-            return JsonContent(
-                json={
-                    "threads": matches,
-                    "total_matches": len(matches),
-                    "pattern": needle,
-                    "ignore_case": ignore_case,
-                    "read_file_hint": read_file_hint,
-                }
-            )
-
-        return [list_threads, grep_thread_list]
-
     def _local_participant_name(self) -> str:
         local_name = self._room.local_participant.get_attribute("name")
         if not isinstance(local_name, str) or local_name.strip() == "":
             return "assistant"
         return local_name.strip()
-
-    def _build_new_thread_tool_schema(self) -> dict[str, Any]:
-        tools_schema: dict[str, Any] = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["message"],
-            "properties": {
-                "message": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["text"],
-                    "properties": {
-                        "text": {"type": "string"},
-                        "attachments": {
-                            "anyOf": [
-                                {
-                                    "type": "array",
-                                    "items": {"$ref": "#/$defs/ChatAttachment"},
-                                },
-                                {"type": "null"},
-                            ]
-                        },
-                    },
-                }
-            },
-            "$defs": {
-                "ChatAttachment": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["path"],
-                    "properties": {
-                        "path": {"type": "string"},
-                    },
-                }
-            },
-        }
-
-        return ensure_strict_json_schema(tools_schema)
-
-    def _make_new_thread_tool(self) -> FunctionTool:
-        local_name = self._local_participant_name()
-        tools_schema = self._build_new_thread_tool_schema()
-        outer = self
-
-        class NewThreadTool(FunctionTool):
-            def __init__(self) -> None:
-                super().__init__(
-                    name="new_thread",
-                    description=f"starts a new thread for {local_name}, posts a message to the thread, and then returns the new thread path. The thread list entry is named and added asynchronously, so an agent should invoke this as fire and forget.",
-                    input_schema=tools_schema,
-                )
-
-            async def execute(
-                self,
-                context: ToolContext,
-                *,
-                message: dict[str, Any],
-            ) -> JsonContent:
-                if outer.supervisor is None:
-                    raise RoomException(
-                        "chat channel must be attached to a supervisor before using chat.new_thread"
-                    )
-
-                text_value = message.get("text")
-                text = text_value if isinstance(text_value, str) else ""
-                payload = {**message, "text": text}
-                attachment_paths = [
-                    attachment.path
-                    for attachment in payload.get("attachments") or []
-                    if isinstance(attachment, _ChatAttachmentPayload)
-                ]
-                if len(attachment_paths) == 0:
-                    raw_attachments = payload.get("attachments")
-                    if isinstance(raw_attachments, list):
-                        attachment_paths = [
-                            attachment_value["path"]
-                            for attachment_value in raw_attachments
-                            if isinstance(attachment_value, dict)
-                            and isinstance(attachment_value.get("path"), str)
-                            and attachment_value.get("path", "").strip() != ""
-                        ]
-
-                if text.strip() == "" and len(attachment_paths) == 0:
-                    raise RoomException(
-                        "chat.new_thread requires non-empty text or at least one attachment"
-                    )
-
-                path = await outer._new_thread_path()
-                chat_message = _ChatMessagePayload.model_validate(
-                    {
-                        "path": path,
-                        "text": text,
-                        "attachments": payload.get("attachments"),
-                    }
-                )
-
-                turn_start = TurnStart(
-                    type=AGENT_MESSAGE_TURN_START,
-                    thread_id=path,
-                    content=outer._content_from_chat_message(payload=chat_message),
-                )
-                outer._begin_pending_thread_list_entry(path=path)
-                await outer.supervisor.route(
-                    Message(
-                        sender=context.on_behalf_of or context.caller,
-                        source=outer,
-                        data=turn_start,
-                    )
-                )
-                outer._schedule_pending_thread_list_entry(
-                    path=path,
-                    message_text=text,
-                    attachments=attachment_paths,
-                    on_behalf_of=context.on_behalf_of or context.caller,
-                )
-                return JsonContent(
-                    json={"path": path, "message_id": turn_start.message_id}
-                )
-
-        return NewThreadTool()
 
     def _make_attach_file_tool(
         self,
@@ -1481,9 +1181,7 @@ class BaseChatChannel(ThreadedChannel):
         turn_id: str | None = None,
     ) -> list[FunctionTool]:
         return [
-            self._make_new_thread_tool(),
             self._make_attach_file_tool(thread_id=thread_id, turn_id=turn_id),
-            *self._build_thread_list_tools(),
         ]
 
     def make_toolkit(self) -> Toolkit:
@@ -1492,10 +1190,7 @@ class BaseChatChannel(ThreadedChannel):
             name="chat",
             description=f"tools for interacting with {local_name}",
             public=False,
-            tools=[
-                self._make_new_thread_tool(),
-                *self._build_thread_list_tools(),
-            ],
+            tools=[],
             validation_mode="content_types",
         )
 
@@ -1785,6 +1480,16 @@ class WebSocketChatChannel(BaseChatChannel):
         self._send_tasks_by_participant_id: dict[str, asyncio.Task[None]] = {}
 
     def get_exposed_toolkits(self) -> list[Toolkit]:
+        return []
+
+    def get_turn_toolkits(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> list[Toolkit]:
+        del thread_id
+        del turn_id
         return []
 
     async def on_stop(self) -> None:

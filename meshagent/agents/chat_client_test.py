@@ -16,15 +16,20 @@ from meshagent.agents.messages import (
     AGENT_EVENT_THREAD_LISTED,
     AGENT_EVENT_THREAD_LOADED,
     AGENT_EVENT_TURN_ENDED,
+    AGENT_EVENT_TURN_STARTED,
     AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_TURN_START,
     AgentThreadListEntry,
     AgentMessage,
     AgentConnectionStatus,
+    AgentTextContentDelta,
     ThreadCreated,
     ThreadLoaded,
     ThreadsListed,
     TurnEnded,
+    TurnStart,
+    TurnStarted,
     parse_agent_message,
 )
 
@@ -152,6 +157,68 @@ async def test_chat_thread_session_notifies_thread_list_event_listeners() -> Non
     )
 
     assert [event["thread"]["name"] for event in events] == ["New"]
+
+
+def test_chat_thread_session_ignores_duplicate_delta_messages() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    delta = AgentTextContentDelta(
+        type="meshagent.agent.text_content.delta",
+        message_id="delta-1",
+        thread_id="/threads/test.thread",
+        turn_id="turn-1",
+        item_id="item-1",
+        text="hello",
+    )
+
+    session.add_agent_message(delta)
+    session.add_agent_message(delta)
+
+    assert len(session.messages) == 1
+    assert isinstance(session.messages[0], AgentTextContentDelta)
+    assert session.messages[0].text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_does_not_enqueue_duplicate_delta_messages() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    turn_start = TurnStart(
+        type=AGENT_MESSAGE_TURN_START,
+        thread_id="/threads/test.thread",
+    )
+    await session.send(turn_start)
+    client._handle_agent_payload(
+        TurnStarted(
+            type=AGENT_EVENT_TURN_STARTED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            source_message_id=turn_start.message_id,
+        ).model_dump(mode="json")
+    )
+    delta = AgentTextContentDelta(
+        type="meshagent.agent.text_content.delta",
+        message_id="delta-1",
+        thread_id="/threads/test.thread",
+        turn_id="turn-1",
+        item_id="item-1",
+        text="hello",
+    ).model_dump(mode="json")
+
+    client._handle_agent_payload(delta)
+    client._handle_agent_payload(delta)
+
+    first = await _receive_until(
+        session,
+        lambda payload: payload.get("type") == "meshagent.agent.text_content.delta",
+    )
+    assert first["text"] == "hello"
+    with pytest.raises(asyncio.TimeoutError):
+        await _receive_until(
+            session,
+            lambda payload: payload.get("type") == "meshagent.agent.text_content.delta",
+            timeout=0.01,
+        )
 
 
 @pytest.mark.asyncio
