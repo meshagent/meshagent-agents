@@ -15,20 +15,27 @@ from meshagent.agents.messages import (
     AGENT_EVENT_THREAD_CREATED,
     AGENT_EVENT_THREAD_LISTED,
     AGENT_EVENT_THREAD_LOADED,
+    AGENT_EVENT_THREAD_STARTED,
+    AGENT_EVENT_THREAD_STATUS,
+    AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_TURN_START,
     AgentThreadListEntry,
     AgentMessage,
     AgentConnectionStatus,
+    AgentThreadStatus,
     AgentTextContentDelta,
     ThreadCreated,
+    ThreadStarted,
     ThreadLoaded,
     ThreadsListed,
     TurnEnded,
     TurnStart,
+    TurnStartAccepted,
     TurnStarted,
     parse_agent_message,
 )
@@ -219,6 +226,132 @@ async def test_chat_thread_session_does_not_enqueue_duplicate_delta_messages() -
             lambda payload: payload.get("type") == "meshagent.agent.text_content.delta",
             timeout=0.01,
         )
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_clears_pending_inputs_on_turn_end() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    turn_start = TurnStart(
+        type=AGENT_MESSAGE_TURN_START,
+        thread_id="/threads/test.thread",
+    )
+
+    await session.send(turn_start)
+    client._handle_agent_payload(
+        TurnStartAccepted(
+            type=AGENT_EVENT_TURN_START_ACCEPTED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            source_message_id=turn_start.message_id,
+        ).model_dump(mode="json")
+    )
+
+    assert [pending.message_id for pending in session.pending_inputs] == [
+        turn_start.message_id
+    ]
+
+    client._handle_agent_payload(
+        TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            error=None,
+        ).model_dump(mode="json")
+    )
+
+    assert session.pending_inputs == ()
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_tracks_active_turn_from_accepted_event() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+
+    message_id = await session.send_text(text="hello")
+    client._handle_agent_payload(
+        TurnStartAccepted(
+            type=AGENT_EVENT_TURN_START_ACCEPTED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            source_message_id=message_id,
+        ).model_dump(mode="json")
+    )
+
+    assert session.interrupt()
+    client._handle_agent_payload(
+        TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            error=None,
+        ).model_dump(mode="json")
+    )
+
+    assert not session.interrupt()
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_starts_thread_before_turns_when_threadless() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path=None)
+
+    start_task = asyncio.create_task(
+        session.start_thread(text="hello", provider="openai", model="gpt-5.5")
+    )
+    await _wait_for(lambda: len(client.sent) == 1)
+
+    sent = client.sent[0]
+    assert sent["type"] == AGENT_MESSAGE_THREAD_START
+    assert sent["provider"] == "openai"
+    assert sent["model"] == "gpt-5.5"
+    assert sent["content"][0]["text"] == "hello"
+    message_id = sent["message_id"]
+    assert session.pending_inputs[0].message_id == message_id
+
+    client._handle_agent_payload(
+        ThreadStarted(
+            type=AGENT_EVENT_THREAD_STARTED,
+            source_message_id=message_id,
+            thread_id="/threads/created.thread",
+        ).model_dump(mode="json")
+    )
+
+    assert await start_task == message_id
+    assert session.thread_path == "/threads/created.thread"
+    assert client.sent[1]["type"] == AGENT_MESSAGE_THREAD_OPEN
+    assert client.sent[1]["load"] is False
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_tracks_steerable_status_as_active_turn() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+
+    client._handle_agent_payload(
+        AgentThreadStatus(
+            type=AGENT_EVENT_THREAD_STATUS,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            status="Writing",
+            mode="steerable",
+        ).model_dump(mode="json")
+    )
+
+    assert session.active_turn_id == "turn-1"
+    assert session.interrupt()
+
+    client._handle_agent_payload(
+        AgentThreadStatus(
+            type=AGENT_EVENT_THREAD_STATUS,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            status=None,
+        ).model_dump(mode="json")
+    )
+
+    assert session.active_turn_id is None
+    assert not session.interrupt()
 
 
 @pytest.mark.asyncio
