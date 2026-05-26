@@ -1515,7 +1515,9 @@ class WebSocketChatChannel(BaseChatChannel):
 
         for protocol in requested_protocols.split(","):
             normalized = protocol.strip()
-            if normalized[:16].casefold() == "meshagent-token.":
+            if normalized[:16].casefold() == "meshagent-agent.":
+                protocols.append(normalized)
+            elif normalized[:16].casefold() == "meshagent-token.":
                 protocols.append(normalized)
             elif normalized[:7].casefold() == "bearer.":
                 protocols.append(normalized)

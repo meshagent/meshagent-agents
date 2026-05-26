@@ -3087,14 +3087,15 @@ def test_websocket_chat_channel_accepts_token_subprotocols_for_response() -> Non
         "/agent",
         headers={
             "Sec-WebSocket-Protocol": (
-                "meshagent-token.jwt-value, bearer.other-token, ignored"
+                "meshagent-agent.jwt-value, meshagent-token.legacy-token, bearer.other-token, ignored"
             ),
         },
     )
 
     assert channel._response_protocols(request) == (
         "meshagent-msgpack",
-        "meshagent-token.jwt-value",
+        "meshagent-agent.jwt-value",
+        "meshagent-token.legacy-token",
         "bearer.other-token",
     )
 
