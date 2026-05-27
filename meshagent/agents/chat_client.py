@@ -1052,6 +1052,9 @@ class ChatThreadSession:
             turn_id=self._active_turn_id,
             content=[AgentTextContent(type="text", text=prompt)],
         )
+        self._local_agent_message_ids.add(turn_steer.message_id)
+        self._pending_local_input_message_ids.add(turn_steer.message_id)
+        self.add_agent_message(turn_steer)
         self._pending_steer_callbacks[turn_steer.message_id] = PendingTurnSteerCallback(
             message=turn_steer,
             on_accepted=on_accepted,

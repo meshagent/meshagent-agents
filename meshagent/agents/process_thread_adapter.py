@@ -2660,13 +2660,15 @@ class MeshDocumentThreadStorage(ThreadStorage):
         )
 
     def _tool_event_kind(self, *, toolkit: str, tool: str) -> str:
-        del toolkit
+        normalized_toolkit = toolkit.strip().lower()
         normalized_tool = tool.strip().lower()
         if normalized_tool == "web_search":
             return "web"
         if normalized_tool in {"shell", "local_shell", "code_interpreter"}:
             return "exec"
-        if normalized_tool == "apply_patch":
+        if normalized_tool == "apply_patch" or (
+            normalized_toolkit == "codex" and normalized_tool.startswith("diff")
+        ):
             return "diff"
         if normalized_tool == "image_generation":
             return "image"
