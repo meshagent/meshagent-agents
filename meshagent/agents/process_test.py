@@ -92,6 +92,7 @@ from meshagent.agents.messages import (
     AgentFileContentStarted,
     AgentMessage,
     AgentModelChanged,
+    AgentProviderInfo,
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
     AgentTextContent,
@@ -431,6 +432,95 @@ class _RecordingProcess(AgentProcess):
     async def on_stop(self) -> None:
         self.stopped += 1
         self.stop_event.set()
+
+
+class _BackendRecordingProcess(AgentProcess):
+    def __init__(self, *, thread_id: str, backend: str) -> None:
+        super().__init__(thread_id=thread_id, backend=backend)
+        self.received: list[Message] = []
+        self.stopped = 0
+
+    def handles(self, message: Message) -> bool:
+        return message.data.type in {
+            AGENT_MESSAGE_THREAD_OPEN,
+            AGENT_MESSAGE_TURN_START,
+        }
+
+    async def on_message(self, message: Message) -> None:
+        self.received.append(message)
+
+    async def on_stop(self) -> None:
+        self.stopped += 1
+
+
+class _RecordingBackend:
+    def __init__(self, *, name: str, thread_id: str = "/threads/backend") -> None:
+        self._name = name
+        self.thread_id = thread_id
+        self.created_processes: list[_BackendRecordingProcess] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def on_start(self) -> None:
+        return None
+
+    async def on_stop(self) -> None:
+        return None
+
+    def model_providers(
+        self,
+        *,
+        current_backend: str | None,
+        current_provider: str | None,
+        current_model: str | None,
+    ) -> list[AgentProviderInfo]:
+        del current_backend
+        del current_provider
+        del current_model
+        return []
+
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        del turn_start
+        return None
+
+    async def create_realtime_connection(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> None:
+        del supervisor
+        del thread_id
+        del start_thread
+        del sender
+        return None
+
+    async def create_thread_id(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del supervisor
+        del start_thread
+        del sender
+        return self.thread_id
+
+    def create_thread_process(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+    ) -> AgentProcess:
+        del supervisor
+        process = _BackendRecordingProcess(thread_id=thread_id, backend=self.name)
+        self.created_processes.append(process)
+        return process
 
 
 class _FailingStartProcess(AgentProcess):
@@ -3117,6 +3207,177 @@ async def _wait_for(
         if asyncio.get_running_loop().time() >= deadline:
             raise asyncio.TimeoutError()
         await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_backend_switch_replaces_process_and_keeps_subscribers() -> (
+    None
+):
+    first_backend = _RecordingBackend(name="first")
+    second_backend = _RecordingBackend(name="second")
+    supervisor = AgentSupervisor(agent_backends=[first_backend, second_backend])
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    backend="first",
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(first_backend.created_processes) == 1)
+        first_process = first_backend.created_processes[0]
+        assert first_process.backend == "first"
+
+        await supervisor.route(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id=first_backend.thread_id,
+                    turn_id="turn-2",
+                    backend="second",
+                    content=[AgentTextContent(type="text", text="switch")],
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(second_backend.created_processes) == 1)
+        second_process = second_backend.created_processes[0]
+        assert first_process.stopped == 1
+        assert second_process.backend == "second"
+        await _wait_for(lambda: len(second_process.received) == 1)
+        assert len(second_process.received) == 1
+        assert isinstance(second_process.received[0].data, TurnStart)
+
+        await supervisor.route(
+            Message(
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id=first_backend.thread_id,
+                    load=False,
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await asyncio.sleep(0)
+        assert [
+            message.data
+            for message in second_process.received
+            if isinstance(message.data, OpenThread)
+        ] == []
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_single_backend_infers_missing_turn_backend() -> None:
+    backend = _RecordingBackend(name="only")
+    supervisor = AgentSupervisor(agent_backends=[backend])
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(backend.created_processes) == 1)
+        process = backend.created_processes[0]
+        assert process.backend == "only"
+        assert (
+            supervisor.agent_backend_for_thread(thread_id=backend.thread_id) is backend
+        )
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_multiple_backends_require_turn_backend() -> None:
+    first_backend = _RecordingBackend(name="first")
+    second_backend = _RecordingBackend(name="second")
+    supervisor = AgentSupervisor(agent_backends=[first_backend, second_backend])
+    channel = _RecordingChannel(handled_type=AGENT_EVENT_TURN_START_REJECTED)
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/ambiguous",
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(channel.received) == 1)
+        rejected = channel.received[0].data
+        assert isinstance(rejected, TurnStartRejected)
+        assert rejected.error.code == "backend_required"
+        assert len(first_backend.created_processes) == 0
+        assert len(second_backend.created_processes) == 0
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_multiple_backends_require_start_thread_backend() -> (
+    None
+):
+    first_backend = _RecordingBackend(name="first")
+    second_backend = _RecordingBackend(name="second")
+    supervisor = AgentSupervisor(agent_backends=[first_backend, second_backend])
+    channel = _RecordingChannel(handled_type=AGENT_EVENT_TURN_START_REJECTED)
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(channel.received) == 1)
+        rejected = channel.received[0].data
+        assert isinstance(rejected, TurnStartRejected)
+        assert rejected.error.code == "backend_required"
+        assert len(first_backend.created_processes) == 0
+        assert len(second_backend.created_processes) == 0
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio

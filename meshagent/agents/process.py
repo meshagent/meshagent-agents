@@ -18,6 +18,7 @@ from typing import (
     Callable,
     Literal,
     Optional,
+    Protocol,
     TypeVar,
 )
 from urllib.parse import urlparse
@@ -666,6 +667,49 @@ class Message:
     to_participant_id: str | None = None
 
 
+class AgentBackend(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    async def on_start(self) -> None: ...
+
+    async def on_stop(self) -> None: ...
+
+    def model_providers(
+        self,
+        *,
+        current_backend: str | None,
+        current_provider: str | None,
+        current_model: str | None,
+    ) -> list[AgentProviderInfo]: ...
+
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None: ...
+
+    async def create_realtime_connection(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> Any: ...
+
+    async def create_thread_id(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str: ...
+
+    def create_thread_process(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+    ) -> AgentProcess: ...
+
+
 _MessageT = TypeVar("_MessageT", bound=AgentMessage)
 
 
@@ -752,11 +796,13 @@ def agent_provider_info(
     provider: LLMProvider,
     current_provider: str,
     current_model: str,
+    backend: str | None = None,
 ) -> AgentProviderInfo:
     return AgentProviderInfo(
         name=provider.name,
         friendly_name=provider.adapter.provider_friendly_name(),
         description=provider.adapter.provider_description(),
+        backend=backend,
         default_model=provider.adapter.default_model(),
         models=[
             agent_model_info(
@@ -768,6 +814,188 @@ def agent_provider_info(
             for model_info in provider.adapter.list_models()
         ],
     )
+
+
+class LLMBackend:
+    def __init__(
+        self,
+        *,
+        name: str = "llm",
+        providers: list[LLMProvider],
+        default_provider: LLMProvider | None = None,
+        process_factory: Callable[[str, str], AgentProcess],
+        thread_id_factory: Callable[[StartThread, Participant | None], Awaitable[str]],
+        realtime_connection_factory: Callable[
+            [str, StartThread, Participant | None],
+            Awaitable[Any],
+        ]
+        | None = None,
+    ) -> None:
+        self._name = name
+        self._providers = LLMAgentProcess._normalize_llm_providers(
+            llm_adapter=None,
+            llm_providers=providers,
+            default_provider=default_provider,
+        )
+        self._providers_by_name = {
+            provider.name: provider for provider in self._providers
+        }
+        self._default_provider = (
+            self._providers_by_name[default_provider.name]
+            if default_provider is not None
+            else self._providers[0]
+        )
+        self._process_factory = process_factory
+        self._thread_id_factory = thread_id_factory
+        self._realtime_connection_factory = realtime_connection_factory
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def default_provider(self) -> LLMProvider:
+        return self._default_provider
+
+    def model_providers(
+        self,
+        *,
+        current_backend: str | None,
+        current_provider: str | None,
+        current_model: str | None,
+    ) -> list[AgentProviderInfo]:
+        del current_backend
+        provider = self._default_provider
+        provider_name = current_provider or provider.name
+        model_name = current_model or provider.adapter.default_model()
+        return [
+            agent_provider_info(
+                provider=candidate,
+                current_provider=provider_name,
+                current_model=model_name,
+                backend=self._name,
+            )
+            for candidate in self._providers
+        ]
+
+    def _resolve_provider(self, provider_name: str | None) -> LLMProvider:
+        if provider_name is None or provider_name.strip() == "":
+            return self._default_provider
+        provider = self._providers_by_name.get(provider_name)
+        if provider is not None:
+            return provider
+        names = ", ".join(sorted(self._providers_by_name))
+        raise ValueError(
+            f"unknown provider {provider_name!r}; available providers: {names}"
+        )
+
+    @staticmethod
+    def _adapter_uses_default_model_list(adapter: LLMAdapter) -> bool:
+        if not isinstance(adapter, LLMAdapter):
+            return True
+        return type(adapter).list_models is LLMAdapter.list_models
+
+    def _resolve_model(self, *, provider: LLMProvider, model: str | None) -> str:
+        if model is None or model.strip() == "":
+            return provider.adapter.default_model()
+        if self._adapter_uses_default_model_list(provider.adapter):
+            return model
+        models = provider.adapter.list_models()
+        for model_info in models:
+            if model_info.name == model:
+                return model
+        names = ", ".join(model_info.name for model_info in models)
+        raise ValueError(
+            f"unknown model {model!r} for provider {provider.name!r}; "
+            f"available models: {names}"
+        )
+
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        if (
+            turn_start.backend is not None
+            and turn_start.backend.strip() != ""
+            and turn_start.backend != self._name
+        ):
+            return AgentError(
+                message=f"unknown backend {turn_start.backend!r}",
+                code="unknown_backend",
+            )
+        try:
+            provider = self._resolve_provider(turn_start.provider)
+            resolved_model = self._resolve_model(
+                provider=provider, model=turn_start.model
+            )
+        except ValueError as exc:
+            code = (
+                "unknown_provider"
+                if "unknown provider" in str(exc)
+                else "unknown_model"
+            )
+            return AgentError(message=str(exc), code=code)
+        model_info = next(
+            (
+                candidate
+                for candidate in provider.adapter.list_models()
+                if candidate.name == resolved_model
+            ),
+            None,
+        )
+        if model_info is not None:
+            unsupported_output_modalities = [
+                output
+                for output in (turn_start.output_modalities or [])
+                if output not in model_info.modalities
+            ]
+            if len(unsupported_output_modalities) > 0:
+                unsupported = ", ".join(
+                    repr(item) for item in unsupported_output_modalities
+                )
+                return AgentError(
+                    message=(
+                        f"model {model_info.name!r} does not support "
+                        f"{unsupported} output modalities"
+                    ),
+                    code="unsupported_modality",
+                )
+        return None
+
+    async def create_realtime_connection(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> Any:
+        del supervisor
+        if self._realtime_connection_factory is None:
+            return None
+        return await self._realtime_connection_factory(thread_id, start_thread, sender)
+
+    async def create_thread_id(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del supervisor
+        return await self._thread_id_factory(start_thread, sender)
+
+    def create_thread_process(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+    ) -> AgentProcess:
+        del supervisor
+        return self._process_factory(thread_id, self._name)
+
+    async def on_start(self) -> None:
+        return None
+
+    async def on_stop(self) -> None:
+        return None
 
 
 class Channel:
@@ -936,9 +1164,19 @@ class AgentSupervisor:
         *,
         thread_isolation: ThreadIsolationMode = "global",
         thread_storage_repository: ThreadStorageRepository | None = None,
+        agent_backends: list[AgentBackend] | None = None,
     ) -> None:
         self.channels: list[Channel] = []
         self.processes: list[AgentProcess] = []
+        self._agent_backends = list(agent_backends or [])
+        self._agent_backends_by_name = {
+            backend.name: backend for backend in self._agent_backends
+        }
+        if len(self._agent_backends_by_name) != len(self._agent_backends):
+            raise ValueError("agent backend names must be unique")
+        self._default_agent_backend = (
+            self._agent_backends[0] if len(self._agent_backends) > 0 else None
+        )
         self._thread_storage_repository = (
             thread_storage_repository or NoopThreadStorageRepository()
         )
@@ -953,6 +1191,7 @@ class AgentSupervisor:
         self._open_thread_ids_by_client_id: dict[str, set[str]] = {}
         self._open_client_ids_by_thread_id: dict[str, set[str]] = {}
         self._thread_namespace_by_thread_id: dict[str, str | None] = {}
+        self._backend_by_thread_id: dict[str, str] = {}
         self._thread_isolation: ThreadIsolationMode = thread_isolation
         self._pending_stop_thread_ids_after_turn: set[str] = set()
         self._pending_stop_thread_tasks_by_thread_id: dict[str, asyncio.Task[None]] = {}
@@ -964,6 +1203,14 @@ class AgentSupervisor:
     @property
     def thread_storage_repository(self) -> ThreadStorageRepository:
         return self._thread_storage_repository
+
+    @property
+    def agent_backends(self) -> list[AgentBackend]:
+        return list(self._agent_backends)
+
+    @property
+    def default_agent_backend(self) -> AgentBackend | None:
+        return self._default_agent_backend
 
     def add_channel(self, channel: Channel) -> None:
         self.channels.append(channel)
@@ -1225,9 +1472,12 @@ class AgentSupervisor:
         return None
 
     def create_thread_process(self, thread_id: str) -> AgentProcess:
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement create_thread_process"
-        )
+        backend = self.agent_backend_for_thread(thread_id=thread_id)
+        if backend is None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} must implement create_thread_process"
+            )
+        return backend.create_thread_process(supervisor=self, thread_id=thread_id)
 
     def send(self, message: Message) -> None:
         if self._stop.is_set() or self._state == "stopping":
@@ -1255,17 +1505,56 @@ class AgentSupervisor:
         )
 
     async def on_start(self) -> None:
+        for backend in self._agent_backends:
+            await backend.on_start()
         return None
 
     async def on_stop(self) -> None:
+        for backend in reversed(self._agent_backends):
+            await backend.on_stop()
         return None
 
     async def on_models_request(self, message: Message) -> None:
-        self._send_to_processes(message)
+        if len(self._agent_backends) == 0:
+            self._send_to_processes(message)
+            return
+        if not isinstance(message.data, ModelsRequest):
+            return
+        providers: list[AgentProviderInfo] = []
+        for backend in self._agent_backends:
+            providers.extend(
+                backend.model_providers(
+                    current_backend=None,
+                    current_provider=None,
+                    current_model=None,
+                )
+            )
+        self._send_models_response(
+            Message(
+                data=ModelsResponse(
+                    type=AGENT_MESSAGE_MODELS_RESPONSE,
+                    source_message_id=message.data.message_id,
+                    providers=providers,
+                ),
+                sender=message.sender,
+            )
+        )
+
+    def _send_models_response(self, message: Message) -> None:
+        self._send_to_channels(message)
 
     async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
-        del turn_start
-        return None
+        if self._requires_explicit_backend(turn_start.backend):
+            return self._missing_backend_error()
+        backend = self.agent_backend_for_name(backend_name=turn_start.backend)
+        if backend is None:
+            if turn_start.backend is not None and turn_start.backend.strip() != "":
+                return AgentError(
+                    message=f"unknown backend {turn_start.backend!r}",
+                    code="unknown_backend",
+                )
+            return None
+        return await backend.validate_turn_start(turn_start)
 
     async def create_realtime_connection(
         self,
@@ -1274,9 +1563,16 @@ class AgentSupervisor:
         start_thread: StartThread,
         sender: Participant | None,
     ):
-        del thread_id
-        del start_thread
-        del sender
+        if self._requires_explicit_backend(start_thread.backend):
+            raise ValueError(self._missing_backend_error().message)
+        backend = self.agent_backend_for_name(backend_name=start_thread.backend)
+        if backend is not None:
+            return await backend.create_realtime_connection(
+                supervisor=self,
+                thread_id=thread_id,
+                start_thread=start_thread,
+                sender=sender,
+            )
         return None
 
     async def create_thread_id(
@@ -1285,11 +1581,55 @@ class AgentSupervisor:
         start_thread: StartThread,
         sender: Participant | None,
     ) -> str:
-        del start_thread
-        del sender
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement create_thread_id"
+        if self._requires_explicit_backend(start_thread.backend):
+            raise ValueError(self._missing_backend_error().message)
+        backend = self.agent_backend_for_name(backend_name=start_thread.backend)
+        if backend is None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} must implement create_thread_id"
+            )
+        return await backend.create_thread_id(
+            supervisor=self,
+            start_thread=start_thread,
+            sender=sender,
         )
+
+    def agent_backend_for_name(
+        self, *, backend_name: str | None
+    ) -> AgentBackend | None:
+        if backend_name is None or backend_name.strip() == "":
+            return self._default_agent_backend
+        return self._agent_backends_by_name.get(backend_name)
+
+    def _requires_explicit_backend(self, backend_name: str | None) -> bool:
+        return len(self._agent_backends) > 1 and (
+            backend_name is None or backend_name.strip() == ""
+        )
+
+    def _missing_backend_error(self) -> AgentError:
+        names = ", ".join(backend.name for backend in self._agent_backends)
+        return AgentError(
+            message=(
+                "backend is required when multiple agent backends are configured; "
+                f"available backends: {names}"
+            ),
+            code="backend_required",
+        )
+
+    def agent_backend_for_thread(self, *, thread_id: str) -> AgentBackend | None:
+        backend_name = self._backend_by_thread_id.get(thread_id)
+        return self.agent_backend_for_name(backend_name=backend_name)
+
+    def set_thread_backend(
+        self,
+        *,
+        thread_id: str,
+        backend: AgentBackend | None,
+    ) -> None:
+        if backend is None:
+            self._backend_by_thread_id.pop(thread_id, None)
+        else:
+            self._backend_by_thread_id[thread_id] = backend.name
 
     async def on_thread_started(
         self,
@@ -1434,6 +1774,14 @@ class AgentSupervisor:
         if task is not None and task is not asyncio.current_task():
             task.cancel()
         self._forget_thread_tracking(thread_id=thread_id)
+        self._backend_by_thread_id.pop(thread_id, None)
+        await self._stop_thread_process_without_forgetting_tracking(thread_id=thread_id)
+
+    async def _stop_thread_process_without_forgetting_tracking(
+        self,
+        *,
+        thread_id: str,
+    ) -> None:
         process = self._process_for_thread(thread_id=thread_id)
         if process is None:
             return
@@ -1442,6 +1790,28 @@ class AgentSupervisor:
                 await process.stop(self)
         if process in self.processes:
             self.processes.remove(process)
+
+    async def _replace_thread_process_backend(
+        self,
+        *,
+        thread_id: str,
+        backend: AgentBackend,
+    ) -> tuple[AgentProcess | None, AgentError | None]:
+        current_process = self._process_for_thread(thread_id=thread_id)
+        if current_process is not None and current_process.backend == backend.name:
+            return current_process, None
+
+        self._pending_stop_thread_ids_after_turn.discard(thread_id)
+        task = self._pending_stop_thread_tasks_by_thread_id.pop(thread_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+        if current_process is not None:
+            await self._stop_thread_process_without_forgetting_tracking(
+                thread_id=thread_id
+            )
+        self.set_thread_backend(thread_id=thread_id, backend=backend)
+        return self._create_thread_process_for_route(thread_id=thread_id)
 
     async def _stop_thread_process_when_idle(self, *, thread_id: str) -> None:
         process = self._process_for_thread(thread_id=thread_id)
@@ -1974,6 +2344,30 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_THREAD_START:
             start_thread = _coerce_message_data(message.data, StartThread)
+            if self._requires_explicit_backend(start_thread.backend):
+                self._emit_start_thread_rejected(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                    thread_id="",
+                    error=self._missing_backend_error(),
+                )
+                return
+            backend = self.agent_backend_for_name(backend_name=start_thread.backend)
+            if (
+                backend is None
+                and start_thread.backend is not None
+                and start_thread.backend.strip() != ""
+            ):
+                self._emit_start_thread_rejected(
+                    start_thread=start_thread,
+                    sender=message.sender,
+                    thread_id="",
+                    error=AgentError(
+                        message=f"unknown backend {start_thread.backend!r}",
+                        code="unknown_backend",
+                    ),
+                )
+                return
             try:
                 thread_id = await self.create_thread_id(
                     start_thread=start_thread,
@@ -2002,6 +2396,7 @@ class AgentSupervisor:
                 )
                 return
 
+            self.set_thread_backend(thread_id=thread_id, backend=backend)
             if start_thread.content is None:
                 try:
                     realtime_connection = await self.create_realtime_connection(
@@ -2050,6 +2445,7 @@ class AgentSupervisor:
                 content=start_thread.content,
                 sender_name=start_thread.sender_name,
                 provider=start_thread.provider,
+                backend=start_thread.backend,
                 model=start_thread.model,
                 voice=start_thread.voice,
                 output_modalities=start_thread.output_modalities,
@@ -2104,6 +2500,14 @@ class AgentSupervisor:
 
         elif message_type == AGENT_MESSAGE_TURN_START:
             turn_start = _coerce_message_data(message.data, TurnStart)
+            error = await self.validate_turn_start(turn_start)
+            if error is not None:
+                self._emit_turn_start_rejected(
+                    turn_start=turn_start,
+                    sender=message.sender,
+                    error=error,
+                )
+                return
             access_error = self._ensure_thread_access_for_message(
                 thread_id=turn_start.thread_id,
                 message=message,
@@ -2119,8 +2523,24 @@ class AgentSupervisor:
                 thread_id=turn_start.thread_id,
                 message=message,
             )
+            backend = self.agent_backend_for_name(backend_name=turn_start.backend)
             process = self._process_for_thread(thread_id=turn_start.thread_id)
-            if process is None:
+            if backend is not None and (
+                process is None or process.backend != backend.name
+            ):
+                process, rejection = await self._replace_thread_process_backend(
+                    thread_id=turn_start.thread_id,
+                    backend=backend,
+                )
+                if process is None:
+                    if rejection is not None:
+                        self._emit_turn_start_rejected(
+                            turn_start=turn_start,
+                            sender=message.sender,
+                            error=rejection,
+                        )
+                    return
+            elif process is None:
                 process, rejection = self._create_thread_process_for_route(
                     thread_id=turn_start.thread_id
                 )
@@ -2137,6 +2557,38 @@ class AgentSupervisor:
                 message,
                 data=turn_start,
             )
+            target_processes = [process]
+
+        elif message_type == AGENT_MESSAGE_MODEL_CHANGE:
+            change_model = _coerce_message_data(message.data, ChangeModel)
+            access_error = self._ensure_thread_access_for_message(
+                thread_id=change_model.thread_id,
+                message=message,
+            )
+            if access_error is not None:
+                return
+            backend = self.agent_backend_for_name(backend_name=change_model.backend)
+            if (
+                backend is None
+                and change_model.backend is not None
+                and change_model.backend.strip() != ""
+            ):
+                return
+            process = self._process_for_thread(thread_id=change_model.thread_id)
+            if backend is not None and (
+                process is None or process.backend != backend.name
+            ):
+                process, _ = await self._replace_thread_process_backend(
+                    thread_id=change_model.thread_id,
+                    backend=backend,
+                )
+            elif process is None:
+                process, _ = self._create_thread_process_for_route(
+                    thread_id=change_model.thread_id
+                )
+            if process is None:
+                return
+            routed_message = self._copy_message(message, data=change_model)
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TURN_STEER:
@@ -2387,11 +2839,29 @@ class AgentSupervisor:
                 return
             client_id = self._client_id_for_thread_tracking(message)
             if message_type == AGENT_MESSAGE_THREAD_OPEN:
+                assert isinstance(thread_message, OpenThread)
+                backend = self.agent_backend_for_name(
+                    backend_name=thread_message.backend
+                )
+                if (
+                    backend is None
+                    and thread_message.backend is not None
+                    and thread_message.backend.strip() != ""
+                ):
+                    return
+                process = self._process_for_thread(thread_id=thread_message.thread_id)
                 thread_was_open = self._track_thread_open_for_client(
                     thread_id=thread_message.thread_id,
                     client_id=client_id,
                 )
-                if thread_was_open and thread_message.load is not True:
+                if (
+                    thread_was_open
+                    and thread_message.load is not True
+                    and (
+                        backend is None
+                        or (process is not None and process.backend == backend.name)
+                    )
+                ):
                     self._send_to_channels(routed_message)
                     return
             else:
@@ -2407,8 +2877,14 @@ class AgentSupervisor:
                 )
                 return
 
-            process = self._process_for_thread(thread_id=thread_message.thread_id)
-            if process is None and message_type == AGENT_MESSAGE_THREAD_OPEN:
+            if backend is not None and (
+                process is None or process.backend != backend.name
+            ):
+                process, _ = await self._replace_thread_process_backend(
+                    thread_id=thread_message.thread_id,
+                    backend=backend,
+                )
+            elif process is None:
                 process, _ = self._create_thread_process_for_route(
                     thread_id=thread_message.thread_id
                 )
@@ -2523,6 +2999,7 @@ class AgentProcess:
         thread_id: str | None = None,
         thread_storage: ThreadStorage | None = None,
         thread_adapter: ThreadStorage | None = None,
+        backend: str | None = None,
     ) -> None:
         del supervisor
         if thread_storage is None:
@@ -2536,6 +3013,7 @@ class AgentProcess:
 
         self._supervisor: AgentSupervisor | None = None
         self._thread_id = thread_id
+        self._backend = backend
         self._thread_storage = thread_storage
         self._state: ProcessState = "stopped"
         self._run_task: asyncio.Task[None] | None = None
@@ -2608,6 +3086,10 @@ class AgentProcess:
     @property
     def thread_id(self) -> str | None:
         return self._thread_id
+
+    @property
+    def backend(self) -> str | None:
+        return self._backend
 
     @property
     def thread_storage(self) -> ThreadStorage | None:
@@ -2796,6 +3278,7 @@ class LLMAgentProcess(AgentProcess):
         llm_adapter: LLMAdapter | None = None,
         llm_providers: list[LLMProvider] | None = None,
         default_provider: LLMProvider | None = None,
+        backend_name: str | None = "llm",
         toolkits: Optional[list[Toolkit]] = None,
         thread_storage: ThreadStorage | None = None,
         thread_adapter: ThreadStorage | None = None,
@@ -2810,7 +3293,11 @@ class LLMAgentProcess(AgentProcess):
         elif thread_adapter is not None:
             raise ValueError("thread_storage and thread_adapter cannot both be set")
 
-        super().__init__(thread_id=thread_id, thread_storage=thread_storage)
+        super().__init__(
+            thread_id=thread_id,
+            thread_storage=thread_storage,
+            backend=backend_name,
+        )
         self._thread_status_publisher = thread_status_publisher
         self._format_message = format_message or default_format_message
         providers = self._normalize_llm_providers(
@@ -2826,6 +3313,7 @@ class LLMAgentProcess(AgentProcess):
             if default_provider is not None
             else providers[0]
         )
+        self._backend_name = backend_name
         self._current_provider = self._default_provider
         self.llm_adapter = self._current_provider.adapter
         self._current_model = self.llm_adapter.default_model()
@@ -3117,6 +3605,7 @@ class LLMAgentProcess(AgentProcess):
             provider=provider,
             current_provider=self._current_provider.name,
             current_model=self._current_model,
+            backend=self._backend_name,
         )
 
     def _current_model_info(self) -> LLMModelInfo | None:
@@ -3175,6 +3664,7 @@ class LLMAgentProcess(AgentProcess):
             thread_id=thread_id,
             source_message_id=source_message_id,
             provider=self._current_provider.name,
+            backend=self._backend_name,
             model=self._current_model,
             voice=self._current_voice,
             input_format=(

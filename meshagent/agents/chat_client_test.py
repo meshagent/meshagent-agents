@@ -24,8 +24,10 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_TURN_START,
+    AgentError,
     AgentThreadListEntry,
     AgentMessage,
+    AgentModelChanged,
     AgentConnectionStatus,
     AgentThreadStatus,
     AgentTextContentDelta,
@@ -83,6 +85,25 @@ class _RecordingChatClient(BaseChatClient):
 
     async def _send_agent_message(self, payload: AgentMessage) -> None:
         self.sent.append(payload.model_dump(mode="json"))
+
+
+def test_chat_thread_session_records_failed_turn_end_for_rendering() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    message = TurnEnded(
+        type=AGENT_EVENT_TURN_ENDED,
+        thread_id=session.thread_path,
+        turn_id="turn-1",
+        error=AgentError(
+            code="RoomException",
+            message="Error from OpenAI websocket: unknown parameter",
+        ),
+    )
+
+    session.add_agent_message(message)
+
+    assert session.messages == (message,)
+    assert session.pending_inputs == ()
 
 
 @pytest.mark.asyncio
@@ -289,6 +310,29 @@ async def test_chat_thread_session_tracks_active_turn_from_accepted_event() -> N
     )
 
     assert not session.interrupt()
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_send_text_uses_selected_backend_model() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    client._handle_agent_payload(
+        AgentModelChanged(
+            type="meshagent.agent.model.changed",
+            thread_id="/threads/test.thread",
+            backend="codex",
+            provider="openai",
+            model="gpt-5.5",
+            output_modalities=["text"],
+        ).model_dump(mode="json")
+    )
+
+    await session.send_text(text="hello")
+
+    assert client.sent[-1]["type"] == AGENT_MESSAGE_TURN_START
+    assert client.sent[-1]["backend"] == "codex"
+    assert client.sent[-1]["provider"] == "openai"
+    assert client.sent[-1]["model"] == "gpt-5.5"
 
 
 @pytest.mark.asyncio

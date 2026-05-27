@@ -603,13 +603,21 @@ class ChatThreadSession:
     async def open(
         self,
         *,
+        backend: str | None = None,
         load: bool | None = None,
         since_turn: str | None = None,
     ) -> None:
+        current_model = self.current_model
+        backend_name = (
+            backend
+            if backend is not None
+            else (current_model.backend if current_model is not None else None)
+        )
         await self.send(
             OpenThread(
                 type=AGENT_MESSAGE_THREAD_OPEN,
                 thread_id=self.thread_path,
+                backend=_normalized_string(backend_name),
                 load=load,
                 since_turn=since_turn,
             )
@@ -700,15 +708,18 @@ class ChatThreadSession:
         voice: str | None = None,
         output_modalities: Iterable[str] | None = None,
         sender_name: str | None = None,
+        backend: str | None = None,
     ) -> str:
         if self.has_thread_path:
             raise RoomException("chat thread session already started")
         resolved_message_id = _normalized_string(message_id) or str(uuid.uuid4())
         current_model = self.current_model
         provider_name = provider
+        backend_name = backend
         model_name = model
         voice_name = voice
         if current_model is not None:
+            backend_name = current_model.backend
             provider_name = current_model.provider
             model_name = current_model.model
             voice_name = current_model.voice
@@ -722,6 +733,7 @@ class ChatThreadSession:
             message_id=resolved_message_id,
             sender_name=_normalized_string(sender_name),
             provider=_normalized_string(provider_name),
+            backend=_normalized_string(backend_name),
             model=_normalized_string(model_name),
             voice=_normalized_string(voice_name),
             output_modalities=modalities or None,
@@ -765,6 +777,7 @@ class ChatThreadSession:
         steer: bool = False,
         turn_id: str | None = None,
         provider: str | None = None,
+        backend: str | None = None,
         model: str | None = None,
         voice: str | None = None,
         output_modalities: Iterable[str] | None = None,
@@ -785,15 +798,33 @@ class ChatThreadSession:
                 content=content,
             )
         else:
+            current_model = self.current_model
+            provider_name = provider
+            backend_name = backend
+            model_name = model
+            voice_name = voice
+            if current_model is not None:
+                backend_name = current_model.backend
+                provider_name = current_model.provider
+                model_name = current_model.model
+                voice_name = current_model.voice
+            modalities = list(
+                output_modalities
+                if output_modalities is not None
+                else (
+                    current_model.output_modalities if current_model is not None else ()
+                )
+            )
             payload = TurnStart(
                 type=AGENT_MESSAGE_TURN_START,
                 thread_id=self.thread_path,
                 message_id=resolved_message_id,
                 sender_name=_normalized_string(sender_name),
-                provider=_normalized_string(provider),
-                model=_normalized_string(model),
-                voice=_normalized_string(voice),
-                output_modalities=list(output_modalities or ()) or None,
+                provider=_normalized_string(provider_name),
+                backend=_normalized_string(backend_name),
+                model=_normalized_string(model_name),
+                voice=_normalized_string(voice_name),
+                output_modalities=modalities or None,
                 content=content,
             )
         self._mark_pending(
@@ -820,14 +851,17 @@ class ChatThreadSession:
         prompt: str,
         model: str | None = None,
         provider: str | None = None,
+        backend: str | None = None,
         output_modalities: Iterable[str] | None = None,
         on_message: Callable[[AgentMessage], Any] | None = None,
     ) -> str:
         content = [AgentTextContent(type="text", text=prompt)]
         current_model = self.current_model
         provider_name = provider
+        backend_name = backend
         model_name = model
         if current_model is not None:
+            backend_name = current_model.backend
             provider_name = current_model.provider
             model_name = current_model.model
         modalities = list(
@@ -839,6 +873,7 @@ class ChatThreadSession:
             input_message: StartThread | TurnStart = TurnStart(
                 type=AGENT_MESSAGE_TURN_START,
                 thread_id=self.thread_path,
+                backend=backend_name,
                 provider=provider_name,
                 model=model_name,
                 output_modalities=modalities or None,
@@ -847,6 +882,7 @@ class ChatThreadSession:
         else:
             input_message = StartThread(
                 type=AGENT_MESSAGE_THREAD_START,
+                backend=backend_name,
                 provider=provider_name,
                 model=model_name,
                 output_modalities=modalities or None,
@@ -1120,6 +1156,9 @@ class ChatThreadSession:
             turn_id = _normalized_string(message.turn_id)
             if turn_id is not None:
                 self._last_completed_turn_id = turn_id
+            if message.error is not None:
+                self._append_message(message)
+            return
         if isinstance(message, (StartThread, TurnStart, TurnSteer)):
             if _agent_input_content_text(message.content or []).strip() == "":
                 return
@@ -1361,6 +1400,7 @@ class ChatThreadSession:
                     thread_id=thread_id,
                     source_message_id=response.source_message_id,
                     provider=provider.name,
+                    backend=provider.backend,
                     model=model.name,
                     voice=model.default_output_voice,
                     input_format=model.input_format,
@@ -1387,12 +1427,14 @@ class ChatThreadSession:
         *,
         provider: str | None,
         model: str | None,
+        backend: str | None = None,
         voice: str | None = None,
     ) -> AgentModelChanged:
         payload = ChangeModel(
             type=AGENT_MESSAGE_MODEL_CHANGE,
             thread_id=self.thread_path,
             provider=provider,
+            backend=backend,
             model=model,
             voice=voice,
         )
@@ -1466,6 +1508,11 @@ class ChatThreadSession:
                     OpenThread(
                         type=AGENT_MESSAGE_THREAD_OPEN,
                         thread_id=thread_started.thread_id,
+                        backend=(
+                            self.current_model.backend
+                            if self.current_model is not None
+                            else None
+                        ),
                         load=False,
                         since_turn=None,
                     )
@@ -2131,6 +2178,11 @@ class WebSocketChatClient(BaseChatClient):
                 OpenThread(
                     type=AGENT_MESSAGE_THREAD_OPEN,
                     thread_id=session.thread_path,
+                    backend=(
+                        session.current_model.backend
+                        if session.current_model is not None
+                        else None
+                    ),
                     load=True,
                     since_turn=session.last_completed_turn_id,
                 )

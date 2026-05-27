@@ -160,6 +160,7 @@ class StartThread(AgentMessage):
         description=CHANNEL_SENDER_NAME_DESCRIPTION,
     )
     provider: Optional[str] = None
+    backend: Optional[str] = None
     model: Optional[str] = None
     voice: str | None = None
     output_modalities: list[Literal["text", "audio"]] | None = Field(
@@ -182,6 +183,7 @@ class TurnStart(AgentThreadMessage):
         description=CHANNEL_SENDER_NAME_DESCRIPTION,
     )
     provider: Optional[str] = None
+    backend: Optional[str] = None
     model: Optional[str] = None
     voice: str | None = None
     output_modalities: list[Literal["text", "audio"]] | None = Field(
@@ -293,6 +295,7 @@ class ClearThread(AgentThreadMessage):
 
 class OpenThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_OPEN]
+    backend: Optional[str] = None
     load: bool | None = None
     since_turn: str | None = None
 
@@ -413,6 +416,7 @@ class AgentProviderInfo(BaseModel):
     name: str
     friendly_name: str
     description: str | None = None
+    backend: str | None = None
     default_model: str
     models: list[AgentModelInfo] = Field(default_factory=list)
 
@@ -434,6 +438,7 @@ class ModelsResponse(AgentMessage):
 class ChangeModel(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_MODEL_CHANGE]
     provider: str | None = None
+    backend: str | None = None
     model: str | None = None
     voice: str | None = None
 
@@ -442,6 +447,7 @@ class AgentModelChanged(AgentThreadMessage):
     type: Literal[AGENT_EVENT_MODEL_CHANGED]
     source_message_id: str | None = None
     provider: str
+    backend: str | None = None
     model: str
     voice: str | None = None
     input_format: "AgentAudioFormat | None" = None
