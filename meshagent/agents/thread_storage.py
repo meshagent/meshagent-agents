@@ -24,12 +24,6 @@ if TYPE_CHECKING:
 THREAD_PATH_EXISTS_TIMEOUT_SECONDS = 2.0
 
 
-def thread_dir_for_namespace(*, thread_dir: str, namespace: str | None) -> str:
-    if namespace is None or namespace == "":
-        return thread_dir
-    return posixpath.join(thread_dir, namespace)
-
-
 @dataclass(frozen=True, slots=True)
 class ThreadListEntry:
     name: str
@@ -92,64 +86,111 @@ async def allocate_thread_path(
 
 
 class ThreadStorageRepository(Protocol):
-    @classmethod
-    def thread_list_path_for_dir(cls, *, thread_dir: str) -> str: ...
+    @property
+    def is_ephemeral(self) -> bool: ...
 
-    @classmethod
+    def thread_list_path(self) -> str: ...
+
     async def list_threads(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> ThreadListPage: ...
 
-    @classmethod
     async def upsert_thread(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         name: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
-    ) -> None: ...
+    ) -> ThreadListEntry | None: ...
 
-    @classmethod
     async def delete_thread(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         delete_storage: bool = True,
     ) -> None: ...
 
-    @classmethod
     async def rename_thread(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         name: str,
-    ) -> None: ...
+    ) -> ThreadListEntry | None: ...
 
-    @classmethod
     def watch_threads(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]: ...
+
+
+class NoopThreadStorageRepository:
+    @property
+    def is_ephemeral(self) -> bool:
+        return True
+
+    def thread_list_path(self) -> str:
+        return ""
+
+    async def list_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        return ThreadListPage(
+            threads=[],
+            total=0,
+            offset=max(0, int(offset)),
+            limit=max(1, min(200, int(limit))),
+        )
+
+    async def upsert_thread(
+        self,
+        *,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> ThreadListEntry | None:
+        del path
+        del name
+        del created_at
+        del modified_at
+        return None
+
+    async def delete_thread(
+        self,
+        *,
+        path: str,
+        delete_storage: bool = True,
+    ) -> None:
+        del path
+        del delete_storage
+
+    async def rename_thread(
+        self,
+        *,
+        path: str,
+        name: str,
+    ) -> ThreadListEntry | None:
+        del path
+        del name
+        return None
+
+    async def watch_threads(
+        self,
+        *,
+        poll_interval: float = 1.0,
+    ) -> AsyncIterator[ThreadListEvent]:
+        del poll_interval
+        await asyncio.Event().wait()
+        if False:
+            yield
 
 
 class ThreadStorage(Protocol):

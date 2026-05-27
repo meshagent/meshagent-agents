@@ -36,7 +36,13 @@ from meshagent.tools import FunctionTool, ToolContext, Toolkit, tool
 from opentelemetry import trace
 from pydantic_core import from_json as pydantic_core_from_json
 from .thread_adapter import default_format_message
-from .thread_storage import ThreadListEntry, ThreadListPage, ThreadStorage
+from .thread_storage import (
+    NoopThreadStorageRepository,
+    ThreadListEntry,
+    ThreadListPage,
+    ThreadStorage,
+    ThreadStorageRepository,
+)
 from .thread_status_publisher import ThreadStatusPublisher
 from .tool_call_accumulator import ToolCallAccumulator
 from .version import __version__ as agents_version
@@ -925,9 +931,17 @@ ThreadIsolationMode = Literal["global", "participant"]
 
 
 class AgentSupervisor:
-    def __init__(self, *, thread_isolation: ThreadIsolationMode = "global") -> None:
+    def __init__(
+        self,
+        *,
+        thread_isolation: ThreadIsolationMode = "global",
+        thread_storage_repository: ThreadStorageRepository | None = None,
+    ) -> None:
         self.channels: list[Channel] = []
         self.processes: list[AgentProcess] = []
+        self._thread_storage_repository = (
+            thread_storage_repository or NoopThreadStorageRepository()
+        )
         self._stop = asyncio.Event()
         self._state: SupervisorState = "stopped"
         self._run_task: asyncio.Task[None] | None = None
@@ -946,6 +960,10 @@ class AgentSupervisor:
     @property
     def state(self) -> SupervisorState:
         return self._state
+
+    @property
+    def thread_storage_repository(self) -> ThreadStorageRepository:
+        return self._thread_storage_repository
 
     def add_channel(self, channel: Channel) -> None:
         self.channels.append(channel)
@@ -1280,10 +1298,11 @@ class AgentSupervisor:
         start_thread: StartThread,
         sender: Participant | None,
     ) -> ThreadListEntry | None:
-        del thread_id
-        del start_thread
         del sender
-        return None
+        return await self.thread_storage_repository.upsert_thread(
+            path=thread_id,
+            name=self.thread_list_name_for_start_thread(start_thread),
+        )
 
     async def on_thread_deleted(
         self,
@@ -1291,8 +1310,10 @@ class AgentSupervisor:
         delete_thread: DeleteThread,
         sender: Participant | None,
     ) -> None:
-        del delete_thread
         del sender
+        await self.thread_storage_repository.delete_thread(
+            path=delete_thread.thread_id,
+        )
 
     async def on_thread_renamed(
         self,
@@ -1300,9 +1321,14 @@ class AgentSupervisor:
         rename_thread: RenameThread,
         sender: Participant | None,
     ) -> ThreadListEntry | None:
-        del rename_thread
         del sender
-        return None
+        name = " ".join(rename_thread.name.split())
+        if name == "":
+            return None
+        return await self.thread_storage_repository.rename_thread(
+            path=rename_thread.thread_id,
+            name=name,
+        )
 
     async def list_threads(
         self,
@@ -1311,12 +1337,27 @@ class AgentSupervisor:
         sender: Participant | None,
     ) -> ThreadListPage:
         del sender
-        return ThreadListPage(
-            threads=[],
-            total=0,
-            offset=list_threads.offset,
+        return await self.thread_storage_repository.list_threads(
             limit=list_threads.limit,
+            offset=list_threads.offset,
         )
+
+    def thread_list_name_for_start_thread(self, start_thread: StartThread) -> str:
+        if isinstance(start_thread.name, str) and start_thread.name.strip() != "":
+            return start_thread.name.strip()
+
+        text_parts: list[str] = []
+        attachment_count = 0
+        for item in start_thread.content or []:
+            if isinstance(item, AgentTextContent) and item.text.strip() != "":
+                text_parts.extend(item.text.strip().split())
+            elif isinstance(item, AgentFileContent):
+                attachment_count += 1
+        if len(text_parts) > 0:
+            return " ".join(text_parts[:6])
+        if attachment_count > 0:
+            return "Attachment Thread"
+        return "New Chat"
 
     async def route(self, message: Message) -> None:
         if self._stop.is_set() or self._state == "stopping":
@@ -1671,6 +1712,21 @@ class AgentSupervisor:
             if message.source is channel:
                 continue
             channel.send(message)
+
+    def _send_thread_list_response(
+        self,
+        *,
+        request: Message,
+        response: ThreadsListed,
+    ) -> None:
+        if request.sender is not None:
+            for channel in self.channels:
+                if channel.send_agent_message_to_participant(
+                    participant=request.sender,
+                    payload=response,
+                ):
+                    return
+        self._send_to_channels(Message(data=response, sender=request.sender))
 
     def _agent_thread_list_entry(self, entry: ThreadListEntry) -> AgentThreadListEntry:
         return AgentThreadListEntry(
@@ -2271,14 +2327,7 @@ class AgentSupervisor:
                 offset=page.offset,
                 limit=page.limit,
             )
-            if message.sender is not None:
-                for channel in self.channels:
-                    if channel.send_agent_message_to_participant(
-                        participant=message.sender,
-                        payload=response,
-                    ):
-                        return
-            self._send_to_channels(Message(data=response, sender=message.sender))
+            self._send_thread_list_response(request=message, response=response)
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_DELETE:

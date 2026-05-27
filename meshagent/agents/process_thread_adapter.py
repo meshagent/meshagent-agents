@@ -88,7 +88,6 @@ from .thread_storage import (
     ThreadListEvent,
     ThreadListPage,
     ThreadStorage,
-    thread_dir_for_namespace,
 )
 from .stream_content_accumulator import FileContentAccumulator, TextContentAccumulator
 from .tool_call_accumulator import ToolCallAccumulator
@@ -544,29 +543,30 @@ def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
 
 
 class MeshDocumentThreadStorage(ThreadStorage):
+    @property
+    def is_ephemeral(self) -> bool:
+        return False
+
     @classmethod
     def thread_list_path_for_dir(cls, *, thread_dir: str) -> str:
         return posixpath.join(thread_dir.strip().rstrip("/"), "index.threadl")
 
-    @classmethod
+    def thread_list_path(self) -> str:
+        return self.thread_list_path_for_dir(thread_dir=self._thread_dir_or_raise())
+
     async def list_threads(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> ThreadListPage:
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
+        thread_dir = self._thread_dir_or_raise()
         normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
             limit=limit,
             offset=offset,
         )
-        entries = await cls._read_thread_list_entries(
-            room=room,
+        entries = await self._read_thread_list_entries(
+            room=self._room,
             thread_dir=thread_dir,
         )
         sorted_entries = _sort_thread_list_entries(entries)
@@ -580,27 +580,22 @@ class MeshDocumentThreadStorage(ThreadStorage):
             limit=normalized_limit,
         )
 
-    @classmethod
     async def upsert_thread(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         name: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
-    ) -> None:
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
-        document = await room.sync.open(
-            path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
+    ) -> ThreadListEntry | None:
+        thread_dir = self._thread_dir_or_raise()
+        index_path = self.thread_list_path_for_dir(thread_dir=thread_dir)
+        document = await self._room.sync.open(
+            path=index_path,
             schema=thread_list_schema,
         )
         try:
-            cls._upsert_thread_list_document_entry(
+            return self._upsert_thread_list_document_entry(
                 document=document,
                 path=path,
                 name=name,
@@ -608,25 +603,18 @@ class MeshDocumentThreadStorage(ThreadStorage):
                 modified_at=modified_at,
             )
         finally:
-            await room.sync.close(
-                path=cls.thread_list_path_for_dir(thread_dir=thread_dir)
-            )
+            await self._room.sync.close(path=index_path)
 
-    @classmethod
     async def delete_thread(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         delete_storage: bool = True,
     ) -> None:
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
-        document = await room.sync.open(
-            path=cls.thread_list_path_for_dir(thread_dir=thread_dir),
+        thread_dir = self._thread_dir_or_raise()
+        index_path = self.thread_list_path_for_dir(thread_dir=thread_dir)
+        document = await self._room.sync.open(
+            path=index_path,
             schema=thread_list_schema,
         )
         try:
@@ -635,51 +623,38 @@ class MeshDocumentThreadStorage(ThreadStorage):
                     child.delete()
                     break
         finally:
-            await room.sync.close(
-                path=cls.thread_list_path_for_dir(thread_dir=thread_dir)
-            )
+            await self._room.sync.close(path=index_path)
 
         if delete_storage:
             with contextlib.suppress(Exception):
-                await room.storage.delete(path=path)
+                await self._room.storage.delete(path=path)
 
-    @classmethod
     async def rename_thread(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         name: str,
-    ) -> None:
+    ) -> ThreadListEntry | None:
         resolved_name = name.strip()
         if resolved_name == "":
             raise ValueError("thread name is required")
-        await cls.upsert_thread(
-            room=room,
-            thread_dir=thread_dir,
-            namespace=namespace,
+        return await self.upsert_thread(
             path=path,
             name=resolved_name,
             modified_at=_utc_now_iso(),
         )
 
-    @classmethod
     async def watch_threads(
-        cls,
+        self,
         *,
-        room: RoomClient,
-        thread_dir: str,
-        namespace: str | None = None,
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]:
         del poll_interval
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
+        thread_dir = self._thread_dir_or_raise()
+        index_path = self.thread_list_path_for_dir(thread_dir=thread_dir)
+        document = await self._room.sync.open(
+            path=index_path, schema=thread_list_schema
         )
-        index_path = cls.thread_list_path_for_dir(thread_dir=thread_dir)
-        document = await room.sync.open(path=index_path, schema=thread_list_schema)
         mutation_queue: asyncio.Queue[None] = asyncio.Queue()
 
         def queue_mutation(*args: object) -> None:
@@ -691,14 +666,14 @@ class MeshDocumentThreadStorage(ThreadStorage):
         document.on("updated")(queue_mutation)
         previous = {
             entry.path: entry
-            for entry in cls._entries_from_thread_list_document(document=document)
+            for entry in self._entries_from_thread_list_document(document=document)
         }
         try:
             while True:
                 await mutation_queue.get()
                 current = {
                     entry.path: entry
-                    for entry in cls._entries_from_thread_list_document(
+                    for entry in self._entries_from_thread_list_document(
                         document=document,
                     )
                 }
@@ -715,7 +690,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
                         yield ThreadListEvent(type="deleted", path=path, entry=prior)
                 previous = current
         finally:
-            await room.sync.close(path=index_path)
+            await self._room.sync.close(path=index_path)
 
     @classmethod
     async def _read_thread_list_entries(
@@ -771,7 +746,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         name: str | None,
         created_at: str | None,
         modified_at: str | None,
-    ) -> None:
+    ) -> ThreadListEntry:
         now = _utc_now_iso()
         provided_name = name.strip() if isinstance(name, str) else ""
         existing: Element | None = None
@@ -806,7 +781,12 @@ class MeshDocumentThreadStorage(ThreadStorage):
                     "modified_at": resolved_modified_at,
                 },
             )
-            return
+            return ThreadListEntry(
+                name=resolved_name,
+                path=path,
+                created_at=resolved_created_at,
+                modified_at=resolved_modified_at,
+            )
 
         existing.set_attribute("path", path)
         if provided_name != "":
@@ -818,6 +798,12 @@ class MeshDocumentThreadStorage(ThreadStorage):
             resolved_created_at = existing_created_at.strip()
         existing.set_attribute("created_at", resolved_created_at)
         existing.set_attribute("modified_at", resolved_modified_at)
+        return ThreadListEntry(
+            name=provided_name if provided_name != "" else resolved_name,
+            path=path,
+            created_at=resolved_created_at,
+            modified_at=resolved_modified_at,
+        )
 
     @staticmethod
     def _default_thread_name(*, path: str) -> str:
@@ -837,17 +823,21 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self,
         *,
         room: RoomClient,
-        path: str,
+        path: str | None = None,
+        thread_dir: str | None = None,
         max_append_message_count: int = 25,
     ) -> None:
         self._room = room
-        self._thread_path = path
+        self._thread_path = "" if path is None else path
+        self._thread_dir = thread_dir
         self._processor_task: asyncio.Task[None] | None = None
         self._llm_messages: asyncio.Queue[Any] = asyncio.Queue()
         self._thread: MeshDocument | None = None
         self._format_message = default_format_message
         self._max_append_message_count = max_append_message_count
-        self._images_db = ImagesDataset(self._room.datasets)
+        self._images_db: ImagesDataset | None = None
+        if path is not None:
+            self._images_db = ImagesDataset(self._room.datasets)
         self._active_message_elements_by_key: dict[str, Element] = {}
         self._active_reasoning_elements_by_item_id: dict[str, Element] = {}
         self._active_event_elements_by_key: dict[str, Element] = {}
@@ -873,6 +863,18 @@ class MeshDocumentThreadStorage(ThreadStorage):
         self._thread_status_lines_added_value: int | None = None
         self._thread_status_lines_removed_value: int | None = None
         self._restore_message_count: int | None = None
+
+    def _thread_dir_or_raise(self) -> str:
+        if self._thread_dir is None or self._thread_dir.strip() == "":
+            raise RuntimeError("mesh document thread repository requires thread_dir")
+        return self._thread_dir
+
+    def _images_dataset(self) -> ImagesDataset:
+        images_db = self._images_db
+        if images_db is None:
+            images_db = ImagesDataset(self._room.datasets)
+            self._images_db = images_db
+        return images_db
 
     async def start(self) -> None:
         self._thread = await self._room.sync.open(
@@ -2176,7 +2178,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
             created_by = ""
 
         try:
-            saved_image = await self._images_db.save(
+            saved_image = await self._images_dataset().save(
                 data=image_bytes,
                 mime_type=mime_type,
                 created_by=created_by,

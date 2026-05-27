@@ -210,25 +210,28 @@ class ThreadedChannel(Channel):
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def _thread_list_index_path(self) -> str | None:
+        repository = self._thread_storage_repository()
+        if repository is not None:
+            return repository.thread_list_path()
+        thread_dir = self._thread_list_dir()
+        return (
+            None if thread_dir is None else posixpath.join(thread_dir, "index.threadl")
+        )
+
+    def _thread_storage_repository(self) -> ThreadStorageRepository | None:
         thread_dir = self._thread_list_dir()
         if thread_dir is None:
             return None
-        storage_class = self._thread_storage_class()
-        if storage_class is not None:
-            return storage_class.thread_list_path_for_dir(thread_dir=thread_dir)
-        return posixpath.join(thread_dir, "index.threadl")
-
-    def _thread_storage_class(self) -> type[ThreadStorageRepository] | None:
         if self._thread_url_scheme == "dataset://":
             from .dataset_thread_storage import DatasetThreadStorage
 
-            return DatasetThreadStorage
+            return DatasetThreadStorage(room=self._room, thread_dir=thread_dir)
         if self._thread_url_scheme == "tmp://":
             return None
 
         from .process_thread_adapter import MeshDocumentThreadStorage
 
-        return MeshDocumentThreadStorage
+        return MeshDocumentThreadStorage(room=self._room, thread_dir=thread_dir)
 
     def _thread_list_entry_name_for_path(self, *, path: str) -> str:
         filename = posixpath.basename(self._thread_path_from_url(path=path.strip()))
@@ -281,15 +284,13 @@ class ThreadedChannel(Channel):
         created_at: str | None = None,
         modified_at: str | None = None,
     ) -> None:
-        storage_class = self._thread_storage_class()
-        if self._thread_list_document is None and storage_class is not None:
+        repository = self._thread_storage_repository()
+        if self._thread_list_document is None and repository is not None:
             thread_dir = self._thread_list_dir()
             if thread_dir is None or not self._is_index_managed_path(path=path):
                 return
             task = asyncio.create_task(
-                storage_class.upsert_thread(
-                    room=self._room,
-                    thread_dir=thread_dir,
+                repository.upsert_thread(
                     path=path,
                     name=name,
                     created_at=created_at,
@@ -506,11 +507,9 @@ class ThreadedChannel(Channel):
                 limit=normalized_limit,
             )
 
-        storage_class = self._thread_storage_class()
-        if self._thread_list_document is None and storage_class is not None:
-            return await storage_class.list_threads(
-                room=self._room,
-                thread_dir=thread_dir,
+        repository = self._thread_storage_repository()
+        if self._thread_list_document is None and repository is not None:
+            return await repository.list_threads(
                 limit=normalized_limit,
                 offset=normalized_offset,
             )

@@ -96,7 +96,6 @@ from .thread_storage import (
     ThreadListEvent,
     ThreadListPage,
     ThreadStorage,
-    thread_dir_for_namespace,
 )
 
 if TYPE_CHECKING:
@@ -415,6 +414,10 @@ class _ActiveImageGeneration:
 
 
 class DatasetThreadStorage(ThreadStorage):
+    @property
+    def is_ephemeral(self) -> bool:
+        return False
+
     @staticmethod
     def _client_from_room(*, room: RoomClient | None, client: DatasetsClient | None):
         if client is not None:
@@ -433,26 +436,22 @@ class DatasetThreadStorage(ThreadStorage):
             raise ValueError("dataset thread list directory is required")
         return f"{_DATASET_THREAD_URL_PREFIX}{normalized}/index"
 
-    @classmethod
+    def thread_list_path(self) -> str:
+        return self.thread_list_path_for_dir(thread_dir=self._thread_dir_or_raise())
+
     async def list_threads(
-        cls,
+        self,
         *,
-        room: RoomClient | None = None,
-        client: DatasetsClient | None = None,
-        thread_dir: str,
-        namespace: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> ThreadListPage:
-        datasets = cls._client_from_room(room=room, client=client)
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
+        datasets = self._client
+        thread_dir = self._thread_dir_or_raise()
         normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
             limit=limit,
             offset=offset,
         )
-        entries = await cls._read_thread_list_entries(
+        entries = await self._read_thread_list_entries(
             client=datasets,
             thread_dir=thread_dir,
         )
@@ -467,25 +466,18 @@ class DatasetThreadStorage(ThreadStorage):
             limit=normalized_limit,
         )
 
-    @classmethod
     async def upsert_thread(
-        cls,
+        self,
         *,
-        room: RoomClient | None = None,
-        client: DatasetsClient | None = None,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         name: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
-    ) -> None:
-        datasets = cls._client_from_room(room=room, client=client)
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
-        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+    ) -> ThreadListEntry | None:
+        datasets = self._client
+        thread_dir = self._thread_dir_or_raise()
+        table_name, namespace = self._thread_list_table(thread_dir=thread_dir)
+        await self._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
         now = _now_iso()
         resolved_created_at = (
             created_at.strip()
@@ -497,7 +489,7 @@ class DatasetThreadStorage(ThreadStorage):
             if isinstance(modified_at, str) and modified_at.strip() != ""
             else resolved_created_at
         )
-        resolved_name = cls.default_thread_name(path=path, name=name)
+        resolved_name = self.default_thread_name(path=path, name=name)
         await datasets.merge(
             table=table_name,
             namespace=namespace,
@@ -511,24 +503,23 @@ class DatasetThreadStorage(ThreadStorage):
                 }
             ],
         )
+        return ThreadListEntry(
+            name=resolved_name,
+            path=path,
+            created_at=resolved_created_at,
+            modified_at=resolved_modified_at,
+        )
 
-    @classmethod
     async def delete_thread(
-        cls,
+        self,
         *,
-        room: RoomClient | None = None,
-        client: DatasetsClient | None = None,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         delete_storage: bool = True,
     ) -> None:
-        datasets = cls._client_from_room(room=room, client=client)
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
-        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        datasets = self._client
+        thread_dir = self._thread_dir_or_raise()
+        table_name, namespace = self._thread_list_table(thread_dir=thread_dir)
+        await self._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
         await datasets.delete(
             table=table_name,
             namespace=namespace,
@@ -545,49 +536,42 @@ class DatasetThreadStorage(ThreadStorage):
                 ignore_missing=True,
             )
 
-    @classmethod
     async def rename_thread(
-        cls,
+        self,
         *,
-        room: RoomClient | None = None,
-        client: DatasetsClient | None = None,
-        thread_dir: str,
-        namespace: str | None = None,
         path: str,
         name: str,
-    ) -> None:
+    ) -> ThreadListEntry | None:
         resolved_name = name.strip()
         if resolved_name == "":
             raise ValueError("thread name is required")
-        datasets = cls._client_from_room(room=room, client=client)
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
-        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        datasets = self._client
+        thread_dir = self._thread_dir_or_raise()
+        table_name, namespace = self._thread_list_table(thread_dir=thread_dir)
+        await self._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        modified_at = _now_iso()
         await datasets.update(
             table=table_name,
             namespace=namespace,
             where=f"path = {_dataset_sql_string_literal(path)}",
-            values={"name": resolved_name, "modified_at": _now_iso()},
+            values={"name": resolved_name, "modified_at": modified_at},
+        )
+        return ThreadListEntry(
+            name=resolved_name,
+            path=path,
+            created_at="",
+            modified_at=modified_at,
         )
 
-    @classmethod
     async def watch_threads(
-        cls,
+        self,
         *,
-        room: RoomClient | None = None,
-        client: DatasetsClient | None = None,
-        thread_dir: str,
-        namespace: str | None = None,
         poll_interval: float = 1.0,
     ) -> AsyncIterator[ThreadListEvent]:
-        datasets = cls._client_from_room(room=room, client=client)
-        thread_dir = thread_dir_for_namespace(
-            thread_dir=thread_dir, namespace=namespace
-        )
-        table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        datasets = self._client
+        thread_dir = self._thread_dir_or_raise()
+        table_name, namespace = self._thread_list_table(thread_dir=thread_dir)
+        await self._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
         previous: dict[str, ThreadListEntry] = {}
         async for event in datasets.watch_table(
             table=table_name,
@@ -598,7 +582,7 @@ class DatasetThreadStorage(ThreadStorage):
                 continue
             if event.table is None:
                 continue
-            entries = cls._entries_from_records(records=event.table.to_pylist())
+            entries = self._entries_from_records(records=event.table.to_pylist())
             if event.phase == "initial":
                 for entry in entries:
                     previous[entry.path] = entry
@@ -725,19 +709,26 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         room: RoomClient | None = None,
         client: DatasetsClient | None = None,
-        path: str,
+        path: str | None = None,
+        thread_dir: str | None = None,
         max_append_message_count: int = 25,
         optimize_after_append_count: int = 25,
         persist_deltas: bool = False,
         persist_audio_input: bool = False,
     ) -> None:
         self._client = self._client_from_room(room=room, client=client)
-        normalized_path = _normalize_dataset_thread_storage_path(path=path)
-        self._path = normalized_path.url
-        path_parts = _normalize_path_parts(path=normalized_path.table_path)
-        self._table_name = path_parts[-1]
-        namespace = path_parts[:-1]
-        self._namespace = namespace if len(namespace) > 0 else None
+        self._thread_dir = thread_dir
+        if path is None:
+            self._path = ""
+            self._table_name = ""
+            self._namespace = None
+        else:
+            normalized_path = _normalize_dataset_thread_storage_path(path=path)
+            self._path = normalized_path.url
+            path_parts = _normalize_path_parts(path=normalized_path.table_path)
+            self._table_name = path_parts[-1]
+            namespace = path_parts[:-1]
+            self._namespace = namespace if len(namespace) > 0 else None
         self._max_append_message_count = max_append_message_count
         self._optimize_after_append_count = optimize_after_append_count
         self._persist_deltas = persist_deltas
@@ -765,6 +756,11 @@ class DatasetThreadStorage(ThreadStorage):
             str, _ActiveImageGeneration
         ] = {}
         self._pending_insert_rows: list[_StoredThreadRow] = []
+
+    def _thread_dir_or_raise(self) -> str:
+        if self._thread_dir is None or self._thread_dir.strip() == "":
+            raise RuntimeError("dataset thread repository requires thread_dir")
+        return self._thread_dir
 
     @property
     def path(self) -> str:
