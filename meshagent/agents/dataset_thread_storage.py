@@ -96,6 +96,7 @@ from .thread_storage import (
     ThreadListEvent,
     ThreadListPage,
     ThreadStorage,
+    thread_dir_for_namespace,
 )
 
 if TYPE_CHECKING:
@@ -106,6 +107,17 @@ logger = logging.getLogger("agent.dataset_thread_storage")
 
 _DATASET_THREAD_URL_PREFIX = "dataset://"
 _IMAGE_SIZE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+
+
+class _HybridDatasetThreadStorageMethod:
+    def __init__(self, instance_method, class_method) -> None:
+        self._instance_method = instance_method
+        self._class_method = class_method
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self._class_method.__get__(None, owner)
+        return self._instance_method.__get__(instance, owner)
 
 
 def _is_uuid_like(value: str) -> bool:
@@ -439,7 +451,7 @@ class DatasetThreadStorage(ThreadStorage):
     def thread_list_path(self) -> str:
         return self.thread_list_path_for_dir(thread_dir=self._thread_dir_or_raise())
 
-    async def list_threads(
+    async def _list_threads(
         self,
         *,
         limit: int = 20,
@@ -466,7 +478,45 @@ class DatasetThreadStorage(ThreadStorage):
             limit=normalized_limit,
         )
 
-    async def upsert_thread(
+    @classmethod
+    async def _list_threads_with_client(
+        cls,
+        *,
+        client: DatasetsClient,
+        thread_dir: str,
+        namespace: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        resolved_thread_dir = thread_dir_for_namespace(
+            thread_dir=thread_dir,
+            namespace=namespace,
+        )
+        normalized_limit, normalized_offset = _normalize_thread_list_limit_offset(
+            limit=limit,
+            offset=offset,
+        )
+        entries = await cls._read_thread_list_entries(
+            client=client,
+            thread_dir=resolved_thread_dir,
+        )
+        sorted_entries = _sort_thread_list_entries(entries)
+        selected = sorted_entries[
+            normalized_offset : normalized_offset + normalized_limit
+        ]
+        return ThreadListPage(
+            threads=selected,
+            total=len(sorted_entries),
+            offset=normalized_offset,
+            limit=normalized_limit,
+        )
+
+    list_threads = _HybridDatasetThreadStorageMethod(
+        _list_threads,
+        _list_threads_with_client,
+    )
+
+    async def _upsert_thread(
         self,
         *,
         path: str,
@@ -510,7 +560,38 @@ class DatasetThreadStorage(ThreadStorage):
             modified_at=resolved_modified_at,
         )
 
-    async def delete_thread(
+    @classmethod
+    async def _upsert_thread_with_client(
+        cls,
+        *,
+        client: DatasetsClient,
+        thread_dir: str,
+        path: str,
+        name: str | None = None,
+        namespace: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> ThreadListEntry | None:
+        repository = cls(
+            client=client,
+            thread_dir=thread_dir_for_namespace(
+                thread_dir=thread_dir,
+                namespace=namespace,
+            ),
+        )
+        return await repository._upsert_thread(
+            path=path,
+            name=name,
+            created_at=created_at,
+            modified_at=modified_at,
+        )
+
+    upsert_thread = _HybridDatasetThreadStorageMethod(
+        _upsert_thread,
+        _upsert_thread_with_client,
+    )
+
+    async def _delete_thread(
         self,
         *,
         path: str,
@@ -536,7 +617,31 @@ class DatasetThreadStorage(ThreadStorage):
                 ignore_missing=True,
             )
 
-    async def rename_thread(
+    @classmethod
+    async def _delete_thread_with_client(
+        cls,
+        *,
+        client: DatasetsClient,
+        thread_dir: str,
+        path: str,
+        namespace: str | None = None,
+        delete_storage: bool = True,
+    ) -> None:
+        repository = cls(
+            client=client,
+            thread_dir=thread_dir_for_namespace(
+                thread_dir=thread_dir,
+                namespace=namespace,
+            ),
+        )
+        await repository._delete_thread(path=path, delete_storage=delete_storage)
+
+    delete_thread = _HybridDatasetThreadStorageMethod(
+        _delete_thread,
+        _delete_thread_with_client,
+    )
+
+    async def _rename_thread(
         self,
         *,
         path: str,
@@ -562,6 +667,30 @@ class DatasetThreadStorage(ThreadStorage):
             created_at="",
             modified_at=modified_at,
         )
+
+    @classmethod
+    async def _rename_thread_with_client(
+        cls,
+        *,
+        client: DatasetsClient,
+        thread_dir: str,
+        path: str,
+        name: str,
+        namespace: str | None = None,
+    ) -> ThreadListEntry | None:
+        repository = cls(
+            client=client,
+            thread_dir=thread_dir_for_namespace(
+                thread_dir=thread_dir,
+                namespace=namespace,
+            ),
+        )
+        return await repository._rename_thread(path=path, name=name)
+
+    rename_thread = _HybridDatasetThreadStorageMethod(
+        _rename_thread,
+        _rename_thread_with_client,
+    )
 
     async def watch_threads(
         self,

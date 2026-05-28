@@ -24,6 +24,24 @@ if TYPE_CHECKING:
 THREAD_PATH_EXISTS_TIMEOUT_SECONDS = 2.0
 
 
+def thread_dir_for_namespace(*, thread_dir: str, namespace: str | None) -> str:
+    normalized_thread_dir = thread_dir.strip().strip("/")
+    if normalized_thread_dir == "":
+        raise ValueError("thread_dir must not be empty")
+
+    if namespace is None:
+        return normalized_thread_dir
+
+    normalized_namespace = namespace.strip().strip("/")
+    if normalized_namespace == "":
+        return normalized_thread_dir
+
+    namespace_parts = normalized_namespace.split("/")
+    if any(part in {"", ".", ".."} for part in namespace_parts):
+        raise ValueError("namespace must not contain empty or relative path parts")
+    return posixpath.join(normalized_thread_dir, *namespace_parts)
+
+
 @dataclass(frozen=True, slots=True)
 class ThreadListEntry:
     name: str
