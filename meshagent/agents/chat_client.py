@@ -849,13 +849,17 @@ class ChatThreadSession:
         self,
         *,
         prompt: str,
+        attachments: list[AgentFileContent] | None = None,
         model: str | None = None,
         provider: str | None = None,
         backend: str | None = None,
         output_modalities: Iterable[str] | None = None,
         on_message: Callable[[AgentMessage], Any] | None = None,
     ) -> str:
-        content = [AgentTextContent(type="text", text=prompt)]
+        content: list[AgentTextContent | AgentFileContent] = [
+            AgentTextContent(type="text", text=prompt),
+            *(attachments or []),
+        ]
         current_model = self.current_model
         provider_name = provider
         backend_name = backend
