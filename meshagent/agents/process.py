@@ -998,6 +998,130 @@ class LLMBackend:
         return None
 
 
+class ChatBackend:
+    def __init__(
+        self,
+        *,
+        name: str = "chat",
+        thread_id_factory: Callable[[StartThread, Participant | None], Awaitable[str]],
+        process_factory: Callable[[str, str], AgentProcess] | None = None,
+    ) -> None:
+        self._name = name
+        self._process_factory = process_factory
+        self._thread_id_factory = thread_id_factory
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def model_providers(
+        self,
+        *,
+        current_backend: str | None,
+        current_provider: str | None,
+        current_model: str | None,
+    ) -> list[AgentProviderInfo]:
+        provider_name = current_provider or "chat"
+        model_name = current_model or "none"
+        return [
+            AgentProviderInfo(
+                name="chat",
+                friendly_name="Chat",
+                description="Chat without an agent response.",
+                backend=self._name,
+                default_model="none",
+                models=[
+                    AgentModelInfo(
+                        name="none",
+                        friendly_name="None",
+                        description="Accept turns and end them without generating a response.",
+                        active=(
+                            current_backend == self._name
+                            and provider_name == "chat"
+                            and model_name == "none"
+                        ),
+                    )
+                ],
+            )
+        ]
+
+    async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        if (
+            turn_start.backend is not None
+            and turn_start.backend.strip() != ""
+            and turn_start.backend != self._name
+        ):
+            return AgentError(
+                message=f"unknown backend {turn_start.backend!r}",
+                code="unknown_backend",
+            )
+        if turn_start.provider not in (None, "", "chat"):
+            return AgentError(
+                message=f"unknown provider {turn_start.provider!r}",
+                code="unknown_provider",
+            )
+        if turn_start.model not in (None, "", "none"):
+            return AgentError(
+                message=f"unknown model {turn_start.model!r} for provider 'chat'; available models: none",
+                code="unknown_model",
+            )
+        unsupported_output_modalities = [
+            output
+            for output in (turn_start.output_modalities or [])
+            if output != "text"
+        ]
+        if len(unsupported_output_modalities) > 0:
+            unsupported = ", ".join(
+                repr(item) for item in unsupported_output_modalities
+            )
+            return AgentError(
+                message=f"model 'none' does not support {unsupported} output modalities",
+                code="unsupported_modality",
+            )
+        return None
+
+    async def create_realtime_connection(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> Any:
+        del supervisor
+        del thread_id
+        del start_thread
+        del sender
+        return None
+
+    async def create_thread_id(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del supervisor
+        return await self._thread_id_factory(start_thread, sender)
+
+    def create_thread_process(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        thread_id: str,
+    ) -> AgentProcess:
+        del supervisor
+        if self._process_factory is not None:
+            return self._process_factory(thread_id, self._name)
+        return ChatAgentProcess(thread_id=thread_id, backend=self._name)
+
+    async def on_start(self) -> None:
+        return None
+
+    async def on_stop(self) -> None:
+        return None
+
+
 class Channel:
     def __init__(self) -> None:
         self._supervisor: AgentSupervisor | None = None
@@ -3184,6 +3308,24 @@ class AgentProcess:
         del participant_id
         return None
 
+    async def _send_thread_open_response(
+        self,
+        *,
+        request_message: Message,
+        payload: AgentMessage,
+    ) -> None:
+        source = request_message.source
+        sender = request_message.sender
+        if source is not None and sender is not None and isinstance(source, Channel):
+            sent = await source.send_agent_message_to_participant_and_wait(
+                participant=sender,
+                payload=payload,
+            )
+            if sent:
+                return
+
+        AgentProcess.emit(self, sender=sender, payload=payload)
+
     async def run(self) -> None:
         while not self._stop.is_set():
             with contextlib.suppress(asyncio.QueueShutDown):
@@ -3216,6 +3358,151 @@ class AgentProcess:
                 self._supervisor = None
                 self._run_task = None
                 self._state = "stopped"
+
+
+class ChatAgentProcess(AgentProcess):
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        backend: str = "chat",
+        thread_storage: ThreadStorage | None = None,
+    ) -> None:
+        super().__init__(
+            thread_id=thread_id,
+            backend=backend,
+            thread_storage=thread_storage,
+        )
+        self._agent_messages: list[AgentThreadMessage] = []
+
+    def handles(self, message: Message) -> bool:
+        return message.data.type in {
+            AGENT_MESSAGE_THREAD_OPEN,
+            AGENT_MESSAGE_TURN_START,
+        }
+
+    def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:
+        thread_storage = self.thread_storage
+        if (
+            thread_storage is not None
+            and isinstance(payload, AgentThreadMessage)
+            and payload.thread_id == self.thread_id
+        ):
+            thread_storage.push_message(message=payload, sender=sender)
+
+        if (
+            isinstance(payload, AgentThreadMessage)
+            and payload.thread_id == self.thread_id
+        ):
+            self._agent_messages.append(payload)
+
+        super().emit(sender=sender, payload=payload)
+
+    async def on_message(self, message: Message) -> None:
+        if isinstance(message.data, OpenThread):
+            await self._on_thread_open(message=message, request=message.data)
+            return
+
+        if not isinstance(message.data, TurnStart):
+            return
+
+        turn_start = message.data
+        turn_id = turn_start.turn_id or str(uuid.uuid4())
+        turn_start = turn_start.model_copy(update={"turn_id": turn_id})
+        thread_storage = self.thread_storage
+        if thread_storage is not None and turn_start.thread_id == self.thread_id:
+            thread_storage.push_message(message=turn_start, sender=message.sender)
+        self._agent_messages.append(turn_start)
+
+        self.emit(
+            sender=message.sender,
+            payload=TurnStartAccepted(
+                type=AGENT_EVENT_TURN_START_ACCEPTED,
+                thread_id=turn_start.thread_id,
+                turn_id=turn_id,
+                source_message_id=turn_start.message_id,
+                content=turn_start.content,
+                sender_name=turn_start.sender_name,
+            ),
+        )
+        self.emit(
+            sender=message.sender,
+            payload=TurnStarted(
+                type=AGENT_EVENT_TURN_STARTED,
+                thread_id=turn_start.thread_id,
+                turn_id=turn_id,
+                source_message_id=turn_start.message_id,
+            ),
+        )
+        self.emit(
+            sender=message.sender,
+            payload=TurnEnded(
+                type=AGENT_EVENT_TURN_ENDED,
+                thread_id=turn_start.thread_id,
+                turn_id=turn_id,
+            ),
+        )
+
+    async def _on_thread_open(self, *, message: Message, request: OpenThread) -> None:
+        thread_storage = self.thread_storage
+        if thread_storage is not None:
+            await thread_storage.wait_until_ready()
+
+        if request.load is not True:
+            return
+
+        if thread_storage is not None:
+            stored_messages = thread_storage.agent_messages()
+        else:
+            stored_messages = []
+        messages = list(stored_messages)
+        for live_message in self._agent_messages:
+            if live_message not in messages:
+                messages.append(live_message)
+
+        for stored_message in self._agent_messages_since_turn(
+            messages=messages,
+            thread_id=request.thread_id,
+            since_turn=request.since_turn,
+        ):
+            await self._send_thread_open_response(
+                request_message=message,
+                payload=stored_message,
+            )
+
+        await self._send_thread_open_response(
+            request_message=message,
+            payload=ThreadLoaded(
+                type=AGENT_EVENT_THREAD_LOADED,
+                thread_id=request.thread_id,
+                source_message_id=request.message_id,
+                since_turn=request.since_turn,
+            ),
+        )
+
+    @staticmethod
+    def _agent_messages_since_turn(
+        *,
+        messages: list[AgentThreadMessage],
+        thread_id: str,
+        since_turn: str | None,
+    ) -> list[AgentThreadMessage]:
+        if since_turn is None or since_turn.strip() == "":
+            return messages
+
+        normalized_since_turn = since_turn.strip()
+        for index, stored_message in enumerate(messages):
+            if stored_message.thread_id != thread_id:
+                continue
+            if stored_message.message_id == normalized_since_turn:
+                return messages[index:]
+            turn_id = _message_turn_id(stored_message)
+            if turn_id == normalized_since_turn:
+                return messages[index:]
+            if isinstance(stored_message, (TurnStart, TurnSteer)):
+                if stored_message.message_id == normalized_since_turn:
+                    return messages[index:]
+        return []
 
 
 @dataclass(slots=True)

@@ -94,7 +94,7 @@ from meshagent.agents.messages import (
     TurnStarted,
     TurnSteer,
 )
-from meshagent.agents.process import AgentSupervisor, Message
+from meshagent.agents.process import AgentSupervisor, ChatBackend, Message
 from meshagent.api import Participant, RoomException, RoomMessage
 from meshagent.api.messaging import EmptyContent, TextContent
 from meshagent.tools import ToolContext
@@ -311,6 +311,15 @@ class _FakeRoom:
         self.sync = sync if sync is not None else _FakeSync()
         self.storage = storage if storage is not None else _FakeStorage()
         self.datasets = datasets if datasets is not None else _FakeDatasets()
+
+
+async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            raise TimeoutError("condition was not met before timeout")
+        await asyncio.sleep(0.01)
 
 
 class _RecordingSupervisor(AgentSupervisor):
@@ -2551,6 +2560,103 @@ async def test_chat_channel_publishes_turn_started_with_tracked_input_to_open_pa
         assert replayed_payload["content"] == [{"type": "text", "text": "hello"}]
     finally:
         await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_chat_channel_with_chat_backend_sends_turn_to_open_participant() -> None:
+    sender = _FakeParticipant(name="sender", participant_id="sender-id")
+    viewer = _FakeParticipant(name="viewer", participant_id="viewer-id")
+    room = _FakeRoom(participants=[sender, viewer], messaging_enabled=True)
+    channel = MessagingChatChannel(room=room)
+
+    async def create_thread_id(
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del start_thread
+        del sender
+        return "/threads/test.thread"
+
+    supervisor = AgentSupervisor(
+        agent_backends=[ChatBackend(thread_id_factory=create_thread_id)]
+    )
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=viewer.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_OPEN,
+                        "thread_id": "/threads/test.thread",
+                        "backend": "chat",
+                    }
+                },
+            )
+        )
+
+        await _wait_until(
+            lambda: any(
+                process.thread_id == "/threads/test.thread"
+                and process.state == "started"
+                for process in supervisor.processes
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=sender.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_TURN_START,
+                        "thread_id": "/threads/test.thread",
+                        "backend": "chat",
+                        "provider": "chat",
+                        "model": "none",
+                        "message_id": "user-message-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
+        )
+
+        def viewer_payloads() -> list[dict]:
+            return [
+                sent["message"]
+                for sent in room.messaging.sent_messages
+                if sent["to"] == viewer
+            ]
+
+        await _wait_until(lambda: len(viewer_payloads()) >= 4)
+
+        payloads = viewer_payloads()
+        assert [payload["type"] for payload in payloads] == [
+            AGENT_MESSAGE_TURN_START,
+            AGENT_EVENT_TURN_START_ACCEPTED,
+            AGENT_EVENT_TURN_STARTED,
+            AGENT_EVENT_TURN_ENDED,
+        ]
+
+        input_payload = payloads[0]
+        assert input_payload["message_id"] == "user-message-1"
+        assert input_payload["content"] == [{"type": "text", "text": "hello"}]
+        assert input_payload["sender_name"] == "sender"
+
+        accepted_payload = payloads[1]
+        assert accepted_payload["source_message_id"] == "user-message-1"
+        assert accepted_payload["content"] == [{"type": "text", "text": "hello"}]
+        assert accepted_payload["sender_name"] == "sender"
+        assert isinstance(accepted_payload["turn_id"], str)
+        assert accepted_payload["turn_id"].strip() != ""
+
+        assert payloads[2]["turn_id"] == accepted_payload["turn_id"]
+        assert payloads[3]["turn_id"] == accepted_payload["turn_id"]
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio

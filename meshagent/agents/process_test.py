@@ -130,6 +130,7 @@ from meshagent.agents.messages import (
     ThreadLoaded,
     ThreadUpdated,
     TurnStart,
+    TurnStartAccepted,
     StartThread,
     ClientToolkitDescription,
     TurnStartRejected,
@@ -148,6 +149,7 @@ from meshagent.agents.process import (
     AgentProcess,
     AgentSupervisor,
     Channel,
+    ChatAgentProcess,
     ContentScheme,
     LLMAgentProcess,
     Message,
@@ -766,6 +768,52 @@ class _RecordingSupervisor(AgentSupervisor):
             if message.data.type == message_type:
                 payloads.append(message.data.model_dump(mode="json"))
         return payloads
+
+
+@pytest.mark.asyncio
+async def test_chat_agent_process_records_accepted_turn_to_thread_storage() -> None:
+    thread_storage = _LifecycleThreadStorage(path="/threads/test.thread")
+    process = ChatAgentProcess(
+        thread_id="/threads/test.thread",
+        thread_storage=thread_storage,
+    )
+    supervisor = _RecordingSupervisor()
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/test.thread",
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=_ThreadParticipant(
+                    name="caller",
+                    participant_id="caller-id",
+                ),
+            )
+        )
+
+        await _wait_for(
+            lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+        )
+    finally:
+        await process.stop(supervisor)
+
+    assert [message.type for message in thread_storage.messages] == [
+        AGENT_MESSAGE_TURN_START,
+        AGENT_EVENT_TURN_START_ACCEPTED,
+        AGENT_EVENT_TURN_STARTED,
+        AGENT_EVENT_TURN_ENDED,
+    ]
+    persisted_turn = thread_storage.messages[0]
+    assert isinstance(persisted_turn, TurnStart)
+    assert persisted_turn.turn_id is not None
+    accepted = thread_storage.messages[1]
+    assert isinstance(accepted, TurnStartAccepted)
+    assert accepted.content == persisted_turn.content
+    assert accepted.sender_name == "caller"
 
 
 class _RecordedSpan:

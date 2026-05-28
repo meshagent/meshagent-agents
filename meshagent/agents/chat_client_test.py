@@ -29,6 +29,7 @@ from meshagent.agents.messages import (
     AgentMessage,
     AgentModelChanged,
     AgentConnectionStatus,
+    AgentTextContent,
     AgentThreadStatus,
     AgentTextContentDelta,
     ThreadCreated,
@@ -310,6 +311,29 @@ async def test_chat_thread_session_tracks_active_turn_from_accepted_event() -> N
     )
 
     assert not session.interrupt()
+
+
+def test_chat_thread_session_appends_remote_accepted_input_with_content() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+
+    client._handle_agent_payload(
+        TurnStartAccepted(
+            type=AGENT_EVENT_TURN_START_ACCEPTED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-1",
+            source_message_id="remote-message-1",
+            content=[AgentTextContent(type="text", text="hello from someone else")],
+            sender_name="teammate",
+        ).model_dump(mode="json")
+    )
+
+    assert len(session.messages) == 1
+    assert isinstance(session.messages[0], TurnStartAccepted)
+    assert session.messages[0].sender_name == "teammate"
+    assert session.messages[0].content == [
+        AgentTextContent(type="text", text="hello from someone else")
+    ]
 
 
 @pytest.mark.asyncio
