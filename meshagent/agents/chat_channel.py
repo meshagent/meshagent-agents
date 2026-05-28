@@ -669,7 +669,10 @@ class BaseChatChannel(ThreadedChannel):
         supervisor = self.supervisor
         if supervisor is None:
             return False
-        return type(supervisor).create_thread_id is not AgentSupervisor.create_thread_id
+        return (
+            type(supervisor).create_thread_id is not AgentSupervisor.create_thread_id
+            or supervisor.default_agent_backend is not None
+        )
 
     async def _handle_start_thread_message(
         self,

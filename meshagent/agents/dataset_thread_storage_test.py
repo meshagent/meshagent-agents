@@ -2209,6 +2209,9 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
 
     await storage.start()
     await storage.wait_until_ready()
+    restored_messages = storage.agent_messages()
+    assert restored_messages[0].created_at == "2026-03-10T00:00:00Z"
+    assert restored_messages[1].created_at == "2026-03-11T00:00:00Z"
     context = AgentSessionContext(system_role=None)
     storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
     await storage.stop()

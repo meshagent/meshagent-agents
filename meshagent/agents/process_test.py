@@ -3862,6 +3862,7 @@ async def test_agent_supervisor_thread_open_with_load_replays_stored_messages_si
         turn_id="turn-new",
         item_id="new",
         text="new",
+        created_at="2026-05-28T16:11:48.538Z",
     )
     thread_storage.messages.extend([old_message, replay_message])
     room = _DownloadRecordingRoom()
@@ -3946,6 +3947,7 @@ async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_befo
         await _wait_for(lambda: len(channel.direct_payloads) >= 2)
         assert isinstance(channel.direct_payloads[0], AgentTextContentDelta)
         assert channel.direct_payloads[0].item_id == replay_message.item_id
+        assert channel.direct_payloads[0].created_at == replay_message.created_at
         assert isinstance(channel.direct_payloads[1], ThreadLoaded)
         assert [
             message.data

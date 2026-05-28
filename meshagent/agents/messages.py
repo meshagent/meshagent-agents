@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional, cast
 
 from meshagent.api.agent_content import (
@@ -27,6 +28,11 @@ CHANNEL_SENDER_NAME_DESCRIPTION = (
     "channel, this is filled by the server from the authenticated participant "
     "and any client-supplied value is ignored."
 )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 AGENT_MESSAGE_TURN_START = "meshagent.agent.turn.start"
 AGENT_MESSAGE_TURN_STEER = "meshagent.agent.turn.steer"
@@ -115,6 +121,7 @@ AGENT_MESSAGE_SECRET_RESPONSE = "meshagent.agent.secret.response"
 class AgentMessage(BaseModel):
     type: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = Field(default_factory=_now_iso)
     sender_name: str | None = Field(
         default=None,
         description=CHANNEL_SENDER_NAME_DESCRIPTION,

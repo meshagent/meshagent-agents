@@ -88,6 +88,15 @@ class _RecordingChatClient(BaseChatClient):
         self.sent.append(payload.model_dump(mode="json"))
 
 
+def test_agent_message_serializes_created_at_by_default() -> None:
+    payload = AgentMessage(type="meshagent.agent.test")
+
+    dumped = payload.model_dump(mode="json")
+
+    assert isinstance(dumped["created_at"], str)
+    assert dumped["created_at"].endswith("Z")
+
+
 def test_chat_thread_session_records_failed_turn_end_for_rendering() -> None:
     client = _RecordingChatClient()
     session = client._create_thread_session(thread_path="/threads/test.thread")

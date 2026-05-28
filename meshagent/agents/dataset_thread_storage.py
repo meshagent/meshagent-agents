@@ -2326,6 +2326,11 @@ class DatasetThreadStorage(ThreadStorage):
         queue_for_insert: bool = True,
     ) -> _StoredThreadRow:
         timestamp = _now_iso()
+        if (
+            not isinstance(data.get("created_at"), str)
+            or data["created_at"].strip() == ""
+        ):
+            data = {**data, "created_at": timestamp}
         sequence = self._next_sequence
         self._next_sequence += 1
         normalized_item_id = item_id if item_id.strip() != "" else str(uuid.uuid4())
@@ -2588,7 +2593,11 @@ class DatasetThreadStorage(ThreadStorage):
         row: _StoredThreadRow,
     ) -> None:
         data = row.data
-        raw_message = self._stored_agent_message(value=data, attachment=row.attachment)
+        raw_message = self._stored_agent_message(
+            value=data,
+            attachment=row.attachment,
+            created_at=row.timestamp,
+        )
         if (
             isinstance(raw_message, AgentContextCompacted)
             and raw_message.messages is not None
@@ -2601,7 +2610,11 @@ class DatasetThreadStorage(ThreadStorage):
 
     def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:
         data = row.data
-        raw_message = self._stored_agent_message(value=data, attachment=row.attachment)
+        raw_message = self._stored_agent_message(
+            value=data,
+            attachment=row.attachment,
+            created_at=row.timestamp,
+        )
         if raw_message is not None:
             return [raw_message]
         return []
@@ -2698,9 +2711,19 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         value: Any,
         attachment: bytes | None = None,
+        created_at: str | None = None,
     ) -> AgentThreadMessage | None:
         if not isinstance(value, dict):
             return None
+        if (
+            isinstance(created_at, str)
+            and created_at.strip() != ""
+            and not (
+                isinstance(value.get("created_at"), str)
+                and value["created_at"].strip() != ""
+            )
+        ):
+            value = {**value, "created_at": created_at.strip()}
         if attachment is not None:
             message_type = value.get("type")
             if message_type in (

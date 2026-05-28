@@ -23,6 +23,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
     AGENT_EVENT_AUDIO_INPUT_SPEECH_STARTED,
     AGENT_EVENT_THREAD_CLEARED,
+    AGENT_EVENT_THREAD_CREATED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -95,6 +96,7 @@ from meshagent.agents.messages import (
     TurnSteer,
 )
 from meshagent.agents.process import AgentSupervisor, ChatBackend, Message
+from meshagent.agents.thread_storage import ThreadListEntry, ThreadListPage
 from meshagent.api import Participant, RoomException, RoomMessage
 from meshagent.api.messaging import EmptyContent, TextContent
 from meshagent.tools import ToolContext
@@ -338,6 +340,69 @@ class _RecordingSupervisor(AgentSupervisor):
     async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
         self.validated_turn_starts.append(turn_start)
         return None
+
+
+class _ThreadListRepository:
+    def __init__(self) -> None:
+        self.entries: dict[str, ThreadListEntry] = {}
+
+    async def list_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        entries = list(self.entries.values())
+        return ThreadListPage(
+            threads=entries[offset : offset + limit],
+            total=len(entries),
+            offset=offset,
+            limit=limit,
+        )
+
+    async def upsert_thread(
+        self,
+        *,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> ThreadListEntry | None:
+        entry = ThreadListEntry(
+            path=path,
+            name=name or "New Chat",
+            created_at=created_at or "2026-01-01T00:00:00Z",
+            modified_at=modified_at or "2026-01-01T00:00:00Z",
+        )
+        self.entries[path] = entry
+        return entry
+
+    async def delete_thread(
+        self,
+        *,
+        path: str,
+        delete_storage: bool = True,
+    ) -> None:
+        del delete_storage
+        self.entries.pop(path, None)
+
+    async def rename_thread(
+        self,
+        *,
+        path: str,
+        name: str,
+    ) -> ThreadListEntry | None:
+        existing = self.entries.get(path)
+        if existing is None:
+            return None
+        renamed = ThreadListEntry(
+            path=existing.path,
+            name=name,
+            created_at=existing.created_at,
+            modified_at="2026-01-02T00:00:00Z",
+        )
+        self.entries[path] = renamed
+        return renamed
 
 
 class _RejectingStartSupervisor(_RecordingSupervisor):
@@ -589,6 +654,90 @@ async def test_chat_channel_start_thread_message_allocates_thread_and_routes_tur
         assert entries[0].get_attribute("name") == "Plan this friendly thread"
     finally:
         await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_messaging_chat_channel_start_thread_with_backend_publishes_thread_created() -> (
+    None
+):
+    sender = _FakeParticipant(name="Sender", participant_id="sender-id")
+    viewer = _FakeParticipant(name="Viewer", participant_id="viewer-id")
+    room = _FakeRoom(
+        participants=[sender, viewer],
+        messaging_enabled=True,
+    )
+    channel = MessagingChatChannel(
+        room=room,
+        threading_mode="default-new",
+        thread_dir="/threads/chat",
+    )
+
+    async def create_thread_id(
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del start_thread
+        del sender
+        return "/threads/chat/created.thread"
+
+    supervisor = AgentSupervisor(
+        agent_backends=[ChatBackend(thread_id_factory=create_thread_id)],
+        thread_storage_repository=_ThreadListRepository(),
+    )
+    supervisor.add_channel(channel)
+
+    await supervisor.start()
+    try:
+        await _wait_until(
+            lambda: (
+                supervisor.is_participant_connected(participant_id=sender.id)
+                and supervisor.is_participant_connected(participant_id=viewer.id)
+            )
+        )
+
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=sender.id,
+                type="agent-message",
+                message={
+                    "payload": {
+                        "type": AGENT_MESSAGE_THREAD_START,
+                        "message_id": "start-thread-1",
+                        "content": [{"type": "text", "text": "hello"}],
+                    }
+                },
+            )
+        )
+
+        await _wait_until(
+            lambda: any(
+                sent["message"]["type"] == AGENT_EVENT_THREAD_CREATED
+                for sent in room.messaging.sent_messages
+                if sent["to"] is sender
+            )
+        )
+
+        created_messages = [
+            sent
+            for sent in room.messaging.sent_messages
+            if sent["message"]["type"] == AGENT_EVENT_THREAD_CREATED
+        ]
+        assert {sent["to"].id for sent in created_messages} == {
+            sender.id,
+            viewer.id,
+        }
+        assert all(
+            sent["message"]["thread"]["path"] == "/threads/chat/created.thread"
+            for sent in created_messages
+        )
+        assert any(
+            sent["to"] is sender
+            and sent["message"]["type"] == AGENT_EVENT_THREAD_STARTED
+            and sent["message"]["thread_id"] == "/threads/chat/created.thread"
+            for sent in room.messaging.sent_messages
+        )
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio
