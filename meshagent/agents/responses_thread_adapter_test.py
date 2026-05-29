@@ -104,6 +104,37 @@ def test_openai_event_publisher_applies_output_item_phase_to_text_delta() -> Non
     assert messages[1].phase == "final_answer"
 
 
+def test_openai_event_publisher_emits_distinct_text_delta_message_ids() -> None:
+    messages: list[AgentMessage] = []
+    publisher = make_openai_agent_event_publisher(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        callback=messages.append,
+    )
+
+    publisher(
+        {
+            "type": "response.output_text.delta",
+            "item_id": "message-1",
+            "delta": "hel",
+        }
+    )
+    publisher(
+        {
+            "type": "response.output_text.delta",
+            "item_id": "message-1",
+            "delta": "lo",
+        }
+    )
+
+    deltas = [
+        message for message in messages if isinstance(message, AgentTextContentDelta)
+    ]
+    assert [delta.text for delta in deltas] == ["hel", "lo"]
+    assert len({delta.message_id for delta in deltas}) == 2
+    assert all(delta.message_id != delta.item_id for delta in deltas)
+
+
 def test_openai_event_publisher_emits_tool_argument_delta() -> None:
     messages: list[AgentMessage] = []
     publisher = make_openai_agent_event_publisher(

@@ -28,6 +28,7 @@ from meshagent.agents.messages import (
     AgentThreadListEntry,
     AgentMessage,
     AgentModelChanged,
+    AgentUsageUpdated,
     AgentConnectionStatus,
     AgentTextContent,
     AgentThreadStatus,
@@ -133,6 +134,22 @@ async def test_thread_loaded_message_round_trips() -> None:
     assert parsed.since_turn == "turn-1"
 
 
+def test_usage_updates_tolerate_missing_context_window_token_counts() -> None:
+    parsed = parse_agent_message(
+        {
+            "type": "meshagent.agent.usage.updated",
+            "thread_id": "/threads/test.thread",
+            "turn_id": "turn-1",
+            "usage": {},
+            "context_window": {"total_tokens": 128000},
+        }
+    )
+
+    assert isinstance(parsed, AgentUsageUpdated)
+    assert parsed.context_window.used_tokens == 0
+    assert parsed.context_window.total_tokens == 128000
+
+
 @pytest.mark.asyncio
 async def test_chat_thread_session_lists_threads_with_agent_message() -> None:
     client = _RecordingChatClient()
@@ -215,6 +232,36 @@ def test_chat_thread_session_ignores_duplicate_delta_messages() -> None:
     assert len(session.messages) == 1
     assert isinstance(session.messages[0], AgentTextContentDelta)
     assert session.messages[0].text == "hello"
+
+
+def test_chat_thread_session_merges_distinct_text_delta_messages_by_item_id() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    first = AgentTextContentDelta(
+        type="meshagent.agent.text_content.delta",
+        message_id="delta-1",
+        thread_id="/threads/test.thread",
+        turn_id="turn-1",
+        item_id="item-1",
+        text="hello",
+    )
+    second = AgentTextContentDelta(
+        type="meshagent.agent.text_content.delta",
+        message_id="delta-2",
+        thread_id="/threads/test.thread",
+        turn_id="turn-1",
+        item_id="item-1",
+        text=" world",
+    )
+
+    assert first.message_id != first.item_id
+    assert second.message_id != second.item_id
+    session.add_agent_message(first)
+    session.add_agent_message(second)
+
+    assert len(session.messages) == 1
+    assert isinstance(session.messages[0], AgentTextContentDelta)
+    assert session.messages[0].text == "hello world"
 
 
 @pytest.mark.asyncio

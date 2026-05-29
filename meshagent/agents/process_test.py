@@ -6522,6 +6522,8 @@ async def test_llm_agent_process_uses_adapter_agent_event_publisher() -> None:
     assert started_payload["item_id"] == "assistant-1"
     assert started_payload["provider"] == "test-provider"
     assert started_payload["model"] == "default-model"
+    assert delta_payload["message_id"] != started_payload["message_id"]
+    assert delta_payload["message_id"] != delta_payload["item_id"]
     assert delta_payload["turn_id"] == started_payload["turn_id"]
     assert delta_payload["text"] == "hello"
     assert delta_payload["provider"] == "test-provider"

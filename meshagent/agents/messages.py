@@ -941,7 +941,7 @@ class AgentContextCompacted(AgentThreadMessage):
 
 
 class AgentContextWindowUsage(BaseModel):
-    used_tokens: int
+    used_tokens: int = 0
     total_tokens: int | None = None
     compaction_mode: str | None = None
     compaction_threshold: int | None = None

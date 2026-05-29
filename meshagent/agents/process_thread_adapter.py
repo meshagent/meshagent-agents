@@ -1046,7 +1046,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                         AgentTextContentDelta(
                             type=AGENT_EVENT_TEXT_CONTENT_DELTA,
                             thread_id=self._thread_path,
-                            message_id=message_id,
                             turn_id=turn_id,
                             item_id=message_id,
                             text=text,
@@ -1058,7 +1057,6 @@ class MeshDocumentThreadStorage(ThreadStorage):
                         AgentFileContentDelta(
                             type=AGENT_EVENT_FILE_CONTENT_DELTA,
                             thread_id=self._thread_path,
-                            message_id=item_id,
                             turn_id=turn_id,
                             item_id=item_id,
                             url=path,

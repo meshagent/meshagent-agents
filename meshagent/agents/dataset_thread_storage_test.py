@@ -1090,34 +1090,31 @@ async def test_dataset_thread_storage_flushes_partial_text_on_interrupt() -> Non
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
     await storage.start()
 
-    storage.push_message(
-        message=AgentTextContentStarted(
-            type=AGENT_EVENT_TEXT_CONTENT_STARTED,
-            thread_id="dataset://threads/demo",
-            turn_id="turn-1",
-            item_id="text-1",
-            provider="openai",
-            model="gpt-test",
-        )
+    started = AgentTextContentStarted(
+        type=AGENT_EVENT_TEXT_CONTENT_STARTED,
+        thread_id="dataset://threads/demo",
+        turn_id="turn-1",
+        item_id="text-1",
+        provider="openai",
+        model="gpt-test",
     )
-    storage.push_message(
-        message=AgentTextContentDelta(
-            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
-            thread_id="dataset://threads/demo",
-            turn_id="turn-1",
-            item_id="text-1",
-            text="partial ",
-        )
+    first_delta = AgentTextContentDelta(
+        type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+        thread_id="dataset://threads/demo",
+        turn_id="turn-1",
+        item_id="text-1",
+        text="partial ",
     )
-    storage.push_message(
-        message=AgentTextContentDelta(
-            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
-            thread_id="dataset://threads/demo",
-            turn_id="turn-1",
-            item_id="text-1",
-            text="answer",
-        )
+    second_delta = AgentTextContentDelta(
+        type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+        thread_id="dataset://threads/demo",
+        turn_id="turn-1",
+        item_id="text-1",
+        text="answer",
     )
+    storage.push_message(message=started)
+    storage.push_message(message=first_delta)
+    storage.push_message(message=second_delta)
     storage.push_message(
         message=TurnInterrupted(
             type=AGENT_EVENT_TURN_INTERRUPTED,
@@ -1136,6 +1133,12 @@ async def test_dataset_thread_storage_flushes_partial_text_on_interrupt() -> Non
     assert data["text"] == "partial answer"
     assert data["provider"] == "openai"
     assert data["model"] == "gpt-test"
+    assert data["message_id"] != "text-1"
+    assert data["message_id"] not in {
+        started.message_id,
+        first_delta.message_id,
+        second_delta.message_id,
+    }
     interrupted = _row_data(rows[1])
     assert interrupted["type"] == AGENT_EVENT_TURN_INTERRUPTED
 
@@ -2184,6 +2187,7 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
                     "type": AGENT_EVENT_TEXT_CONTENT_DELTA,
                     "thread_id": "dataset://threads/demo",
                     "message_id": "assistant-message-1",
+                    "created_at": "2026-03-11T00:00:00Z",
                     "turn_id": "turn-1",
                     "item_id": "assistant-message-1",
                     "text": "answer",
@@ -2200,6 +2204,7 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
                     "type": AGENT_MESSAGE_TURN_START,
                     "thread_id": "dataset://threads/demo",
                     "message_id": "first",
+                    "created_at": "2026-03-10T00:00:00Z",
                     "sender_name": "caller",
                     "content": [{"type": "text", "text": "question"}],
                 }

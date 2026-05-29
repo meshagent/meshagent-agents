@@ -1691,7 +1691,6 @@ class DatasetThreadStorage(ThreadStorage):
                 message=message_cls(
                     type=message_type,
                     thread_id=self.path,
-                    message_id=active.message_id,
                     turn_id=active.turn_id,
                     item_id=active.item_id,
                     text=text,
@@ -1713,7 +1712,6 @@ class DatasetThreadStorage(ThreadStorage):
                 message=AgentFileContentDelta(
                     type=AGENT_EVENT_FILE_CONTENT_DELTA,
                     thread_id=self.path,
-                    message_id=active.message_id,
                     turn_id=active.turn_id,
                     item_id=active.item_id,
                     url=url,
@@ -2596,7 +2594,6 @@ class DatasetThreadStorage(ThreadStorage):
         raw_message = self._stored_agent_message(
             value=data,
             attachment=row.attachment,
-            created_at=row.timestamp,
         )
         if (
             isinstance(raw_message, AgentContextCompacted)
@@ -2613,7 +2610,6 @@ class DatasetThreadStorage(ThreadStorage):
         raw_message = self._stored_agent_message(
             value=data,
             attachment=row.attachment,
-            created_at=row.timestamp,
         )
         if raw_message is not None:
             return [raw_message]
@@ -2711,19 +2707,9 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         value: Any,
         attachment: bytes | None = None,
-        created_at: str | None = None,
     ) -> AgentThreadMessage | None:
         if not isinstance(value, dict):
             return None
-        if (
-            isinstance(created_at, str)
-            and created_at.strip() != ""
-            and not (
-                isinstance(value.get("created_at"), str)
-                and value["created_at"].strip() != ""
-            )
-        ):
-            value = {**value, "created_at": created_at.strip()}
         if attachment is not None:
             message_type = value.get("type")
             if message_type in (
