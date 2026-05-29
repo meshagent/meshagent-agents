@@ -7,6 +7,7 @@ from meshagent.agents.web_participant import WebParticipant
 from meshagent.api import (
     Participant,
     RequiredToolkit,
+    TOOL_SEARCH_ANNOTATION,
     RoomException,
     ToolContentSpec,
     ToolDescription,
@@ -287,6 +288,51 @@ async def test_single_room_agent_required_toolkit_finds_public_room_toolkit() ->
     assert fake_agents.calls[0]["tool"] == "lookup"
     assert fake_agents.calls[0]["participant_id"] is None
     assert fake_agents.calls[0]["on_behalf_of_id"] == "user-id"
+
+
+@pytest.mark.asyncio
+async def test_single_room_agent_tool_search_toolkits_filter_on_annotation() -> None:
+    annotated_tool = ToolDescription(
+        name="lookup",
+        title="",
+        description="",
+        input_spec=ToolContentSpec(
+            types=["json"],
+            schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+    )
+    annotated_toolkit = ToolkitDescription(
+        name="SearchableAssistant",
+        title="",
+        description="",
+        annotations={TOOL_SEARCH_ANNOTATION: "true"},
+        tools=[annotated_tool],
+    )
+    hidden_toolkit = ToolkitDescription(
+        name="HiddenAssistant",
+        title="",
+        description="",
+        annotations={TOOL_SEARCH_ANNOTATION: "false"},
+        tools=[annotated_tool],
+    )
+    fake_agents = _FakeAgentsClient(
+        response=None,
+        toolkits=[annotated_toolkit, hidden_toolkit],
+    )
+    room = _FakeRoom(agents=fake_agents)
+    agent = SingleRoomAgent(name="helper")
+    agent._room = room
+    caller = Participant(id="caller-id", attributes={"name": "Caller Agent"})
+    context = ToolContext(caller=caller)
+
+    toolkits = await agent.get_tool_search_toolkits(context)
+
+    assert [toolkit.name for toolkit in toolkits] == ["SearchableAssistant"]
+    assert toolkits[0].annotations == {TOOL_SEARCH_ANNOTATION: "true"}
 
 
 @pytest.mark.asyncio

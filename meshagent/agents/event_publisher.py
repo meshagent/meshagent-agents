@@ -81,7 +81,7 @@ from .messages import (
 )
 
 AgentEventCallback = Callable[[AgentMessage], None]
-FunctionToolNameResolver = Callable[[str], tuple[str, str] | None]
+FunctionToolNameResolver = Callable[[str, str | None], tuple[str, str] | None]
 _ContentKind = Literal["file", "reasoning", "text"]
 _MessagePhase = Literal["commentary", "final_answer"]
 _AudioKind = Literal["generation", "transcription"]
@@ -612,10 +612,11 @@ def _openai_tool_call_info(
 
     if item_type == "function_call":
         safe_name = _as_str(item.get("name"))
-        toolkit_name = "function"
+        function_namespace = _as_str(item.get("namespace"))
+        toolkit_name = function_namespace or "function"
         tool_name = safe_name or "function"
         if function_tool_name_resolver is not None and safe_name is not None:
-            resolved = function_tool_name_resolver(safe_name)
+            resolved = function_tool_name_resolver(safe_name, function_namespace)
             if resolved is not None:
                 toolkit_name, tool_name = resolved
         return _ToolCallInfo(
@@ -706,7 +707,7 @@ def _anthropic_tool_call_info(
         toolkit_name = "function"
         tool_name = safe_name or "tool"
         if function_tool_name_resolver is not None and safe_name is not None:
-            resolved = function_tool_name_resolver(safe_name)
+            resolved = function_tool_name_resolver(safe_name, None)
             if resolved is not None:
                 toolkit_name, tool_name = resolved
         return _ToolCallInfo(

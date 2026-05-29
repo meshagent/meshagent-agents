@@ -8,6 +8,7 @@ from meshagent.api.room_server_client import (
     Requirement,
     RequiredSchema,
     RequiredTable,
+    TOOL_SEARCH_ANNOTATION,
 )
 from meshagent.api import (
     Participant,
@@ -47,6 +48,10 @@ def _room_participant_id_for_toolkit_listing(participant: Participant) -> str | 
     if isinstance(participant, WebParticipant):
         return None
     return participant.id
+
+
+def _toolkit_has_tool_search_annotation(toolkit: ToolkitDescription) -> bool:
+    return toolkit.annotations.get(TOOL_SEARCH_ANNOTATION) == "true"
 
 
 class AgentException(RoomException):
@@ -531,27 +536,7 @@ class SingleRoomAgent:
                             f"for caller {_participant_error_label(context.caller)}"
                         )
 
-                remote_room_tools = list[RemoteRoomTool]()
-
-                if required_toolkit.tools is None:
-                    for tool_description in toolkit.tools:
-                        tool = RemoteRoomTool(
-                            room=self.room,
-                            on_behalf_of_id=tool_target.id,
-                            toolkit_name=toolkit.name,
-                            name=tool_description.name,
-                            description=tool_description.description,
-                            input_schema=tool_description.input_schema,
-                            output_spec=tool_description.output_spec,
-                            output_schema=tool_description.output_schema,
-                            title=tool_description.title,
-                            participant_id=toolkit_participant_id,
-                            defs=tool_description.defs,
-                            strict=tool_description.strict,
-                        )
-                        remote_room_tools.append(tool)
-
-                else:
+                if required_toolkit.tools is not None:
                     tools_by_name = dict[str, ToolDescription]()
                     for tool_description in toolkit.tools:
                         tools_by_name[tool_description.name] = tool_description
@@ -563,29 +548,98 @@ class SingleRoomAgent:
                                 f"unable to locate required tool {required_tool} in toolkit {required_toolkit.name}"
                             )
 
-                        tool = RemoteRoomTool(
-                            room=self.room,
-                            on_behalf_of_id=tool_target.id,
-                            toolkit_name=toolkit.name,
-                            name=tool_description.name,
-                            description=tool_description.description,
-                            input_schema=tool_description.input_schema,
-                            output_spec=tool_description.output_spec,
-                            output_schema=tool_description.output_schema,
-                            title=tool_description.title,
-                            participant_id=toolkit_participant_id,
-                            defs=tool_description.defs,
-                            strict=tool_description.strict,
-                        )
-                        remote_room_tools.append(tool)
-
-                required_toolkit_instance = Toolkit(
-                    name=toolkit.name,
-                    title=toolkit.title,
-                    description=toolkit.description,
-                    room=self.room,
-                    tools=remote_room_tools,
+                toolkits.append(
+                    self._make_remote_toolkit(
+                        toolkit=toolkit,
+                        tool_target=tool_target,
+                        toolkit_participant_id=toolkit_participant_id,
+                        tool_names=required_toolkit.tools,
+                    )
                 )
-                toolkits.append(required_toolkit_instance)
 
         return toolkits
+
+    async def get_tool_search_toolkits(self, context: ToolContext) -> list[Toolkit]:
+        tool_target = context.caller
+        if context.on_behalf_of is not None:
+            tool_target = context.on_behalf_of
+
+        room_toolkits: list[tuple[ToolkitDescription, str | None]] = []
+        visible_tools = await self._room.agents.list_toolkits()
+        for toolkit in visible_tools:
+            room_toolkits.append((toolkit, None))
+
+        tool_target_room_participant_id = _room_participant_id_for_toolkit_listing(
+            tool_target
+        )
+        if (
+            context.on_behalf_of is not None
+            and tool_target_room_participant_id is not None
+        ):
+            participant_tools = await self._room.agents.list_toolkits(
+                participant_id=tool_target_room_participant_id
+            )
+            for toolkit in participant_tools:
+                room_toolkits.append((toolkit, tool_target_room_participant_id))
+
+        toolkits: list[Toolkit] = []
+        seen_toolkits: set[tuple[str, str | None]] = set()
+        for toolkit, toolkit_participant_id in room_toolkits:
+            toolkit_key = (toolkit.name, toolkit_participant_id)
+            if toolkit_key in seen_toolkits:
+                continue
+            seen_toolkits.add(toolkit_key)
+            if not _toolkit_has_tool_search_annotation(toolkit):
+                continue
+            toolkits.append(
+                self._make_remote_toolkit(
+                    toolkit=toolkit,
+                    tool_target=tool_target,
+                    toolkit_participant_id=toolkit_participant_id,
+                )
+            )
+
+        return toolkits
+
+    def _make_remote_toolkit(
+        self,
+        *,
+        toolkit: ToolkitDescription,
+        tool_target: Participant,
+        toolkit_participant_id: str | None,
+        tool_names: list[str] | None = None,
+    ) -> Toolkit:
+        tool_descriptions = toolkit.tools
+        if tool_names is not None:
+            tools_by_name = {
+                tool_description.name: tool_description
+                for tool_description in toolkit.tools
+            }
+            tool_descriptions = [tools_by_name[name] for name in tool_names]
+
+        remote_room_tools: list[RemoteRoomTool] = []
+        for tool_description in tool_descriptions:
+            tool = RemoteRoomTool(
+                room=self.room,
+                on_behalf_of_id=tool_target.id,
+                toolkit_name=toolkit.name,
+                name=tool_description.name,
+                description=tool_description.description,
+                input_schema=tool_description.input_schema,
+                output_spec=tool_description.output_spec,
+                output_schema=tool_description.output_schema,
+                title=tool_description.title,
+                participant_id=toolkit_participant_id,
+                defs=tool_description.defs,
+                strict=tool_description.strict,
+            )
+            remote_room_tools.append(tool)
+
+        return Toolkit(
+            name=toolkit.name,
+            title=toolkit.title,
+            description=toolkit.description,
+            annotations=toolkit.annotations,
+            room=self.room,
+            tools=remote_room_tools,
+        )
