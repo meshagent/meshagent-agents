@@ -179,6 +179,7 @@ class StartThread(AgentMessage):
     client_toolkits: list[ClientToolkitDescription] | None = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
+    storage: str | None = None
 
 
 class TurnStart(AgentThreadMessage):
@@ -202,6 +203,7 @@ class TurnStart(AgentThreadMessage):
     client_toolkits: list[ClientToolkitDescription] | None = None
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
+    storage: str | None = None
 
 
 def scrub_agent_message_for_storage(message: AgentMessage) -> AgentMessage:

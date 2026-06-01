@@ -39,6 +39,7 @@ class QueueChannel(ThreadedChannel):
         thread_dir: str | None = None,
         thread_url_scheme: str | None = None,
         thread_path_extension: str = ".thread",
+        thread_list_path: str | None = None,
         llm_adapter: LLMAdapter | None = None,
     ) -> None:
         super().__init__(
@@ -47,6 +48,7 @@ class QueueChannel(ThreadedChannel):
             thread_dir=thread_dir,
             thread_url_scheme=thread_url_scheme,
             thread_path_extension=thread_path_extension,
+            thread_list_path=thread_list_path,
             llm_adapter=llm_adapter,
         )
         normalized_queue_name = queue_name.strip()

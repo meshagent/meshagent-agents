@@ -2578,6 +2578,7 @@ class AgentSupervisor:
                 toolkits=start_thread.toolkits,
                 client_toolkits=start_thread.client_toolkits,
                 tool_choice=start_thread.tool_choice,
+                storage=start_thread.storage,
             )
             error = await self.validate_turn_start(turn_start)
             if error is not None:

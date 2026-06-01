@@ -427,6 +427,10 @@ class _ActiveImageGeneration:
 
 class DatasetThreadStorage(ThreadStorage):
     @property
+    def scheme(self) -> str:
+        return "dataset"
+
+    @property
     def is_ephemeral(self) -> bool:
         return False
 
@@ -2323,12 +2327,13 @@ class DatasetThreadStorage(ThreadStorage):
         attachment: bytes | None = None,
         queue_for_insert: bool = True,
     ) -> _StoredThreadRow:
-        timestamp = _now_iso()
-        if (
-            not isinstance(data.get("created_at"), str)
-            or data["created_at"].strip() == ""
-        ):
-            data = {**data, "created_at": timestamp}
+        data_created_at = data.get("created_at")
+        timestamp = (
+            data_created_at.strip()
+            if isinstance(data_created_at, str) and data_created_at.strip() != ""
+            else _now_iso()
+        )
+        data = {key: value for key, value in data.items() if key != "created_at"}
         sequence = self._next_sequence
         self._next_sequence += 1
         normalized_item_id = item_id if item_id.strip() != "" else str(uuid.uuid4())
@@ -2606,12 +2611,13 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
     def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:
-        data = row.data
         raw_message = self._stored_agent_message(
-            value=data,
+            value=row.data,
             attachment=row.attachment,
         )
         if raw_message is not None:
+            if row.timestamp.strip() != "":
+                raw_message.created_at = row.timestamp
             return [raw_message]
         return []
 

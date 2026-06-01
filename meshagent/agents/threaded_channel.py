@@ -41,6 +41,7 @@ class ThreadedChannel(Channel):
         thread_dir: str | None = None,
         thread_url_scheme: str | None = None,
         thread_path_extension: str = ".thread",
+        thread_list_path: str | None = None,
         llm_adapter: LLMAdapter | None = None,
         thread_name_rules: Sequence[str] | None = None,
     ) -> None:
@@ -54,6 +55,11 @@ class ThreadedChannel(Channel):
             thread_url_scheme=thread_url_scheme
         )
         self._thread_path_extension = thread_path_extension
+        self._thread_list_path_override = (
+            thread_list_path.strip()
+            if isinstance(thread_list_path, str) and thread_list_path.strip() != ""
+            else None
+        )
         self._llm_adapter = llm_adapter
         if thread_name_rules is not None and len(thread_name_rules) > 0:
             self._thread_name_rules = [*thread_name_rules]
@@ -210,6 +216,8 @@ class ThreadedChannel(Channel):
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def _thread_list_index_path(self) -> str | None:
+        if self._thread_list_path_override is not None:
+            return self._thread_list_path_override
         repository = self._thread_storage_repository()
         if repository is not None:
             return repository.thread_list_path()
@@ -534,6 +542,8 @@ class ThreadedChannel(Channel):
     async def _open_thread_list_document(self) -> None:
         index_path = self._thread_list_index_path()
         if index_path is None:
+            return
+        if index_path.startswith("agent://"):
             return
         if self._thread_url_scheme == "dataset://":
             return

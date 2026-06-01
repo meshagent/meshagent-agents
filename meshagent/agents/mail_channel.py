@@ -98,6 +98,7 @@ class MailChannel(ThreadedChannel):
         thread_dir: str | None = None,
         thread_url_scheme: str | None = None,
         thread_path_extension: str = ".thread",
+        thread_list_path: str | None = None,
         llm_adapter: LLMAdapter | None = None,
         domain: str = os.getenv("MESHAGENT_MAIL_DOMAIN", "mail.meshagent.com"),
         smtp: SmtpConfiguration | None = None,
@@ -111,6 +112,7 @@ class MailChannel(ThreadedChannel):
             thread_dir=thread_dir,
             thread_url_scheme=thread_url_scheme,
             thread_path_extension=thread_path_extension,
+            thread_list_path=thread_list_path,
             llm_adapter=llm_adapter,
         )
         normalized_queue = queue_name.strip()

@@ -492,6 +492,32 @@ async def test_dataset_thread_storage_start_does_not_wait_for_dataset_setup() ->
 
 
 @pytest.mark.asyncio
+async def test_dataset_thread_storage_saves_event_time_in_timestamp_column_only() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+
+    await storage.start()
+    storage.push_message(
+        message=TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="dataset://threads/demo",
+            message_id="message-1",
+            turn_id="turn-1",
+            sender_name="caller",
+            content=[{"type": "text", "text": "question"}],
+            created_at="2026-03-10T00:00:00Z",
+        )
+    )
+    await storage.stop()
+
+    thread_rows = room.datasets.rows[(("threads",), "demo")]
+    assert thread_rows[0]["timestamp"] == "2026-03-10T00:00:00Z"
+    assert "created_at" not in _row_data(thread_rows[0])
+
+
+@pytest.mark.asyncio
 async def test_dataset_thread_storage_waits_for_created_table_to_be_searchable() -> (
     None
 ):
@@ -2225,6 +2251,78 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
         {"role": "user", "content": "question"},
         {"role": "assistant", "content": "answer"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_uses_row_timestamp_for_legacy_messages_without_created_at() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    key = (("threads",), "demo")
+    room.datasets.schemas[key] = storage._schema()
+    room.datasets.rows[key] = [
+        {
+            "turn_id": None,
+            "item_id": "first",
+            "sequence": 1,
+            "timestamp": datetime(2026, 3, 10, tzinfo=timezone.utc),
+            "data": json.dumps(
+                {
+                    "type": AGENT_MESSAGE_TURN_START,
+                    "thread_id": "dataset://threads/demo",
+                    "message_id": "first",
+                    "sender_name": "caller",
+                    "content": [{"type": "text", "text": "question"}],
+                }
+            ),
+        },
+        {
+            "turn_id": None,
+            "item_id": "second",
+            "sequence": 2,
+            "timestamp": datetime(2026, 3, 11, tzinfo=timezone.utc),
+            "data": json.dumps(
+                {
+                    "type": AGENT_EVENT_TEXT_CONTENT_DELTA,
+                    "thread_id": "dataset://threads/demo",
+                    "message_id": "assistant-message-1",
+                    "turn_id": "turn-1",
+                    "item_id": "assistant-message-1",
+                    "text": "answer",
+                }
+            ),
+        },
+        {
+            "turn_id": "turn-1",
+            "item_id": "tool-1",
+            "sequence": 3,
+            "timestamp": datetime(2026, 3, 12, tzinfo=timezone.utc),
+            "data": json.dumps(
+                {
+                    "type": AGENT_EVENT_TOOL_CALL_STARTED,
+                    "thread_id": "dataset://threads/demo",
+                    "message_id": "tool-message-1",
+                    "turn_id": "turn-1",
+                    "item_id": "tool-1",
+                    "toolkit": "client",
+                    "tool": "ask_user",
+                    "arguments": {"prompt": "connected?"},
+                }
+            ),
+        },
+    ]
+
+    await storage.start()
+    await storage.wait_until_ready()
+    try:
+        restored_messages = storage.agent_messages()
+    finally:
+        await storage.stop()
+
+    assert restored_messages[0].created_at == "2026-03-10T00:00:00Z"
+    assert restored_messages[1].created_at == "2026-03-11T00:00:00Z"
+    assert restored_messages[2].created_at == "2026-03-12T00:00:00Z"
 
 
 @pytest.mark.asyncio

@@ -12120,6 +12120,51 @@ async def test_mesh_document_thread_storage_message_range_separates_messages() -
 
 
 @pytest.mark.asyncio
+async def test_mesh_document_thread_storage_restores_messages_by_timestamp() -> None:
+    document = MeshDocument(schema=thread_schema, on_document_sync=None)
+    messages = document.root.append_child("messages")
+    messages.append_child(
+        "message",
+        {
+            "id": "assistant-message",
+            "turn_id": "assistant-turn",
+            "text": "hello",
+            "created_at": "2026-05-07T20:01:00.000000Z",
+            "author_name": "chatbot",
+            "role": "agent",
+        },
+    )
+    messages.append_child(
+        "message",
+        {
+            "id": "user-message",
+            "text": "hi",
+            "created_at": "2026-05-07T20:00:54.054542Z",
+            "author_name": "jesse.ezell@timu.com",
+            "role": "user",
+        },
+    )
+
+    try:
+        adapter = MeshDocumentThreadStorage(
+            room=_ThreadRoom(document=document),
+            path="/threads/test.thread",
+        )
+        adapter._thread = document
+
+        restored = adapter.agent_messages()
+    finally:
+        document.close()
+
+    assert isinstance(restored[0], TurnStart)
+    assert restored[0].message_id == "user-message"
+    assert restored[0].created_at == "2026-05-07T20:00:54.054542Z"
+    assert isinstance(restored[1], AgentTextContentDelta)
+    assert restored[1].message_id == "assistant-message"
+    assert restored[1].created_at == "2026-05-07T20:01:00.000000Z"
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_thread_adapter_restore_prefers_message_role(
     monkeypatch,
 ) -> None:

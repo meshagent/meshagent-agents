@@ -4,6 +4,7 @@ import asyncio
 import posixpath
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -105,6 +106,9 @@ async def allocate_thread_path(
 
 class ThreadStorageRepository(Protocol):
     @property
+    def scheme(self) -> str: ...
+
+    @property
     def is_ephemeral(self) -> bool: ...
 
     def thread_list_path(self) -> str: ...
@@ -147,6 +151,10 @@ class ThreadStorageRepository(Protocol):
 
 
 class NoopThreadStorageRepository:
+    @property
+    def scheme(self) -> str:
+        return "none"
+
     @property
     def is_ephemeral(self) -> bool:
         return True
@@ -211,7 +219,205 @@ class NoopThreadStorageRepository:
             yield
 
 
+def _parse_thread_list_datetime(*, value: str) -> datetime:
+    raw = value.strip()
+    if raw == "":
+        return datetime.min.replace(tzinfo=timezone.utc)
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def sort_thread_list_entries(entries: list[ThreadListEntry]) -> list[ThreadListEntry]:
+    return sorted(
+        entries,
+        key=lambda entry: (
+            _parse_thread_list_datetime(value=entry.modified_at),
+            _parse_thread_list_datetime(value=entry.created_at),
+            entry.path,
+        ),
+        reverse=True,
+    )
+
+
+def thread_storage_scheme_for_path(path: str) -> str | None:
+    normalized = path.strip()
+    if normalized == "":
+        return None
+    scheme_end = normalized.find("://")
+    if scheme_end <= 0:
+        return None
+    return normalized[:scheme_end].casefold()
+
+
+class MultiThreadStorageRepository:
+    def __init__(
+        self,
+        *,
+        repositories: list[ThreadStorageRepository],
+        default_scheme: str | None = None,
+    ) -> None:
+        if len(repositories) == 0:
+            raise ValueError("at least one thread storage repository is required")
+        self._repositories = repositories
+        self._repositories_by_scheme: dict[str, ThreadStorageRepository] = {}
+        for repository in repositories:
+            scheme = repository.scheme.strip().casefold()
+            if scheme == "":
+                raise ValueError("thread storage repository scheme must not be empty")
+            if scheme in self._repositories_by_scheme:
+                raise ValueError(f"duplicate thread storage repository scheme {scheme}")
+            self._repositories_by_scheme[scheme] = repository
+        resolved_default_scheme = (
+            default_scheme.strip().casefold()
+            if isinstance(default_scheme, str) and default_scheme.strip() != ""
+            else repositories[0].scheme.strip().casefold()
+        )
+        if resolved_default_scheme not in self._repositories_by_scheme:
+            raise ValueError(
+                f"default thread storage scheme {resolved_default_scheme} is not configured"
+            )
+        self._default_scheme = resolved_default_scheme
+
+    @property
+    def scheme(self) -> str:
+        return self._default_scheme
+
+    @property
+    def is_ephemeral(self) -> bool:
+        return all(repository.is_ephemeral for repository in self._repositories)
+
+    def thread_list_path(self) -> str:
+        return self._repositories_by_scheme[self._default_scheme].thread_list_path()
+
+    def repository_for_scheme(self, scheme: str) -> ThreadStorageRepository:
+        normalized = scheme.strip().casefold()
+        repository = self._repositories_by_scheme.get(normalized)
+        if repository is None:
+            raise ValueError(f"thread storage scheme {scheme!r} is not configured")
+        return repository
+
+    async def _repository_for_path(self, path: str) -> ThreadStorageRepository:
+        scheme = thread_storage_scheme_for_path(path)
+        if scheme is not None:
+            repository = self._repositories_by_scheme.get(scheme)
+            if repository is None:
+                raise ValueError(f"thread storage scheme {scheme!r} is not configured")
+            return repository
+
+        for repository in self._repositories:
+            read_offset = 0
+            while True:
+                page = await repository.list_threads(limit=200, offset=read_offset)
+                if any(entry.path == path for entry in page.threads):
+                    return repository
+                read_offset = page.offset + len(page.threads)
+                if read_offset >= page.total or len(page.threads) == 0:
+                    break
+        return self._repositories_by_scheme[self._default_scheme]
+
+    async def list_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        normalized_limit = max(1, min(200, int(limit)))
+        normalized_offset = max(0, int(offset))
+
+        async def read_all(
+            repository: ThreadStorageRepository,
+        ) -> list[ThreadListEntry]:
+            entries: list[ThreadListEntry] = []
+            read_offset = 0
+            while True:
+                page = await repository.list_threads(limit=200, offset=read_offset)
+                entries.extend(page.threads)
+                read_offset = page.offset + len(page.threads)
+                if read_offset >= page.total or len(page.threads) == 0:
+                    return entries
+
+        provider_entries = await asyncio.gather(
+            *[read_all(repository) for repository in self._repositories]
+        )
+        entries = sort_thread_list_entries(
+            [entry for page_entries in provider_entries for entry in page_entries]
+        )
+        selected = entries[normalized_offset : normalized_offset + normalized_limit]
+        return ThreadListPage(
+            threads=selected,
+            total=len(entries),
+            offset=normalized_offset,
+            limit=normalized_limit,
+        )
+
+    async def upsert_thread(
+        self,
+        *,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> ThreadListEntry | None:
+        repository = await self._repository_for_path(path)
+        return await repository.upsert_thread(
+            path=path,
+            name=name,
+            created_at=created_at,
+            modified_at=modified_at,
+        )
+
+    async def delete_thread(
+        self,
+        *,
+        path: str,
+        delete_storage: bool = True,
+    ) -> None:
+        repository = await self._repository_for_path(path)
+        await repository.delete_thread(path=path, delete_storage=delete_storage)
+
+    async def rename_thread(
+        self,
+        *,
+        path: str,
+        name: str,
+    ) -> ThreadListEntry | None:
+        repository = await self._repository_for_path(path)
+        return await repository.rename_thread(path=path, name=name)
+
+    async def watch_threads(
+        self,
+        *,
+        poll_interval: float = 1.0,
+    ) -> AsyncIterator[ThreadListEvent]:
+        queue: asyncio.Queue[ThreadListEvent] = asyncio.Queue()
+        tasks: list[asyncio.Task[None]] = []
+
+        async def watch_repository(repository: ThreadStorageRepository) -> None:
+            async for event in repository.watch_threads(poll_interval=poll_interval):
+                await queue.put(event)
+
+        for repository in self._repositories:
+            tasks.append(asyncio.create_task(watch_repository(repository)))
+
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class ThreadStorage(Protocol):
+    @property
+    def scheme(self) -> str: ...
+
     @property
     def path(self) -> str: ...
 

@@ -154,6 +154,7 @@ class BaseChatChannel(ThreadedChannel):
         thread_dir: str | None = None,
         thread_url_scheme: str | None = None,
         thread_path_extension: str = ".thread",
+        thread_list_path: str | None = None,
         llm_adapter: LLMAdapter | None = None,
         empty_state_title: str = "How can I help you?",
     ) -> None:
@@ -163,6 +164,7 @@ class BaseChatChannel(ThreadedChannel):
             thread_dir=thread_dir,
             thread_url_scheme=thread_url_scheme,
             thread_path_extension=thread_path_extension,
+            thread_list_path=thread_list_path,
             llm_adapter=llm_adapter,
         )
         self._empty_state_title = empty_state_title
@@ -1455,6 +1457,7 @@ class WebSocketChatChannel(BaseChatChannel):
         thread_dir: str | None = None,
         thread_url_scheme: str | None = None,
         thread_path_extension: str = ".thread",
+        thread_list_path: str | None = None,
         llm_adapter: LLMAdapter | None = None,
         empty_state_title: str = "How can I help you?",
     ) -> None:
@@ -1464,6 +1467,7 @@ class WebSocketChatChannel(BaseChatChannel):
             thread_dir=thread_dir,
             thread_url_scheme=thread_url_scheme,
             thread_path_extension=thread_path_extension,
+            thread_list_path=thread_list_path,
             llm_adapter=llm_adapter,
             empty_state_title=empty_state_title,
         )

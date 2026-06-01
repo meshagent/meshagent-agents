@@ -544,8 +544,20 @@ def _combine_detail_groups(*detail_groups: tuple[str, ...]) -> tuple[str, ...]:
 
 class MeshDocumentThreadStorage(ThreadStorage):
     @property
+    def scheme(self) -> str:
+        return "meshdocument"
+
+    @property
     def is_ephemeral(self) -> bool:
         return False
+
+    @staticmethod
+    def _storage_path_for_thread_path(*, path: str) -> str:
+        normalized = path.strip()
+        prefix = "meshdocument://"
+        if normalized.startswith(prefix):
+            return "/" + normalized[len(prefix) :].lstrip("/")
+        return normalized
 
     @classmethod
     def thread_list_path_for_dir(cls, *, thread_dir: str) -> str:
@@ -627,7 +639,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
 
         if delete_storage:
             with contextlib.suppress(Exception):
-                await self._room.storage.delete(path=path)
+                await self._room.storage.delete(
+                    path=self._storage_path_for_thread_path(path=path)
+                )
 
     async def rename_thread(
         self,
@@ -828,7 +842,9 @@ class MeshDocumentThreadStorage(ThreadStorage):
         max_append_message_count: int = 25,
     ) -> None:
         self._room = room
-        self._thread_path = "" if path is None else path
+        self._thread_path = (
+            "" if path is None else self._storage_path_for_thread_path(path=path)
+        )
         self._thread_dir = thread_dir
         self._processor_task: asyncio.Task[None] | None = None
         self._llm_messages: asyncio.Queue[Any] = asyncio.Queue()
@@ -1014,9 +1030,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         if self._thread is None:
             raise RoomException("thread was not opened")
 
-        messages = self._message_elements()
-        if self._restore_message_count is not None:
-            messages = messages[: self._restore_message_count]
+        messages = self._restored_message_elements()
 
         agent_messages: list[AgentThreadMessage] = []
         for index, message in enumerate(messages):
@@ -1029,6 +1043,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
             author_name = self._attribute_as_str(message, "author_name")
             role = self._message_role(message=message, author_name=author_name)
 
+            created_at = self._attribute_as_str(message, "created_at")
             text = self._attribute_as_str(message, "text")
             file_paths = [
                 self._attribute_as_str(child, "path")
@@ -1046,9 +1061,11 @@ class MeshDocumentThreadStorage(ThreadStorage):
                         AgentTextContentDelta(
                             type=AGENT_EVENT_TEXT_CONTENT_DELTA,
                             thread_id=self._thread_path,
+                            message_id=message_id,
                             turn_id=turn_id,
                             item_id=message_id,
                             text=text,
+                            created_at=created_at,
                         ).model_copy(update={"sender_name": author_name})
                     )
                 for file_index, path in enumerate(file_paths):
@@ -1057,9 +1074,11 @@ class MeshDocumentThreadStorage(ThreadStorage):
                         AgentFileContentDelta(
                             type=AGENT_EVENT_FILE_CONTENT_DELTA,
                             thread_id=self._thread_path,
+                            message_id=item_id,
                             turn_id=turn_id,
                             item_id=item_id,
                             url=path,
+                            created_at=created_at,
                         ).model_copy(update={"sender_name": author_name})
                     )
                 continue
@@ -1077,6 +1096,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
                     thread_id=self._thread_path,
                     message_id=message_id,
                     content=content,
+                    created_at=created_at,
                 ).model_copy(update={"sender_name": author_name})
             )
 
@@ -1186,9 +1206,7 @@ class MeshDocumentThreadStorage(ThreadStorage):
         if self._thread is None:
             raise RoomException("thread was not opened")
 
-        messages = self._message_elements()
-        if self._restore_message_count is not None:
-            messages = messages[: self._restore_message_count]
+        messages = self._restored_message_elements()
         if len(messages) > self._max_append_message_count:
             first_message = len(messages) - self._max_append_message_count
             messages = messages[first_message:]
@@ -1810,6 +1828,20 @@ class MeshDocumentThreadStorage(ThreadStorage):
         return [
             child for child in messages.get_children() if child.tag_name == "message"
         ]
+
+    def _restored_message_elements(self) -> list[Element]:
+        messages = self._message_elements()
+        if self._restore_message_count is not None:
+            messages = messages[: self._restore_message_count]
+
+        indexed_messages: list[tuple[int, Element, datetime]] = []
+        for index, message in enumerate(messages):
+            created_at = self._attribute_as_str(message, "created_at")
+            created_at_datetime = _parse_thread_list_datetime(value=created_at)
+            indexed_messages.append((index, message, created_at_datetime))
+
+        indexed_messages.sort(key=lambda item: (item[2], item[0]))
+        return [message for _, message, _ in indexed_messages]
 
     def _ensure_local_member_on_thread(self) -> None:
         self.ensure_member(participant=self._room.local_participant)
