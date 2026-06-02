@@ -72,6 +72,8 @@ class _BufferedToolCall:
     toolkit: str
     tool: str
     arguments: dict[str, Any] | None
+    provider: str | None = None
+    model: str | None = None
     argument_deltas: list[str] = field(default_factory=list)
     logs: list[dict[str, str]] = field(default_factory=list)
 
@@ -129,6 +131,7 @@ class AccumulatingAgentEventReader(ABC):
         self._reasoning = TextContentAccumulator()
         self._files = FileContentAccumulator()
         self._tool_calls_by_item_id: dict[str, _BufferedToolCall] = {}
+        self._reasoning_metadata_by_item_id: dict[str, dict[str, Any]] = {}
 
     def _emit_context_message(self, message: dict[str, Any]) -> None:
         self._emit_message(deepcopy(message))
@@ -175,6 +178,7 @@ class AccumulatingAgentEventReader(ABC):
             return
 
         if isinstance(message, AgentReasoningContentStarted):
+            self._merge_reasoning_metadata(message=message)
             self._reasoning.upsert(
                 item_id=message.item_id,
                 turn_id=message.turn_id,
@@ -183,6 +187,7 @@ class AccumulatingAgentEventReader(ABC):
             return
 
         if isinstance(message, AgentReasoningContentDelta):
+            self._merge_reasoning_metadata(message=message)
             self._reasoning.append_delta(
                 item_id=message.item_id,
                 delta=message.text,
@@ -192,6 +197,7 @@ class AccumulatingAgentEventReader(ABC):
             return
 
         if isinstance(message, AgentReasoningContentEnded):
+            self._merge_reasoning_metadata(message=message)
             self._flush_reasoning_item(item_id=message.item_id)
             return
 
@@ -227,6 +233,8 @@ class AccumulatingAgentEventReader(ABC):
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=message.arguments,
+                provider=message.provider,
+                model=message.model,
                 argument_deltas=[] if existing is None else existing.argument_deltas,
                 logs=[] if existing is None else existing.logs,
             )
@@ -242,6 +250,8 @@ class AccumulatingAgentEventReader(ABC):
                     toolkit="tool",
                     tool="tool",
                     arguments=None,
+                    provider=message.provider,
+                    model=message.model,
                 )
                 self._tool_calls_by_item_id[message.item_id] = item
             item.argument_deltas.append(message.delta)
@@ -257,6 +267,8 @@ class AccumulatingAgentEventReader(ABC):
                     toolkit="tool",
                     tool="tool",
                     arguments=None,
+                    provider=message.provider,
+                    model=message.model,
                 )
                 self._tool_calls_by_item_id[message.item_id] = item
             item.logs.extend([line.model_dump(mode="json") for line in message.lines])
@@ -323,6 +335,7 @@ class AccumulatingAgentEventReader(ABC):
             if message.messages is not None:
                 self._text.clear()
                 self._reasoning.clear()
+                self._reasoning_metadata_by_item_id.clear()
                 self._files.clear()
                 self._tool_calls_by_item_id.clear()
             self._callbacks.restore_compacted_context(message)
@@ -375,9 +388,24 @@ class AccumulatingAgentEventReader(ABC):
 
     def _flush_reasoning_item(self, *, item_id: str) -> None:
         item = self._reasoning.remove(item_id)
-        if item is None or item.text == "":
+        metadata = self._reasoning_metadata_by_item_id.pop(item_id, {})
+        if item is None:
             return
-        self._append_assistant_reasoning(text=item.text)
+        if item.text == "" and len(metadata) == 0:
+            return
+        self._append_assistant_reasoning(text=item.text, metadata=metadata)
+
+    def _merge_reasoning_metadata(
+        self,
+        *,
+        message: AgentReasoningContentStarted
+        | AgentReasoningContentDelta
+        | AgentReasoningContentEnded,
+    ) -> None:
+        if len(message.metadata) == 0:
+            return
+        metadata = self._reasoning_metadata_by_item_id.setdefault(message.item_id, {})
+        metadata.update(deepcopy(message.metadata))
 
     def _flush_file_item(self, *, item_id: str) -> None:
         item = self._files.remove(item_id)
@@ -396,6 +424,8 @@ class AccumulatingAgentEventReader(ABC):
                 toolkit=message.toolkit,
                 tool=message.tool,
                 arguments=None,
+                provider=message.provider,
+                model=message.model,
             )
 
         self._append_tool_call(
@@ -449,7 +479,12 @@ class AccumulatingAgentEventReader(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _append_assistant_reasoning(self, *, text: str) -> None:
+    def _append_assistant_reasoning(
+        self,
+        *,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod

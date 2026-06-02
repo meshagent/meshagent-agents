@@ -2503,6 +2503,8 @@ class DatasetThreadStorage(ThreadStorage):
             )
             for row in self._rows:
                 for message in self._messages_from_row(row=row):
+                    if isinstance(message, AgentThreadEvent):
+                        continue
                     reader(message)
             reader.finalize()
             llm_adapter.restore_context_messages(
@@ -2548,6 +2550,8 @@ class DatasetThreadStorage(ThreadStorage):
                 row=row,
                 images_dataset=images_dataset,
             ):
+                if isinstance(message, AgentThreadEvent):
+                    continue
                 reader(message)
         reader.finalize()
         llm_adapter.restore_context_messages(
@@ -2580,8 +2584,6 @@ class DatasetThreadStorage(ThreadStorage):
                 return
             restored_messages.clear()
             context.messages.clear()
-            context.previous_messages.clear()
-            context.previous_response_id = None
 
         return AgentEventReaderCallbacks(
             record_event=lambda message: None,
@@ -2606,8 +2608,6 @@ class DatasetThreadStorage(ThreadStorage):
         ):
             context.messages.clear()
             context.messages.extend(deepcopy(raw_message.messages))
-            context.previous_messages.clear()
-            context.previous_response_id = None
             return
 
     def _messages_from_row(self, *, row: _StoredThreadRow) -> list[AgentThreadMessage]:

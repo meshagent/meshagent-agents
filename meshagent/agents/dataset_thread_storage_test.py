@@ -350,7 +350,13 @@ class _DatasetStorageTestReader(AccumulatingAgentEventReader):
             message["phase"] = phase
         self._emit_context_message(message)
 
-    def _append_assistant_reasoning(self, *, text: str) -> None:
+    def _append_assistant_reasoning(
+        self,
+        *,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        del metadata
         self._emit_context_message({"role": "assistant", "content": text})
 
     def _append_assistant_file(self, *, url: str) -> None:
@@ -1100,6 +1106,50 @@ async def test_dataset_thread_storage_restores_compacted_context_messages() -> N
             path="dataset://threads/demo",
             through_sequence=1,
             messages=compacted_messages,
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+
+    assert context.messages == compacted_messages
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_restore_skips_thread_events_after_compaction() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    compacted_messages = [
+        {
+            "id": "compaction-1",
+            "type": "compaction",
+            "encrypted_content": "opaque",
+        }
+    ]
+    storage.push_message(
+        message=AgentContextCompacted(
+            type=AGENT_EVENT_CONTEXT_COMPACTED,
+            thread_id="dataset://threads/demo",
+            checkpoint_id="compaction-1",
+            path="dataset://threads/demo",
+            through_sequence=1,
+            messages=compacted_messages,
+        )
+    )
+    storage.push_message(
+        message=AgentThreadEvent(
+            type=AGENT_EVENT_THREAD_EVENT,
+            thread_id="dataset://threads/demo",
+            event={
+                "type": "agent.event",
+                "source": "openai",
+                "name": "openai.context_compaction",
+                "state": "completed",
+            },
         )
     )
     await storage.stop()

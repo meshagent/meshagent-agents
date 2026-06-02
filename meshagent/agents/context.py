@@ -27,8 +27,6 @@ class AgentSessionContext:
         *,
         messages: Optional[list[dict]] = None,
         system_role: Optional[str] = None,
-        previous_messages: Optional[list[dict]] = None,
-        previous_response_id: Optional[str] = None,
         instructions: Optional[str] = None,
         metadata: Optional[dict] = None,
         turn_count: Optional[float] = None,
@@ -40,12 +38,6 @@ class AgentSessionContext:
             messages = list[dict]()
         self._messages = messages.copy()
         self._system_role = system_role
-
-        if previous_messages is None:
-            previous_messages = list[dict]()
-
-        self.previous_response_id = previous_response_id
-        self._previous_messages = previous_messages
         self._metadata = metadata or {}
 
         self.instructions = instructions
@@ -92,10 +84,6 @@ class AgentSessionContext:
         return self._system_role
 
     @property
-    def previous_messages(self):
-        return self._previous_messages
-
-    @property
     def supports_images(self) -> bool:
         return False
 
@@ -106,11 +94,6 @@ class AgentSessionContext:
     @property
     def supports_realtime_audio(self) -> bool:
         return False
-
-    def track_response(self, id: str):
-        self.previous_response_id = id
-        self._previous_messages.extend(self.messages)
-        self.messages.clear()
 
     def replace_rules(self, rules: list[str]):
         system_message = None
@@ -255,8 +238,6 @@ class AgentSessionContext:
         return {
             "messages": self.messages,
             "system_role": self.system_role,
-            "previous_messages": self.previous_messages,
-            "previous_response_id": self.previous_response_id,
         }
 
     @classmethod
@@ -264,8 +245,6 @@ class AgentSessionContext:
         return cls(
             messages=json["messages"],
             system_role=json.get("system_role", None),
-            previous_messages=json.get("previous_messages", None),
-            previous_response_id=json.get("previous_response_id", None),
         )
 
 

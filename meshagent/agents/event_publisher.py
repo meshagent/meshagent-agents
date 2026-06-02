@@ -593,6 +593,13 @@ def _fallback_arguments_delta_from_tool_call(info: _ToolCallInfo) -> str | None:
     return _tool_arguments_delta_text(info.arguments)
 
 
+def _openai_reasoning_metadata(item: dict[str, Any]) -> dict[str, Any] | None:
+    encrypted_content = _as_str(item.get("encrypted_content"))
+    if encrypted_content is None:
+        return None
+    return {"openai": {"encrypted_content": encrypted_content}}
+
+
 def _openai_tool_call_info(
     item: dict[str, Any],
     *,
@@ -764,6 +771,8 @@ class _AgentMessageEmitter:
     turn_id: str
     thread_id: str
     callback: AgentEventCallback
+    provider: str | None = None
+    model: str | None = None
     _started_content: set[tuple[_ContentKind, str]] = field(default_factory=set)
     _ended_content: set[tuple[_ContentKind, str]] = field(default_factory=set)
     _content_with_data: set[tuple[_ContentKind, str]] = field(default_factory=set)
@@ -804,6 +813,8 @@ class _AgentMessageEmitter:
                     thread_id=self.thread_id,
                     turn_id=self.turn_id,
                     item_id=item_id,
+                    provider=self.provider,
+                    model=self.model,
                 )
             )
             return
@@ -853,6 +864,8 @@ class _AgentMessageEmitter:
                 turn_id=self.turn_id,
                 item_id=item_id,
                 text=text,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -913,7 +926,12 @@ class _AgentMessageEmitter:
             )
         )
 
-    def emit_reasoning_ended(self, *, item_id: str) -> None:
+    def emit_reasoning_ended(
+        self,
+        *,
+        item_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         key = self._content_key(kind="reasoning", item_id=item_id)
         if key in self._ended_content:
             return
@@ -925,6 +943,9 @@ class _AgentMessageEmitter:
                 thread_id=self.thread_id,
                 turn_id=self.turn_id,
                 item_id=item_id,
+                provider=self.provider,
+                model=self.model,
+                metadata={} if metadata is None else metadata,
             )
         )
 
@@ -975,6 +996,8 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 arguments=info.arguments,
                 argument_bytes=info.argument_bytes,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -1003,6 +1026,8 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 arguments=info.arguments,
                 argument_bytes=info.argument_bytes,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -1032,6 +1057,8 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 arguments=info.arguments,
                 argument_bytes=info.argument_bytes,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -1059,6 +1086,8 @@ class _AgentMessageEmitter:
                 ),
                 call_id=info.call_id if info is not None else None,
                 lines=lines,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -1088,6 +1117,8 @@ class _AgentMessageEmitter:
                 else _MESHAGENT_TOOL_NAMESPACE,
                 call_id=resolved_info.call_id if resolved_info is not None else None,
                 delta=delta,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -1116,6 +1147,8 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 result=info.result,
                 error=info.error,
+                provider=self.provider,
+                model=self.model,
             )
         )
 
@@ -1600,7 +1633,10 @@ class _OpenAIAgentEventPublisher:
                             self.emitter.emit_reasoning_delta(
                                 item_id=item_id, text=text
                             )
-            self.emitter.emit_reasoning_ended(item_id=item_id)
+            self.emitter.emit_reasoning_ended(
+                item_id=item_id,
+                metadata=_openai_reasoning_metadata(item),
+            )
             return
 
         if item_type == "compaction":
@@ -1864,7 +1900,13 @@ class _OpenAIAgentEventPublisher:
                 kind="reasoning", item_id=item_id
             ):
                 self.emitter.emit_reasoning_delta(item_id=item_id, text=final_text)
-        self.emitter.emit_reasoning_ended(item_id=item_id)
+        metadata = None
+        item = _as_dict(event.get("item"))
+        if item is not None:
+            metadata = _openai_reasoning_metadata(item)
+        if metadata is None:
+            metadata = _openai_reasoning_metadata(event)
+        self.emitter.emit_reasoning_ended(item_id=item_id, metadata=metadata)
 
     def _audio_item_id_from_event(
         self,
@@ -2542,11 +2584,15 @@ def make_openai_agent_event_publisher(
     function_tool_name_resolver: FunctionToolNameResolver | None = None,
     custom_event_callback: Callable[[dict[str, Any]], None] | None = None,
     provider_tool_namespace: str = _OPENAI_RESPONSES_TOOL_NAMESPACE,
+    provider: str | None = "openai",
+    model: str | None = None,
 ) -> Callable[[dict[str, Any]], None]:
     emitter = _AgentMessageEmitter(
         turn_id=turn_id,
         thread_id=thread_id,
         callback=callback,
+        provider=provider,
+        model=model,
     )
     publisher = _OpenAIAgentEventPublisher(
         emitter=emitter,
@@ -2564,11 +2610,15 @@ def make_anthropic_agent_event_publisher(
     callback: AgentEventCallback,
     function_tool_name_resolver: FunctionToolNameResolver | None = None,
     custom_event_callback: Callable[[dict[str, Any]], None] | None = None,
+    provider: str | None = "anthropic",
+    model: str | None = None,
 ) -> Callable[[dict[str, Any]], None]:
     emitter = _AgentMessageEmitter(
         turn_id=turn_id,
         thread_id=thread_id,
         callback=callback,
+        provider=provider,
+        model=model,
     )
     publisher = _AnthropicAgentEventPublisher(
         emitter=emitter,

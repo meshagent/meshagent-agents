@@ -124,6 +124,7 @@ class AgentMessage(BaseModel):
     type: str
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = Field(default_factory=_now_iso)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     sender_name: str | None = Field(
         default=None,
         description=CHANNEL_SENDER_NAME_DESCRIPTION,

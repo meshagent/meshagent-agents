@@ -1718,8 +1718,6 @@ class _ThresholdManualCompactionLLMAdapter(_RecordingLLMAdapter):
         token_count = int(context.metadata.get("token_count", 0))
         self.compact_calls.append(token_count)
         context.messages.clear()
-        context.previous_messages.clear()
-        context.previous_response_id = None
         context.messages.append(
             {
                 "id": "manual-compaction-1",
@@ -1779,8 +1777,6 @@ class _ThresholdAutoCompactionLLMAdapter(_RecordingLLMAdapter):
         if token_count >= self.compact_threshold:
             self.compaction_calls.append(token_count)
             context.messages.clear()
-            context.previous_messages.clear()
-            context.previous_response_id = None
             context.messages.append(
                 {
                     "id": "auto-compaction-1",

@@ -4694,8 +4694,6 @@ class LLMAgentProcess(AgentProcess):
 
         initialized_context = await self._session_initializer()
         session_context.messages.extend(initialized_context.messages)
-        session_context.previous_messages.extend(initialized_context.previous_messages)
-        session_context.previous_response_id = initialized_context.previous_response_id
         session_context.instructions = initialized_context.instructions
         return None
 
@@ -4827,8 +4825,6 @@ class LLMAgentProcess(AgentProcess):
                 context = self.llm_adapter.create_session()
                 context.instructions = session.instructions
                 context.metadata.update(session.metadata)
-                context.previous_messages.extend(session.previous_messages)
-                context.previous_response_id = session.previous_response_id
                 await thread_storage.restore_session_context_async(
                     context=context,
                     llm_adapter=self.llm_adapter,
@@ -4848,11 +4844,7 @@ class LLMAgentProcess(AgentProcess):
             restored_context_from_storage
             and include_usage
             and len(usage) == 0
-            and (
-                len(context.messages) > 0
-                or len(context.previous_messages) > 0
-                or context.previous_response_id is not None
-            )
+            and len(context.messages) > 0
         )
         if count_missing_restored_usage:
             try:

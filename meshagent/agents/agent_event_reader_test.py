@@ -50,7 +50,13 @@ class _TestAgentEventReader(AccumulatingAgentEventReader):
             message["phase"] = phase
         self._emit_context_message(message)
 
-    def _append_assistant_reasoning(self, *, text: str) -> None:
+    def _append_assistant_reasoning(
+        self,
+        *,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        del metadata
         self._emit_context_message({"role": "assistant", "reasoning": text})
 
     def _append_assistant_file(self, *, url: str) -> None:

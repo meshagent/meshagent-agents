@@ -390,8 +390,6 @@ class LLMAdapter(Generic[TEvent]):
     ) -> None:
         context.messages.clear()
         context.messages.extend(deepcopy(messages))
-        context.previous_messages.clear()
-        context.previous_response_id = None
 
     async def create_response(
         self,
