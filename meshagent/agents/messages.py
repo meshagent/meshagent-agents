@@ -46,6 +46,8 @@ AGENT_MESSAGE_THREAD_CLOSE = "meshagent.agent.thread.close"
 AGENT_MESSAGE_THREAD_DELETE = "meshagent.agent.thread.delete"
 AGENT_MESSAGE_THREAD_RENAME = "meshagent.agent.thread.rename"
 AGENT_MESSAGE_THREAD_LIST = "meshagent.agent.thread.list"
+AGENT_MESSAGE_THREAD_WATCH = "meshagent.agent.thread.watch"
+AGENT_MESSAGE_THREAD_UNWATCH = "meshagent.agent.thread.unwatch"
 AGENT_EVENT_THREAD_LISTED = "meshagent.agent.thread.listed"
 AGENT_EVENT_THREAD_CREATED = "meshagent.agent.thread.created"
 AGENT_EVENT_THREAD_UPDATED = "meshagent.agent.thread.updated"
@@ -336,6 +338,14 @@ class ListThreads(AgentMessage):
     type: Literal[AGENT_MESSAGE_THREAD_LIST]
     limit: int = 200
     offset: int = 0
+
+
+class WatchThreads(AgentMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_WATCH]
+
+
+class UnwatchThreads(AgentMessage):
+    type: Literal[AGENT_MESSAGE_THREAD_UNWATCH]
 
 
 class AgentThreadListEntry(BaseModel):
@@ -1008,6 +1018,8 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_DELETE: DeleteThread,
     AGENT_MESSAGE_THREAD_RENAME: RenameThread,
     AGENT_MESSAGE_THREAD_LIST: ListThreads,
+    AGENT_MESSAGE_THREAD_WATCH: WatchThreads,
+    AGENT_MESSAGE_THREAD_UNWATCH: UnwatchThreads,
     AGENT_EVENT_THREAD_LISTED: ThreadsListed,
     AGENT_EVENT_THREAD_CREATED: ThreadCreated,
     AGENT_EVENT_THREAD_UPDATED: ThreadUpdated,

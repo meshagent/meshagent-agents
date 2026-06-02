@@ -45,8 +45,13 @@ from .messages import (
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_THREAD_CLOSE,
+    AGENT_MESSAGE_THREAD_DELETE,
+    AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_OPEN,
+    AGENT_MESSAGE_THREAD_RENAME,
     AGENT_MESSAGE_THREAD_START,
+    AGENT_MESSAGE_THREAD_UNWATCH,
+    AGENT_MESSAGE_THREAD_WATCH,
     AGENT_MESSAGE_TURN_START,
     AGENT_MESSAGE_TURN_STEER,
     AgentError,
@@ -64,9 +69,12 @@ from .messages import (
     CloseThread,
     AgentThreadStatus,
     AgentToolCallEnded,
+    DeleteThread,
+    ListThreads,
     OpenThread,
     ParticipantConnect,
     ParticipantDisconnect,
+    RenameThread,
     StartThread,
     ThreadCleared,
     ThreadStarted,
@@ -77,6 +85,8 @@ from .messages import (
     TurnStartRejected,
     TurnStarted,
     TurnSteer,
+    UnwatchThreads,
+    WatchThreads,
     parse_agent_message,
 )
 from .process import AgentSupervisor, Message
@@ -137,6 +147,11 @@ _THREAD_CONTROL_AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_START: StartThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
+    AGENT_MESSAGE_THREAD_DELETE: DeleteThread,
+    AGENT_MESSAGE_THREAD_RENAME: RenameThread,
+    AGENT_MESSAGE_THREAD_LIST: ListThreads,
+    AGENT_MESSAGE_THREAD_WATCH: WatchThreads,
+    AGENT_MESSAGE_THREAD_UNWATCH: UnwatchThreads,
 }
 
 

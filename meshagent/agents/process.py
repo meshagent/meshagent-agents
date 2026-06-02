@@ -44,6 +44,7 @@ from .thread_storage import (
     ThreadStorage,
     ThreadStorageRepository,
 )
+from .thread_naming import determine_thread_name, fallback_thread_name
 from .thread_status_publisher import ThreadStatusPublisher
 from .tool_call_accumulator import ToolCallAccumulator
 from .version import __version__ as agents_version
@@ -63,6 +64,8 @@ from .messages import (
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_RENAME,
     AGENT_MESSAGE_THREAD_START,
+    AGENT_MESSAGE_THREAD_UNWATCH,
+    AGENT_MESSAGE_THREAD_WATCH,
     AGENT_EVENT_MODEL_CHANGED,
     AGENT_EVENT_TOOL_CALL_APPROVAL_REQUESTED,
     AGENT_EVENT_CLIENT_TOOL_CALL_CANCELLED,
@@ -156,6 +159,8 @@ from .messages import (
     ThreadsListed,
     ThreadStarted,
     ThreadUpdated,
+    UnwatchThreads,
+    WatchThreads,
     ToolkitCapabilities,
     ToolkitToolCapabilities,
     ToolChoice,
@@ -667,6 +672,12 @@ class Message:
     to_participant_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CreatedAgentThread:
+    thread_id: str
+    name: str
+
+
 class AgentBackend(Protocol):
     @property
     def name(self) -> str: ...
@@ -694,13 +705,13 @@ class AgentBackend(Protocol):
         sender: Participant | None,
     ) -> Any: ...
 
-    async def create_thread_id(
+    async def create_thread(
         self,
         *,
         supervisor: AgentSupervisor,
         start_thread: StartThread,
         sender: Participant | None,
-    ) -> str: ...
+    ) -> CreatedAgentThread: ...
 
     def create_thread_process(
         self,
@@ -816,6 +827,25 @@ def agent_provider_info(
     )
 
 
+def _start_thread_name_input(start_thread: StartThread) -> tuple[str, list[str]]:
+    text_parts: list[str] = []
+    attachments: list[str] = []
+    for item in start_thread.content or []:
+        if isinstance(item, AgentTextContent) and item.text.strip() != "":
+            text_parts.append(item.text.strip())
+        elif isinstance(item, AgentFileContent) and item.url.strip() != "":
+            attachments.append(item.url.strip())
+    return " ".join(text_parts).strip(), attachments
+
+
+def _fallback_start_thread_name(start_thread: StartThread) -> str:
+    if isinstance(start_thread.name, str) and start_thread.name.strip() != "":
+        return start_thread.name.strip()
+
+    message_text, attachments = _start_thread_name_input(start_thread)
+    return fallback_thread_name(message_text=message_text, attachments=attachments)
+
+
 class LLMBackend:
     def __init__(
         self,
@@ -830,6 +860,9 @@ class LLMBackend:
             Awaitable[Any],
         ]
         | None = None,
+        thread_name_adapter: LLMAdapter | None = None,
+        thread_name_caller: Callable[[], Participant] | None = None,
+        thread_name_model: str | None = None,
     ) -> None:
         self._name = name
         self._providers = LLMAgentProcess._normalize_llm_providers(
@@ -848,6 +881,9 @@ class LLMBackend:
         self._process_factory = process_factory
         self._thread_id_factory = thread_id_factory
         self._realtime_connection_factory = realtime_connection_factory
+        self._thread_name_adapter = thread_name_adapter
+        self._thread_name_caller = thread_name_caller
+        self._thread_name_model = thread_name_model
 
     @property
     def name(self) -> str:
@@ -972,15 +1008,42 @@ class LLMBackend:
             return None
         return await self._realtime_connection_factory(thread_id, start_thread, sender)
 
-    async def create_thread_id(
+    async def create_thread(
         self,
         *,
         supervisor: AgentSupervisor,
         start_thread: StartThread,
         sender: Participant | None,
-    ) -> str:
+    ) -> CreatedAgentThread:
         del supervisor
-        return await self._thread_id_factory(start_thread, sender)
+        thread_id = await self._thread_id_factory(start_thread, sender)
+        if isinstance(start_thread.name, str) and start_thread.name.strip() != "":
+            return CreatedAgentThread(
+                thread_id=thread_id,
+                name=start_thread.name.strip(),
+            )
+
+        message_text, attachments = _start_thread_name_input(start_thread)
+        caller = (
+            self._thread_name_caller()
+            if self._thread_name_caller is not None
+            else sender
+        )
+        if caller is None:
+            name = fallback_thread_name(
+                message_text=message_text,
+                attachments=attachments,
+            )
+        else:
+            name = await determine_thread_name(
+                adapter=self._thread_name_adapter,
+                caller=caller,
+                message_text=message_text,
+                attachments=attachments,
+                on_behalf_of=sender,
+                model=self._thread_name_model,
+            )
+        return CreatedAgentThread(thread_id=thread_id, name=name)
 
     def create_thread_process(
         self,
@@ -1094,15 +1157,19 @@ class ChatBackend:
         del sender
         return None
 
-    async def create_thread_id(
+    async def create_thread(
         self,
         *,
         supervisor: AgentSupervisor,
         start_thread: StartThread,
         sender: Participant | None,
-    ) -> str:
+    ) -> CreatedAgentThread:
         del supervisor
-        return await self._thread_id_factory(start_thread, sender)
+        thread_id = await self._thread_id_factory(start_thread, sender)
+        return CreatedAgentThread(
+            thread_id=thread_id,
+            name=_fallback_start_thread_name(start_thread),
+        )
 
     def create_thread_process(
         self,
@@ -1312,6 +1379,7 @@ class AgentSupervisor:
         self._route_lock = asyncio.Lock()
         self._participants_by_client_id: dict[str, Participant] = {}
         self._participant_connection_counts_by_client_id: dict[str, int] = {}
+        self._thread_watchers_by_client_id: dict[str, Participant] = {}
         self._open_thread_ids_by_client_id: dict[str, set[str]] = {}
         self._open_client_ids_by_thread_id: dict[str, set[str]] = {}
         self._thread_namespace_by_thread_id: dict[str, str | None] = {}
@@ -1579,6 +1647,43 @@ class AgentSupervisor:
             participants_by_id[fallback.id] = fallback
         return list(participants_by_id.values())
 
+    def _track_thread_watcher(self, *, sender: Participant | None) -> None:
+        if sender is None or sender.id.strip() == "":
+            return
+        self._thread_watchers_by_client_id[sender.id.strip()] = sender
+
+    def _untrack_thread_watcher(self, *, sender: Participant | None) -> None:
+        if sender is None or sender.id.strip() == "":
+            return
+        self._thread_watchers_by_client_id.pop(sender.id.strip(), None)
+
+    def _thread_watchers(
+        self,
+        *,
+        fallback: Participant | None = None,
+    ) -> list[Participant]:
+        participants_by_id = dict(self._thread_watchers_by_client_id)
+        if fallback is not None:
+            participants_by_id[fallback.id] = fallback
+        return list(participants_by_id.values())
+
+    def _thread_watchers_for_namespace(
+        self,
+        *,
+        namespace: str,
+        fallback: Participant | None = None,
+    ) -> list[Participant]:
+        participants_by_id: dict[str, Participant] = {}
+        for participant in self._thread_watchers_by_client_id.values():
+            if self._participant_namespace(participant=participant) == namespace:
+                participants_by_id[participant.id] = participant
+        if (
+            fallback is not None
+            and self._participant_namespace(participant=fallback) == namespace
+        ):
+            participants_by_id[fallback.id] = fallback
+        return list(participants_by_id.values())
+
     def _participant_for_targeted_message(
         self,
         *,
@@ -1705,17 +1810,34 @@ class AgentSupervisor:
         start_thread: StartThread,
         sender: Participant | None,
     ) -> str:
+        del start_thread
+        del sender
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement create_thread_id"
+        )
+
+    async def create_thread(
+        self,
+        *,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> CreatedAgentThread:
         if self._requires_explicit_backend(start_thread.backend):
             raise ValueError(self._missing_backend_error().message)
         backend = self.agent_backend_for_name(backend_name=start_thread.backend)
-        if backend is None:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} must implement create_thread_id"
+        if backend is not None:
+            return await backend.create_thread(
+                supervisor=self,
+                start_thread=start_thread,
+                sender=sender,
             )
-        return await backend.create_thread_id(
-            supervisor=self,
+        thread_id = await self.create_thread_id(
             start_thread=start_thread,
             sender=sender,
+        )
+        return CreatedAgentThread(
+            thread_id=thread_id,
+            name=_fallback_start_thread_name(start_thread),
         )
 
     def agent_backend_for_name(
@@ -1758,14 +1880,28 @@ class AgentSupervisor:
     async def on_thread_started(
         self,
         *,
-        thread_id: str,
+        created_thread: CreatedAgentThread,
         start_thread: StartThread,
         sender: Participant | None,
     ) -> ThreadListEntry | None:
+        del start_thread
         del sender
         return await self.thread_storage_repository.upsert_thread(
-            path=thread_id,
-            name=self.thread_list_name_for_start_thread(start_thread),
+            path=created_thread.thread_id,
+            name=created_thread.name,
+        )
+
+    def _created_thread_list_entry(
+        self,
+        *,
+        created_thread: CreatedAgentThread,
+        start_thread: StartThread,
+    ) -> ThreadListEntry:
+        return ThreadListEntry(
+            path=created_thread.thread_id,
+            name=created_thread.name,
+            created_at=start_thread.created_at,
+            modified_at=start_thread.created_at,
         )
 
     async def on_thread_deleted(
@@ -1805,23 +1941,6 @@ class AgentSupervisor:
             limit=list_threads.limit,
             offset=list_threads.offset,
         )
-
-    def thread_list_name_for_start_thread(self, start_thread: StartThread) -> str:
-        if isinstance(start_thread.name, str) and start_thread.name.strip() != "":
-            return start_thread.name.strip()
-
-        text_parts: list[str] = []
-        attachment_count = 0
-        for item in start_thread.content or []:
-            if isinstance(item, AgentTextContent) and item.text.strip() != "":
-                text_parts.extend(item.text.strip().split())
-            elif isinstance(item, AgentFileContent):
-                attachment_count += 1
-        if len(text_parts) > 0:
-            return " ".join(text_parts[:6])
-        if attachment_count > 0:
-            return "Attachment Thread"
-        return "New Chat"
 
     async def route(self, message: Message) -> None:
         if self._stop.is_set() or self._state == "stopping":
@@ -2156,6 +2275,7 @@ class AgentSupervisor:
 
         self._participant_connection_counts_by_client_id.pop(client_id, None)
         self._participants_by_client_id.pop(client_id, None)
+        self._thread_watchers_by_client_id.pop(client_id, None)
         for process in list(self.processes):
             await process.on_participant_disconnected(participant_id=client_id)
         thread_ids = list(self._open_thread_ids_by_client_id.pop(client_id, set()))
@@ -2268,12 +2388,12 @@ class AgentSupervisor:
             namespace = self._participant_namespace(participant=sender)
             if namespace is None:
                 return
-            participants = self._participants_for_namespace(
+            participants = self._thread_watchers_for_namespace(
                 namespace=namespace,
                 fallback=sender,
             )
         else:
-            participants = self._connected_participants(fallback=sender)
+            participants = self._thread_watchers(fallback=sender)
 
         for participant in participants:
             for channel in self.channels:
@@ -2493,12 +2613,12 @@ class AgentSupervisor:
                 )
                 return
             try:
-                thread_id = await self.create_thread_id(
+                created_thread = await self.create_thread(
                     start_thread=start_thread,
                     sender=message.sender,
                 )
             except Exception as exc:
-                logger.exception("failed to create thread id; rejecting start thread")
+                logger.exception("failed to create thread; rejecting start thread")
                 self._emit_start_thread_rejected(
                     start_thread=start_thread,
                     sender=message.sender,
@@ -2506,6 +2626,7 @@ class AgentSupervisor:
                     error=self._thread_process_creation_rejection(error=exc),
                 )
                 return
+            thread_id = created_thread.thread_id
 
             access_error = self._ensure_thread_access_for_message(
                 thread_id=thread_id,
@@ -2540,15 +2661,18 @@ class AgentSupervisor:
                     )
                     return
                 created_entry = await self.on_thread_started(
-                    thread_id=thread_id,
+                    created_thread=created_thread,
                     start_thread=start_thread,
                     sender=message.sender,
                 )
-                if created_entry is not None:
-                    self._emit_thread_created(
-                        entry=created_entry,
-                        sender=message.sender,
-                    )
+                self._emit_thread_created(
+                    entry=created_entry
+                    or self._created_thread_list_entry(
+                        created_thread=created_thread,
+                        start_thread=start_thread,
+                    ),
+                    sender=message.sender,
+                )
                 self._emit_thread_started(
                     start_thread=start_thread,
                     sender=message.sender,
@@ -2605,15 +2729,18 @@ class AgentSupervisor:
                         )
                     return
             created_entry = await self.on_thread_started(
-                thread_id=thread_id,
+                created_thread=created_thread,
                 start_thread=start_thread,
                 sender=message.sender,
             )
-            if created_entry is not None:
-                self._emit_thread_created(
-                    entry=created_entry,
-                    sender=message.sender,
-                )
+            self._emit_thread_created(
+                entry=created_entry
+                or self._created_thread_list_entry(
+                    created_thread=created_thread,
+                    start_thread=start_thread,
+                ),
+                sender=message.sender,
+            )
             self._emit_thread_started(
                 start_thread=start_thread,
                 sender=message.sender,
@@ -2905,6 +3032,16 @@ class AgentSupervisor:
                 limit=page.limit,
             )
             self._send_thread_list_response(request=message, response=response)
+            return
+
+        elif message_type == AGENT_MESSAGE_THREAD_WATCH:
+            _coerce_message_data(message.data, WatchThreads)
+            self._track_thread_watcher(sender=message.sender)
+            return
+
+        elif message_type == AGENT_MESSAGE_THREAD_UNWATCH:
+            _coerce_message_data(message.data, UnwatchThreads)
+            self._untrack_thread_watcher(sender=message.sender)
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_DELETE:

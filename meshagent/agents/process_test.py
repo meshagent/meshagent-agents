@@ -69,6 +69,8 @@ from meshagent.agents.messages import (
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_RENAME,
     AGENT_MESSAGE_THREAD_START,
+    AGENT_MESSAGE_THREAD_UNWATCH,
+    AGENT_MESSAGE_THREAD_WATCH,
     AGENT_MESSAGE_PARTICIPANT_CONNECT,
     AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
     AGENT_MESSAGE_MODELS_REQUEST,
@@ -129,6 +131,8 @@ from meshagent.agents.messages import (
     ThreadsListed,
     ThreadLoaded,
     ThreadUpdated,
+    UnwatchThreads,
+    WatchThreads,
     TurnStart,
     TurnStartAccepted,
     StartThread,
@@ -150,7 +154,9 @@ from meshagent.agents.process import (
     AgentSupervisor,
     Channel,
     ChatAgentProcess,
+    ChatBackend,
     ContentScheme,
+    CreatedAgentThread,
     LLMAgentProcess,
     Message,
     ThreadIsolationMode,
@@ -501,17 +507,17 @@ class _RecordingBackend:
         del sender
         return None
 
-    async def create_thread_id(
+    async def create_thread(
         self,
         *,
         supervisor: AgentSupervisor,
         start_thread: StartThread,
         sender: Participant | None,
-    ) -> str:
+    ) -> CreatedAgentThread:
         del supervisor
         del start_thread
         del sender
-        return self.thread_id
+        return CreatedAgentThread(thread_id=self.thread_id, name="Backend Thread")
 
     def create_thread_process(
         self,
@@ -959,13 +965,13 @@ class _ThreadLifecycleEventSupervisor(AgentSupervisor):
     async def on_thread_started(
         self,
         *,
-        thread_id: str,
+        created_thread: CreatedAgentThread,
         start_thread: StartThread,
         sender: Participant | None,
     ) -> ThreadListEntry | None:
         del sender
         return ThreadListEntry(
-            path=thread_id,
+            path=created_thread.thread_id,
             name=start_thread.name or "New Chat",
             created_at="2026-01-01T00:00:00Z",
             modified_at="2026-01-01T00:00:00Z",
@@ -3571,7 +3577,7 @@ async def test_agent_supervisor_lists_threads_over_agent_messages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_supervisor_broadcasts_thread_list_lifecycle_events() -> None:
+async def test_agent_supervisor_sends_thread_lifecycle_events_to_watchers() -> None:
     supervisor = _ThreadLifecycleEventSupervisor()
     channel = _ParticipantRoutingChannel()
     supervisor.add_channel(channel)
@@ -3598,6 +3604,14 @@ async def test_agent_supervisor_broadcasts_thread_list_lifecycle_events() -> Non
                         type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
                         participant_id=participant.id,
                     ),
+                    sender=participant,
+                )
+            )
+
+        for participant in [sender, same_participant_other_tab]:
+            await supervisor.route(
+                Message(
+                    data=WatchThreads(type=AGENT_MESSAGE_THREAD_WATCH),
                     sender=participant,
                 )
             )
@@ -3643,7 +3657,7 @@ async def test_agent_supervisor_broadcasts_thread_list_lifecycle_events() -> Non
             lambda: any(
                 isinstance(payload, ThreadUpdated)
                 for payload in channel.direct_payloads_by_participant_id.get(
-                    different_participant.id, []
+                    same_participant_other_tab.id, []
                 )
             )
         )
@@ -3679,13 +3693,24 @@ async def test_agent_supervisor_broadcasts_thread_list_lifecycle_events() -> Non
         ]
         assert len(deleted) == 1
         assert deleted[0].path == "/threads/created.thread"
-        for participant in [sender, same_participant_other_tab, different_participant]:
-            direct_payloads = channel.direct_payloads_by_participant_id[participant.id]
+        for participant in [sender, same_participant_other_tab]:
+            direct_payloads = [
+                payload
+                for payload in channel.direct_payloads_by_participant_id[participant.id]
+                if isinstance(payload, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+            ]
             assert [type(payload) for payload in direct_payloads] == [
                 ThreadCreated,
                 ThreadUpdated,
                 ThreadDeleted,
             ]
+        assert [
+            payload
+            for payload in channel.direct_payloads_by_participant_id.get(
+                different_participant.id, []
+            )
+            if isinstance(payload, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+        ] == []
         assert [
             message.data
             for message in channel.received
@@ -3696,7 +3721,248 @@ async def test_agent_supervisor_broadcasts_thread_list_lifecycle_events() -> Non
 
 
 @pytest.mark.asyncio
-async def test_agent_supervisor_participant_isolation_sends_thread_lifecycle_events_to_owner() -> (
+async def test_agent_supervisor_emits_thread_created_when_repository_upsert_is_noop() -> (
+    None
+):
+    async def create_thread_id(
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> str:
+        del start_thread
+        del sender
+        return "codex-thread-1"
+
+    supervisor = AgentSupervisor(
+        agent_backends=[
+            ChatBackend(
+                thread_id_factory=create_thread_id,
+            )
+        ],
+    )
+    channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(channel)
+    sender = RemoteParticipant(
+        id="participant-1",
+        attributes={"name": "participant"},
+    )
+
+    await supervisor.start()
+
+    try:
+        await supervisor.route(
+            Message(
+                data=WatchThreads(type=AGENT_MESSAGE_THREAD_WATCH),
+                sender=sender,
+            )
+        )
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    name="Backend Thread Name",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadCreated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+
+        created = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[sender.id]
+            if isinstance(payload, ThreadCreated)
+        ]
+        assert len(created) == 1
+        assert created[0].thread.path == "codex-thread-1"
+        assert created[0].thread.name == "Backend Thread Name"
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_sends_thread_lifecycle_events_to_original_sender_without_watcher() -> (
+    None
+):
+    supervisor = _ThreadLifecycleEventSupervisor()
+    channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(channel)
+    sender = RemoteParticipant(
+        id="participant-1",
+        attributes={"name": "participant"},
+    )
+
+    await supervisor.start()
+
+    try:
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadCreated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+
+        await supervisor.route(
+            Message(
+                data=RenameThread(
+                    type=AGENT_MESSAGE_THREAD_RENAME,
+                    thread_id="/threads/created.thread",
+                    name="Renamed",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadUpdated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+
+        await supervisor.route(
+            Message(
+                data=DeleteThread(
+                    type=AGENT_MESSAGE_THREAD_DELETE,
+                    thread_id="/threads/created.thread",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadDeleted)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+
+        direct_payloads = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[sender.id]
+            if isinstance(payload, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+        ]
+        assert [type(payload) for payload in direct_payloads] == [
+            ThreadCreated,
+            ThreadUpdated,
+            ThreadDeleted,
+        ]
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_list_does_not_watch_and_unwatch_stops_events() -> None:
+    supervisor = _ThreadLifecycleEventSupervisor()
+    channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(channel)
+    sender = RemoteParticipant(
+        id="participant-1",
+        attributes={"name": "participant"},
+    )
+    watcher = RemoteParticipant(
+        id="participant-2",
+        attributes={"name": "watcher"},
+    )
+    listed_only = RemoteParticipant(
+        id="participant-3",
+        attributes={"name": "listed-only"},
+    )
+
+    await supervisor.start()
+
+    try:
+        await supervisor.route(
+            Message(
+                data=ListThreads(type=AGENT_MESSAGE_THREAD_LIST),
+                sender=listed_only,
+            )
+        )
+        await supervisor.route(
+            Message(
+                data=WatchThreads(type=AGENT_MESSAGE_THREAD_WATCH),
+                sender=watcher,
+            )
+        )
+
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadCreated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    watcher.id, []
+                )
+            )
+        )
+        assert [
+            payload
+            for payload in channel.direct_payloads_by_participant_id.get(
+                listed_only.id, []
+            )
+            if isinstance(payload, ThreadCreated)
+        ] == []
+
+        await supervisor.route(
+            Message(
+                data=UnwatchThreads(type=AGENT_MESSAGE_THREAD_UNWATCH),
+                sender=watcher,
+            )
+        )
+        await supervisor.route(
+            Message(
+                data=RenameThread(
+                    type=AGENT_MESSAGE_THREAD_RENAME,
+                    thread_id="/threads/created.thread",
+                    name="Renamed",
+                ),
+                sender=sender,
+            )
+        )
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadUpdated)
+                for payload in channel.direct_payloads_by_participant_id.get(
+                    sender.id, []
+                )
+            )
+        )
+        assert [
+            payload
+            for payload in channel.direct_payloads_by_participant_id.get(watcher.id, [])
+            if isinstance(payload, ThreadUpdated)
+        ] == []
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_participant_isolation_sends_thread_lifecycle_events_to_owner_watchers() -> (
     None
 ):
     supervisor = _ThreadLifecycleEventSupervisor(thread_isolation="participant")
@@ -3725,6 +3991,14 @@ async def test_agent_supervisor_participant_isolation_sends_thread_lifecycle_eve
                         type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
                         participant_id=participant.id,
                     ),
+                    sender=participant,
+                )
+            )
+
+        for participant in [sender, same_participant_other_tab, different_participant]:
+            await supervisor.route(
+                Message(
+                    data=WatchThreads(type=AGENT_MESSAGE_THREAD_WATCH),
                     sender=participant,
                 )
             )
@@ -3784,24 +4058,35 @@ async def test_agent_supervisor_participant_isolation_sends_thread_lifecycle_eve
             )
         )
 
-        direct_payloads = channel.direct_payloads_by_participant_id[sender.id]
+        direct_payloads = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[sender.id]
+            if isinstance(payload, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+        ]
         assert [type(payload) for payload in direct_payloads] == [
             ThreadCreated,
             ThreadUpdated,
             ThreadDeleted,
         ]
-        mirrored_direct_payloads = channel.direct_payloads_by_participant_id[
-            same_participant_other_tab.id
+        mirrored_direct_payloads = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[
+                same_participant_other_tab.id
+            ]
+            if isinstance(payload, (ThreadCreated, ThreadUpdated, ThreadDeleted))
         ]
         assert [type(payload) for payload in mirrored_direct_payloads] == [
             ThreadCreated,
             ThreadUpdated,
             ThreadDeleted,
         ]
-        assert (
-            channel.direct_payloads_by_participant_id.get(different_participant.id)
-            is None
-        )
+        assert [
+            payload
+            for payload in channel.direct_payloads_by_participant_id.get(
+                different_participant.id, []
+            )
+            if isinstance(payload, (ThreadCreated, ThreadUpdated, ThreadDeleted))
+        ] == []
         assert [
             message.data
             for message in channel.received
