@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -3934,6 +3935,7 @@ class _QueuedTurn:
     sender: Participant | None
     request: TurnStart
     queued_messages: list[_QueuedTurnMessage] = field(default_factory=list)
+    restore_session_from_storage: bool = True
 
 
 @dataclass(slots=True)
@@ -4467,7 +4469,7 @@ class LLMAgentProcess(AgentProcess):
         return True
 
     async def _initialize_session_context(
-        self, *, turn_id: str | None
+        self, *, turn_id: str | None, restore_session_from_storage: bool = True
     ) -> AgentSessionContext:
         restore_turn_id = turn_id or ""
         self._session_context = self.llm_adapter.create_session(
@@ -4478,10 +4480,13 @@ class LLMAgentProcess(AgentProcess):
             await self.on_session_context_created()
 
         thread_storage = self.thread_storage
-        if thread_storage is not None:
+        if thread_storage is not None and restore_session_from_storage:
             await thread_storage.restore_session_context_async(
                 context=self._session_context,
                 llm_adapter=self.llm_adapter,
+            )
+            await self._resolve_restored_session_content_urls(
+                context=self._session_context
             )
 
         with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
@@ -4493,6 +4498,112 @@ class LLMAgentProcess(AgentProcess):
             await self._session_context.start()
 
         return self._session_context
+
+    @staticmethod
+    def _file_name_from_url(*, url: str) -> str:
+        parsed = urlparse(url)
+        filename = parsed.path.rsplit("/", 1)[-1].strip()
+        if filename != "":
+            return filename
+        return "attachment"
+
+    @staticmethod
+    def _encoded_file_data_url(*, mime_type: str, data: bytes) -> str:
+        return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
+
+    async def _download_restored_file_url(self, *, url: str) -> FileContent | None:
+        content_scheme = self._resolve_content_scheme(url=url)
+        if content_scheme is None:
+            return None
+        return await content_scheme.download(url)
+
+    async def _resolve_openai_restored_file_part(
+        self,
+        *,
+        part: dict[str, Any],
+    ) -> None:
+        url = part.get("file_url")
+        if not isinstance(url, str):
+            return
+        file_content = await self._download_restored_file_url(url=url)
+        if file_content is None:
+            return
+
+        mime_type = file_content.mime_type or "application/octet-stream"
+        if mime_type.startswith("image/"):
+            part.clear()
+            part.update(
+                {
+                    "type": "input_image",
+                    "image_url": self._encoded_file_data_url(
+                        mime_type=mime_type,
+                        data=file_content.data,
+                    ),
+                }
+            )
+            return
+
+        filename_value = part.get("filename")
+        filename = (
+            filename_value.strip()
+            if isinstance(filename_value, str) and filename_value.strip() != ""
+            else file_content.name or self._file_name_from_url(url=url)
+        )
+        part.clear()
+        part.update(
+            {
+                "type": "input_file",
+                "filename": filename,
+                "file_data": self._encoded_file_data_url(
+                    mime_type=mime_type,
+                    data=file_content.data,
+                ),
+            }
+        )
+
+    async def _resolve_anthropic_restored_file_block(
+        self,
+        *,
+        block: dict[str, Any],
+    ) -> None:
+        source = block.get("source")
+        if not isinstance(source, dict):
+            return
+        url = source.get("url")
+        if not isinstance(url, str):
+            return
+        file_content = await self._download_restored_file_url(url=url)
+        if file_content is None:
+            return
+
+        mime_type = file_content.mime_type or "application/octet-stream"
+        source.clear()
+        source.update(
+            {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": base64.b64encode(file_content.data).decode("utf-8"),
+            }
+        )
+        if block.get("type") == "document" and not isinstance(block.get("title"), str):
+            block["title"] = file_content.name or self._file_name_from_url(url=url)
+
+    async def _resolve_restored_session_content_urls(
+        self,
+        *,
+        context: AgentSessionContext,
+    ) -> None:
+        for message in context.messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "input_file":
+                    await self._resolve_openai_restored_file_part(part=part)
+                elif part.get("type") in {"document", "image"}:
+                    await self._resolve_anthropic_restored_file_block(block=part)
 
     async def _switch_llm_provider_if_needed(
         self,
@@ -4599,7 +4710,7 @@ class LLMAgentProcess(AgentProcess):
         return None
 
     async def ensure_session_context(
-        self, *, turn_id: str | None
+        self, *, turn_id: str | None, restore_session_from_storage: bool = True
     ) -> AgentSessionContext:
         restore_turn_id = turn_id or ""
         with tracer.start_as_current_span("agent.turn.context.load") as span:
@@ -4608,7 +4719,10 @@ class LLMAgentProcess(AgentProcess):
                 span.set_attribute("turn_id", turn_id)
             span.set_attribute("context.cached", self._session_context is not None)
             if self._session_context is None:
-                await self._initialize_session_context(turn_id=restore_turn_id)
+                await self._initialize_session_context(
+                    turn_id=restore_turn_id,
+                    restore_session_from_storage=restore_session_from_storage,
+                )
 
         return self._session_context
 
@@ -6475,7 +6589,10 @@ class LLMAgentProcess(AgentProcess):
                         source_message_id=queued_turn.request.message_id,
                     ),
                 )
-            session = await self.ensure_session_context(turn_id=turn_id)
+            session = await self.ensure_session_context(
+                turn_id=turn_id,
+                restore_session_from_storage=queued_turn.restore_session_from_storage,
+            )
             turn_span.set_attribute("provider", provider.name)
             turn_span.set_attribute("model", model)
             original_instructions = session.instructions
@@ -6877,6 +6994,12 @@ class LLMAgentProcess(AgentProcess):
             sender=message.sender,
             request=turn,
         )
+        thread_storage = self.thread_storage
+        restore_session_from_storage = (
+            thread_storage is not None
+            and len(thread_storage.agent_messages()) > 0
+            and self._session_context is None
+        )
         self._record_accepted_turns(queued_messages=[queued_message])
         should_track_pending_status = (
             self._turn_task is not None or self._has_pending_turns()
@@ -6886,6 +7009,7 @@ class LLMAgentProcess(AgentProcess):
                 _QueuedTurn(
                     sender=message.sender,
                     request=turn,
+                    restore_session_from_storage=restore_session_from_storage,
                 )
             )
         with tracer.start_as_current_span("agent.turn.accepted.emit"):

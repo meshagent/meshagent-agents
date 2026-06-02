@@ -797,6 +797,31 @@ class _ProviderRestoreRecordingThreadStorage(_LifecycleThreadStorage):
         context.append_assistant_message(f"restored {len(self.restore_calls)}")
 
 
+class _OpenAIRoomFileRestoreThreadStorage(_LifecycleThreadStorage):
+    def restore_session_context(
+        self,
+        *,
+        context: AgentSessionContext,
+        llm_adapter=None,
+    ) -> None:
+        del llm_adapter
+        context.messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "what is in the file?",
+                    },
+                    {
+                        "type": "input_file",
+                        "file_url": "room:///docs/report.pdf",
+                    },
+                ],
+            }
+        )
+
+
 class _StorageThreadRecordingProcess(AgentProcess):
     def __init__(
         self,
@@ -5169,6 +5194,7 @@ async def test_agent_supervisor_routes_process_emitted_events_to_channels() -> N
             "thread_id": "thread-1",
             "payload": "ok",
             "message_id": channel.received[0].data.message_id,
+            "created_at": channel.received[0].data.created_at,
             "sender_name": None,
         }
     ]
@@ -8090,6 +8116,103 @@ async def test_llm_agent_process_handles_audio_file_attachments_as_files() -> No
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_does_not_restore_empty_thread_after_recording_turn() -> (
+    None
+):
+    session = _LifecycleSession()
+    adapter = _RecordingLLMAdapter(session=session)
+    thread_storage = _RestoringLifecycleThreadStorage(path="thread-1")
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "new thread message"}],
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    assert [message.get("content") for message in adapter.calls[0]["messages"]] == [
+        "new thread message"
+    ]
+    assert isinstance(thread_storage.agent_messages()[0], TurnStart)
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_process_resolves_restored_openai_room_file_urls() -> None:
+    session = _LifecycleSession()
+    adapter = _RecordingLLMAdapter(session=session)
+    thread_storage = _OpenAIRoomFileRestoreThreadStorage(path="thread-1")
+    thread_storage.push_message(
+        message=TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="thread-1",
+            turn_id="old-turn",
+        )
+    )
+    room = _DownloadRecordingRoom(
+        files={
+            "docs/report.pdf": FileContent(
+                data=b"%PDF-1.7",
+                name="report.pdf",
+                mime_type="application/pdf",
+            ),
+        }
+    )
+    supervisor = _RecordingSupervisor()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        thread_storage=thread_storage,
+    )
+
+    await process.start(supervisor)
+
+    process.send(
+        Message(
+            data=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                thread_id="thread-1",
+                content=[{"type": "text", "text": "continue"}],
+            )
+        )
+    )
+
+    await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
+    await _wait_for(
+        lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
+    )
+
+    restored_part = adapter.calls[0]["messages"][0]["content"][1]
+    assert room.storage.download_calls == ["docs/report.pdf"]
+    assert restored_part == {
+        "type": "input_file",
+        "filename": "report.pdf",
+        "file_data": "data:application/pdf;base64,JVBERi0xLjc=",
+    }
+
+    await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_preserves_data_url_file_attachments() -> None:
     session = _AttachmentRecordingSession()
     adapter = _RecordingLLMAdapter(session=session)
@@ -8239,6 +8362,7 @@ async def test_llm_agent_process_realtime_audio_commit_then_turn_start_runs_one_
     assert audio_transcriptions == [
         {
             "content_index": None,
+            "created_at": audio_transcriptions[0]["created_at"],
             "item_id": "user-audio-1",
             "message_id": audio_transcriptions[0]["message_id"],
             "model": "default-model",
@@ -8632,11 +8756,9 @@ async def test_llm_agent_process_turn_provider_override_switches_and_restores() 
         )
         await _wait_for(lambda: len(secondary.calls) == 1)
 
-        assert len(storage.restore_calls) == 2
-        assert storage.restore_calls[0]["context"] is primary_session
-        assert storage.restore_calls[0]["llm_adapter"] is primary
-        assert storage.restore_calls[1]["context"] is secondary_session
-        assert storage.restore_calls[1]["llm_adapter"] is secondary
+        assert len(storage.restore_calls) == 1
+        assert storage.restore_calls[0]["context"] is secondary_session
+        assert storage.restore_calls[0]["llm_adapter"] is secondary
         assert primary.stop_session_calls == [{"context": primary_session}]
         assert primary_session.closed == 1
         assert process.session_context is secondary_session
