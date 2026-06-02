@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterable, Callable, Iterable
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -257,6 +257,7 @@ class BaseChatClient(ABC):
         self._pending_thread_sessions: set[ChatThreadSession] = set()
         self._connection_status: AgentConnectionStatus | None = None
         self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._event_subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
 
     async def __aenter__(self) -> BaseChatClient:
         await self.start()
@@ -378,6 +379,22 @@ class BaseChatClient(ABC):
     def connection_status(self) -> AgentConnectionStatus | None:
         return self._connection_status
 
+    @property
+    def events(self) -> AsyncIterable[dict[str, Any]]:
+        async def _events() -> AsyncIterator[dict[str, Any]]:
+            queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            self._event_subscribers.add(queue)
+            try:
+                while True:
+                    payload = await queue.get()
+                    if payload is None:
+                        return
+                    yield payload
+            finally:
+                self._event_subscribers.discard(queue)
+
+        return _events()
+
     def _emit_connection_status(
         self,
         *,
@@ -395,8 +412,7 @@ class BaseChatClient(ABC):
         )
         self._connection_status = payload
         payload_json = payload.model_dump(mode="json", exclude_none=True)
-        for session in self._all_sessions():
-            session._handle_agent_payload(payload_json)
+        self._emit_event(payload_json)
 
     def _register_thread_session(self, session: ChatThreadSession) -> None:
         self._pending_thread_sessions.discard(session)
@@ -411,6 +427,7 @@ class BaseChatClient(ABC):
 
     def _handle_agent_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
+        self._emit_event(payload)
         if payload_type in (
             AGENT_EVENT_THREAD_STARTED,
             AGENT_MESSAGE_MODELS_RESPONSE,
@@ -425,7 +442,6 @@ class BaseChatClient(ABC):
             AGENT_EVENT_THREAD_UPDATED,
             AGENT_EVENT_THREAD_DELETED,
         ):
-            self._emit_event(payload)
             for session in self._all_sessions():
                 session._handle_agent_payload(payload)
             return
@@ -446,6 +462,8 @@ class BaseChatClient(ABC):
     def _emit_event(self, payload: dict[str, Any]) -> None:
         for callback in tuple(self._event_listeners):
             callback(payload)
+        for queue in tuple(self._event_subscribers):
+            queue.put_nowait(payload)
 
 
 class ChatThreadSession:
@@ -1847,7 +1865,9 @@ class MessagingChatClient(BaseChatClient):
         self._room = room
         self._participant_name = participant_name
         self._participant: RemoteParticipant | None = None
-        self._room_status_connected = False
+        self._has_connected = False
+        self._waiting_for_participant = False
+        self._reload_task: asyncio.Task[None] | None = None
 
     @property
     def room(self) -> RoomClient:
@@ -1862,15 +1882,23 @@ class MessagingChatClient(BaseChatClient):
         self._room.on("disconnected", self._on_room_disconnected)
         self._room.on("reconnected", self._on_room_reconnected)
         self._room.messaging.on("message", self._on_message)
+        self._room.messaging.on("participant_added", self._on_participant_added)
+        self._room.messaging.on("participant_removed", self._on_participant_removed)
+        self._room.messaging.on("messaging_enabled", self._on_messaging_enabled)
         if not self._room.messaging.is_enabled:
             await self._room.messaging.enable()
         await self._wait_for_participant()
-        self._emit_connection_status(
-            status="connected",
-            message=f"connected to {self._participant_name}",
-        )
+        self._mark_participant_online(self._participant)
 
     async def _stop_transport(self) -> None:
+        reload_task = self._reload_task
+        self._reload_task = None
+        if reload_task is not None:
+            reload_task.cancel()
+            await asyncio.gather(reload_task, return_exceptions=True)
+        self._room.messaging.off("messaging_enabled", self._on_messaging_enabled)
+        self._room.messaging.off("participant_removed", self._on_participant_removed)
+        self._room.messaging.off("participant_added", self._on_participant_added)
         self._room.messaging.off("message", self._on_message)
         self._room.off("room.status", self._on_room_status)
         self._room.off("disconnected", self._on_room_disconnected)
@@ -1889,48 +1917,153 @@ class MessagingChatClient(BaseChatClient):
         message = message_value if isinstance(message_value, str) else None
         normalized = status.strip().lower()
         if normalized in ("connected", "ready"):
-            status_name = "connected"
-            self._room_status_connected = True
+            self._refresh_participant_state()
+            return
         elif normalized == "reconnected":
-            status_name = "reconnected" if self._room_status_connected else "connected"
-            self._room_status_connected = True
+            self._on_room_reconnected()
+            return
         elif normalized == "disconnected":
-            status_name = "disconnected"
-            self._room_status_connected = False
+            self._participant = None
+            self._waiting_for_participant = False
+            self._emit_connection_status(
+                status="disconnected",
+                message=message or "agent messaging disconnected",
+                reason=message,
+            )
+            return
         elif normalized in ("reconnecting", "connecting"):
-            status_name = "reconnecting"
+            self._participant = None
+            self._waiting_for_participant = True
+            self._emit_connection_status(
+                status="reconnecting",
+                message=message or "waiting for agent messaging",
+                reason=message,
+            )
+            return
         else:
             return
-        self._emit_connection_status(
-            status=status_name,
-            message=message,
-            reason=message if status_name == "disconnected" else None,
-        )
 
     def _on_room_disconnected(self, **kwargs: object) -> None:
         reason_value = kwargs.get("reason")
         reason = reason_value if isinstance(reason_value, str) else None
-        self._room_status_connected = False
+        self._participant = None
+        self._waiting_for_participant = False
         self._emit_connection_status(
             status="disconnected",
-            message=reason or "room connection lost",
+            message=reason or "agent messaging disconnected",
             reason=reason,
         )
 
     def _on_room_reconnected(self, **_: object) -> None:
-        status = "reconnected" if self._room_status_connected else "connected"
-        self._room_status_connected = True
+        self._refresh_participant_state(waiting_message="waiting for agent messaging")
+
+    def _on_messaging_enabled(self) -> None:
+        self._refresh_participant_state()
+
+    def _on_participant_added(self, *, participant: RemoteParticipant) -> None:
+        if self._participant_matches(participant):
+            self._mark_participant_online(participant)
+
+    def _on_participant_removed(self, *, participant: RemoteParticipant) -> None:
+        if self._participant is None or participant.id != self._participant.id:
+            return
+        self._participant = None
+        self._waiting_for_participant = True
+        self._emit_connection_status(
+            status="disconnected",
+            message="agent messaging disconnected",
+            reason="participant_disconnected",
+        )
+        self._emit_connection_status(
+            status="reconnecting",
+            message="waiting for agent messaging",
+            reason="participant_disconnected",
+        )
+
+    def _refresh_participant_state(
+        self, *, waiting_message: str = "waiting for agent messaging"
+    ) -> None:
+        participant = self._find_participant()
+        if participant is None:
+            self._participant = None
+            self._waiting_for_participant = True
+            self._emit_connection_status(
+                status="reconnecting",
+                message=waiting_message,
+                reason="participant_offline",
+            )
+            return
+        self._mark_participant_online(participant)
+
+    def _mark_participant_online(self, participant: RemoteParticipant | None) -> None:
+        if participant is None:
+            return
+        was_waiting = self._waiting_for_participant
+        was_connected = self._has_connected
+        previous_id = self._participant.id if self._participant is not None else None
+        if was_connected and not was_waiting and previous_id == participant.id:
+            self._participant = participant
+            return
+        self._participant = participant
+        self._waiting_for_participant = False
+        self._has_connected = True
+        status = (
+            "reconnected"
+            if was_connected and (was_waiting or previous_id != participant.id)
+            else "connected"
+        )
         self._emit_connection_status(
             status=status,
-            message="room connection restored",
+            message=f"{status} to {self._participant_name}",
         )
+        if status == "reconnected":
+            self._schedule_reopen_sessions()
+
+    def _find_participant(self) -> RemoteParticipant | None:
+        for participant in self._room.messaging.get_participants():
+            if self._participant_matches(participant):
+                return participant
+        return None
+
+    def _participant_matches(self, participant: RemoteParticipant) -> bool:
+        if participant.get_attribute("name") != self._participant_name:
+            return False
+        return True
+
+    def _schedule_reopen_sessions(self) -> None:
+        if self._reload_task is not None and not self._reload_task.done():
+            return
+        self._reload_task = asyncio.create_task(self._reopen_sessions())
+        self._reload_task.add_done_callback(_consume_task_exception)
+
+    async def _reopen_sessions(self) -> None:
+        messages: list[AgentMessage] = []
+        for session in self._thread_sessions.values():
+            if session._closed:
+                continue
+            messages.append(
+                OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id=session.thread_path,
+                    backend=(
+                        session.current_model.backend
+                        if session.current_model is not None
+                        else None
+                    ),
+                    load=True,
+                    since_turn=session.last_completed_turn_id,
+                )
+            )
+        messages.append(ModelsRequest(type=AGENT_MESSAGE_MODELS_REQUEST))
+        for message in messages:
+            await self._send_agent_message(message)
 
     async def _wait_for_participant(self) -> None:
         try:
             async with asyncio.timeout(self._timeout):
                 while self._participant is None:
                     for participant in self._room.messaging.get_participants():
-                        if participant.get_attribute("name") != self._participant_name:
+                        if not self._participant_matches(participant):
                             continue
                         self._participant = participant
                         return

@@ -8,6 +8,7 @@ from meshagent.agents.chat_channel import MsgpackWebSocketChatEncoding
 from meshagent.agents.chat_client import (
     BaseChatClient,
     ChatThreadSession,
+    MessagingChatClient,
     WebSocketChatClient,
 )
 from meshagent.agents.messages import (
@@ -552,7 +553,15 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
         reconnect_initial_delay=0.01,
         reconnect_max_delay=0.01,
     )
+    client_events: list[dict[str, Any]] = []
+    client_event_task: asyncio.Task[None] | None = None
     try:
+
+        async def collect_client_events() -> None:
+            async for payload in client.events:
+                client_events.append(payload)
+
+        client_event_task = asyncio.create_task(collect_client_events())
         await client.start()
         await _wait_for(lambda: len(sockets) == 1)
         session = await client.open_thread("/threads/reconnect.thread")
@@ -565,12 +574,18 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
             )
         )
 
-        reconnecting = await _receive_until(
-            session,
-            lambda payload: (
+        await _wait_for(
+            lambda: any(
                 payload.get("type") == AGENT_EVENT_CONNECTION_STATUS
                 and payload.get("status") == "reconnecting"
+                for payload in client_events
             ),
+        )
+        reconnecting = next(
+            payload
+            for payload in client_events
+            if payload.get("type") == AGENT_EVENT_CONNECTION_STATUS
+            and payload.get("status") == "reconnecting"
         )
         assert AgentConnectionStatus.model_validate(reconnecting).status == (
             "reconnecting"
@@ -588,18 +603,122 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
         assert reopened["load"] is True
         assert reopened["since_turn"] == "turn-1"
 
-        reconnected = await _receive_until(
-            session,
-            lambda payload: (
+        await _wait_for(
+            lambda: any(
                 payload.get("type") == AGENT_EVENT_CONNECTION_STATUS
                 and payload.get("status") == "reconnected"
+                for payload in client_events
             ),
+        )
+        reconnected = next(
+            payload
+            for payload in client_events
+            if payload.get("type") == AGENT_EVENT_CONNECTION_STATUS
+            and payload.get("status") == "reconnected"
         )
         assert AgentConnectionStatus.model_validate(reconnected).status == (
             "reconnected"
         )
     finally:
+        if client_event_task is not None:
+            client_event_task.cancel()
+            await asyncio.gather(client_event_task, return_exceptions=True)
         await client.stop()
         for websocket in sockets:
             await websocket.close()
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_messaging_chat_client_reconnect_tracks_participant_and_reopens_thread() -> (
+    None
+):
+    class _Participant:
+        id = "agent-1"
+
+        def get_attribute(self, name: str):
+            if name == "name":
+                return "assistant"
+            if name == "supports_agent_messages":
+                return True
+            return None
+
+    class _Messaging:
+        def __init__(self) -> None:
+            self.is_enabled = True
+            self.participants: list[_Participant] = [_Participant()]
+            self.handlers: dict[str, list[Any]] = {}
+            self.sent_payloads: list[dict[str, Any]] = []
+
+        def on(self, event: str, handler) -> None:
+            self.handlers.setdefault(event, []).append(handler)
+
+        def off(self, event: str, handler) -> None:
+            self.handlers.get(event, []).remove(handler)
+
+        def get_participants(self) -> list[_Participant]:
+            return list(self.participants)
+
+        async def enable(self) -> None:
+            self.is_enabled = True
+
+        async def send_message(
+            self,
+            *,
+            to,
+            type: str,
+            message: dict[str, Any],
+            attachment,
+        ) -> None:
+            assert to is self.participants[0]
+            assert type == "agent-message"
+            assert attachment is None
+            self.sent_payloads.append(message)
+
+        def remove_agent(self) -> _Participant:
+            participant = self.participants.pop()
+            for handler in self.handlers.get("participant_removed", []):
+                handler(participant=participant)
+            return participant
+
+        def add_agent(self, participant: _Participant) -> None:
+            self.participants.append(participant)
+            for handler in self.handlers.get("participant_added", []):
+                handler(participant=participant)
+
+    class _Room:
+        def __init__(self) -> None:
+            self.messaging = _Messaging()
+            self.handlers: dict[str, list[Any]] = {}
+
+        def on(self, event: str, handler) -> None:
+            self.handlers.setdefault(event, []).append(handler)
+
+        def off(self, event: str, handler) -> None:
+            self.handlers.get(event, []).remove(handler)
+
+    room = _Room()
+    client = MessagingChatClient(room=room, participant_name="assistant", timeout=0.1)
+    await client.start()
+    session = await client.open_thread("/threads/reconnect.thread", load=False)
+    assert session.thread_path == "/threads/reconnect.thread"
+
+    assert client.connection_status is not None
+    assert client.connection_status.status == "connected"
+
+    participant = room.messaging.remove_agent()
+    assert client.connection_status is not None
+    assert client.connection_status.status == "reconnecting"
+
+    room.messaging.add_agent(participant)
+    await _wait_for(
+        lambda: any(
+            payload.get("type") == AGENT_MESSAGE_THREAD_OPEN
+            and payload.get("thread_id") == "/threads/reconnect.thread"
+            and payload.get("load") is True
+            for payload in room.messaging.sent_payloads
+        )
+    )
+    assert client.connection_status is not None
+    assert client.connection_status.status == "reconnected"
+    await client.close()
