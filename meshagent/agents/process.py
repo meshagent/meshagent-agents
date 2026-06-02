@@ -103,6 +103,7 @@ from .messages import (
     AGENT_MESSAGE_TURN_STEER,
     AGENT_EVENT_SECRET_REQUESTED,
     AgentError,
+    AgentAudioContent,
     AgentFileContent,
     AgentContextCompacted,
     AgentLLMMessage,
@@ -839,7 +840,10 @@ def _start_thread_name_input(start_thread: StartThread) -> tuple[str, list[str]]
     for item in start_thread.content or []:
         if isinstance(item, AgentTextContent) and item.text.strip() != "":
             text_parts.append(item.text.strip())
-        elif isinstance(item, AgentFileContent) and item.url.strip() != "":
+        elif (
+            isinstance(item, (AgentFileContent, AgentAudioContent))
+            and item.url.strip() != ""
+        ):
             attachments.append(item.url.strip())
     return " ".join(text_parts).strip(), attachments
 
@@ -1038,14 +1042,23 @@ class LLMBackend:
                     else sender
                 )
                 if caller is not None:
+                    name_provider = self._default_provider
+                    try:
+                        name_provider = self._resolve_provider(start_thread.provider)
+                    except ValueError:
+                        pass
+                    thread_name_adapter = (
+                        self._thread_name_adapter or name_provider.adapter
+                    )
+                    thread_name_model = self._thread_name_model or start_thread.model
                     with tracer.start_as_current_span("agent.thread.name.generate"):
                         name = await determine_thread_name(
-                            adapter=self._thread_name_adapter,
+                            adapter=thread_name_adapter,
                             caller=caller,
                             message_text=message_text,
                             attachments=attachments,
                             on_behalf_of=sender,
-                            model=self._thread_name_model,
+                            model=thread_name_model,
                         )
 
             thread_id = await thread_id_task
@@ -1389,15 +1402,7 @@ class AgentSupervisor:
     ) -> None:
         self.channels: list[Channel] = []
         self.processes: list[AgentProcess] = []
-        self._agent_backends = list(agent_backends or [])
-        self._agent_backends_by_name = {
-            backend.name: backend for backend in self._agent_backends
-        }
-        if len(self._agent_backends_by_name) != len(self._agent_backends):
-            raise ValueError("agent backend names must be unique")
-        self._default_agent_backend = (
-            self._agent_backends[0] if len(self._agent_backends) > 0 else None
-        )
+        self._set_agent_backends(list(agent_backends or []))
         self._thread_storage_repository = (
             thread_storage_repository or NoopThreadStorageRepository()
         )
@@ -1419,12 +1424,39 @@ class AgentSupervisor:
         self._pending_stop_thread_tasks_by_thread_id: dict[str, asyncio.Task[None]] = {}
         self._pending_thread_metadata_tasks: set[asyncio.Task[None]] = set()
 
+    def _set_agent_backends(self, agent_backends: list[AgentBackend]) -> None:
+        self._agent_backends = list(agent_backends)
+        self._agent_backends_by_name = {
+            backend.name: backend for backend in self._agent_backends
+        }
+        if len(self._agent_backends_by_name) != len(self._agent_backends):
+            raise ValueError("agent backend names must be unique")
+        self._default_agent_backend = (
+            self._agent_backends[0] if len(self._agent_backends) > 0 else None
+        )
+
     @property
     def state(self) -> SupervisorState:
         return self._state
 
     @property
     def thread_storage_repository(self) -> ThreadStorageRepository:
+        return self._thread_storage_repository
+
+    def thread_storage_repository_for_thread(
+        self,
+        *,
+        thread_id: str,
+    ) -> ThreadStorageRepository:
+        del thread_id
+        return self._thread_storage_repository
+
+    def thread_storage_repository_for_sender(
+        self,
+        *,
+        sender: Participant | None,
+    ) -> ThreadStorageRepository:
+        del sender
         return self._thread_storage_repository
 
     @property
@@ -2035,6 +2067,8 @@ class AgentSupervisor:
 
     def agent_backend_for_thread(self, *, thread_id: str) -> AgentBackend | None:
         backend_name = self._backend_by_thread_id.get(thread_id)
+        if backend_name is None and len(self._agent_backends) == 1:
+            return self._default_agent_backend
         return self.agent_backend_for_name(backend_name=backend_name)
 
     def set_thread_backend(
@@ -2057,7 +2091,9 @@ class AgentSupervisor:
     ) -> ThreadListEntry | None:
         del start_thread
         del sender
-        return await self.thread_storage_repository.upsert_thread(
+        return await self.thread_storage_repository_for_thread(
+            thread_id=created_thread.thread_id,
+        ).upsert_thread(
             path=created_thread.thread_id,
             name=created_thread.name,
         )
@@ -2117,7 +2153,9 @@ class AgentSupervisor:
         sender: Participant | None,
     ) -> None:
         del sender
-        await self.thread_storage_repository.delete_thread(
+        await self.thread_storage_repository_for_thread(
+            thread_id=delete_thread.thread_id,
+        ).delete_thread(
             path=delete_thread.thread_id,
         )
 
@@ -2131,7 +2169,9 @@ class AgentSupervisor:
         name = " ".join(rename_thread.name.split())
         if name == "":
             return None
-        return await self.thread_storage_repository.rename_thread(
+        return await self.thread_storage_repository_for_thread(
+            thread_id=rename_thread.thread_id,
+        ).rename_thread(
             path=rename_thread.thread_id,
             name=name,
         )
@@ -2142,8 +2182,9 @@ class AgentSupervisor:
         list_threads: ListThreads,
         sender: Participant | None,
     ) -> ThreadListPage:
-        del sender
-        return await self.thread_storage_repository.list_threads(
+        return await self.thread_storage_repository_for_sender(
+            sender=sender,
+        ).list_threads(
             limit=list_threads.limit,
             offset=list_threads.offset,
         )
