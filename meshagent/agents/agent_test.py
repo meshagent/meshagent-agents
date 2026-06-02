@@ -48,7 +48,7 @@ class _FakeAgentsClient:
         self._toolkits = list(toolkits or [])
         self._toolkits_by_participant_id = dict(toolkits_by_participant_id or {})
         self.calls: list[dict[str, Any]] = []
-        self.list_toolkit_calls: list[dict[str, str | None]] = []
+        self.list_toolkit_calls: list[dict[str, str | int | None]] = []
 
     async def invoke_tool(
         self,
@@ -75,11 +75,13 @@ class _FakeAgentsClient:
         *,
         participant_id: str | None = None,
         participant_name: str | None = None,
+        timeout: int | None = None,
     ) -> list[Any]:
         self.list_toolkit_calls.append(
             {
                 "participant_id": participant_id,
                 "participant_name": participant_name,
+                "timeout": timeout,
             }
         )
         if participant_id is not None:
@@ -239,8 +241,8 @@ async def test_single_room_agent_missing_required_toolkit_error_names_participan
         "for caller participant(id=caller-id, name=Caller Agent)"
     )
     assert fake_agents.list_toolkit_calls == [
-        {"participant_id": None, "participant_name": None},
-        {"participant_id": "user-id", "participant_name": None},
+        {"participant_id": None, "participant_name": None, "timeout": None},
+        {"participant_id": "user-id", "participant_name": None, "timeout": 0},
     ]
 
 
@@ -281,8 +283,8 @@ async def test_single_room_agent_required_toolkit_finds_public_room_toolkit() ->
     assert len(toolkits) == 1
     await toolkits[0].tools[0].execute(context=context)
     assert fake_agents.list_toolkit_calls == [
-        {"participant_id": None, "participant_name": None},
-        {"participant_id": "user-id", "participant_name": None},
+        {"participant_id": None, "participant_name": None, "timeout": None},
+        {"participant_id": "user-id", "participant_name": None, "timeout": 0},
     ]
     assert fake_agents.calls[0]["toolkit"] == "PersonalAssistant"
     assert fake_agents.calls[0]["tool"] == "lookup"
@@ -336,6 +338,51 @@ async def test_single_room_agent_tool_search_toolkits_filter_on_annotation() -> 
 
 
 @pytest.mark.asyncio
+async def test_single_room_agent_tool_search_does_not_wait_for_participant_toolkits() -> (
+    None
+):
+    annotated_tool = ToolDescription(
+        name="lookup",
+        title="",
+        description="",
+        input_spec=ToolContentSpec(
+            types=["json"],
+            schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
+    )
+    participant_toolkit = ToolkitDescription(
+        name="ParticipantAssistant",
+        title="",
+        description="",
+        annotations={TOOL_SEARCH_ANNOTATION: "true"},
+        tools=[annotated_tool],
+        participant_id="user-id",
+    )
+    fake_agents = _FakeAgentsClient(
+        response=None,
+        toolkits_by_participant_id={"user-id": [participant_toolkit]},
+    )
+    room = _FakeRoom(agents=fake_agents)
+    agent = SingleRoomAgent(name="helper")
+    agent._room = room
+    caller = Participant(id="caller-id", attributes={"name": "Caller Agent"})
+    on_behalf_of = Participant(id="user-id", attributes={"name": "Ada"})
+    context = ToolContext(caller=caller, on_behalf_of=on_behalf_of)
+
+    toolkits = await agent.get_tool_search_toolkits(context)
+
+    assert [toolkit.name for toolkit in toolkits] == ["ParticipantAssistant"]
+    assert fake_agents.list_toolkit_calls == [
+        {"participant_id": None, "participant_name": None, "timeout": None},
+        {"participant_id": "user-id", "participant_name": None, "timeout": 0},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_single_room_agent_forwards_web_participant_on_behalf_of_id() -> None:
     tool_description = ToolDescription(
         name="lookup",
@@ -375,7 +422,7 @@ async def test_single_room_agent_forwards_web_participant_on_behalf_of_id() -> N
     assert len(toolkits) == 1
     await toolkits[0].tools[0].execute(context=context)
     assert fake_agents.list_toolkit_calls == [
-        {"participant_id": None, "participant_name": None},
+        {"participant_id": None, "participant_name": None, "timeout": None},
     ]
     assert fake_agents.calls[0]["toolkit"] == "PersonalAssistant"
     assert fake_agents.calls[0]["tool"] == "lookup"

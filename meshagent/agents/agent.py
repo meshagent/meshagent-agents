@@ -490,7 +490,8 @@ class SingleRoomAgent:
             and tool_target_room_participant_id is not None
         ):
             participant_tools = await self._room.agents.list_toolkits(
-                participant_id=tool_target_room_participant_id
+                participant_id=tool_target_room_participant_id,
+                timeout=0,
             )
 
             for toolkit_description in participant_tools:
@@ -512,7 +513,8 @@ class SingleRoomAgent:
                         toolkits_by_participant[
                             required_toolkit.participant_name
                         ] = await self._room.agents.list_toolkits(
-                            participant_name=required_toolkit.participant_name
+                            participant_name=required_toolkit.participant_name,
+                            timeout=0,
                         )
 
                     for tk in toolkits_by_participant[
@@ -577,7 +579,8 @@ class SingleRoomAgent:
             and tool_target_room_participant_id is not None
         ):
             participant_tools = await self._room.agents.list_toolkits(
-                participant_id=tool_target_room_participant_id
+                participant_id=tool_target_room_participant_id,
+                timeout=0,
             )
             for toolkit in participant_tools:
                 room_toolkits.append((toolkit, tool_target_room_participant_id))
