@@ -531,6 +531,63 @@ class _RecordingBackend:
         return process
 
 
+class _SlowMetadataBackend(_RecordingBackend):
+    def __init__(self, *, name: str, thread_id: str = "/threads/backend") -> None:
+        super().__init__(name=name, thread_id=thread_id)
+        self.release_metadata = asyncio.Event()
+        self.metadata_started = asyncio.Event()
+
+    async def create_thread(
+        self,
+        *,
+        supervisor: AgentSupervisor,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> CreatedAgentThread:
+        del supervisor
+        del start_thread
+        del sender
+
+        async def metadata() -> ThreadListEntry | None:
+            self.metadata_started.set()
+            await self.release_metadata.wait()
+            return ThreadListEntry(
+                path=self.thread_id,
+                name="Generated Backend Thread",
+                created_at="2026-01-01T00:00:00Z",
+                modified_at="2026-01-01T00:00:01Z",
+            )
+
+        return CreatedAgentThread(
+            thread_id=self.thread_id,
+            name="Backend Thread",
+            metadata=metadata,
+        )
+
+
+class _TurnHookSupervisor(AgentSupervisor):
+    async def on_thread_start_message(
+        self,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> StartThread:
+        del sender
+        return start_thread.model_copy(update={"instructions": "thread hook"})
+
+    async def on_turn_start_message(
+        self,
+        turn_start: TurnStart,
+        sender: Participant | None,
+    ) -> TurnStart:
+        del sender
+        prefix = (
+            f"{turn_start.instructions}; "
+            if turn_start.instructions is not None
+            else ""
+        )
+        return turn_start.model_copy(update={"instructions": f"{prefix}turn hook"})
+
+
 class _FailingStartProcess(AgentProcess):
     async def on_start(self) -> None:
         raise RuntimeError("boom")
@@ -830,6 +887,9 @@ class _RecordedSpan:
     def set_attribute(self, name: str, value: object) -> None:
         self.attributes[name] = value
 
+    def end(self) -> None:
+        pass
+
 
 class _RecordedSpanContext:
     def __init__(self, spans: list[_RecordedSpan], name: str) -> None:
@@ -850,6 +910,11 @@ class _RecordedTracer:
 
     def start_as_current_span(self, name: str) -> _RecordedSpanContext:
         return _RecordedSpanContext(self.spans, name)
+
+    def start_span(self, name: str) -> _RecordedSpan:
+        span = _RecordedSpan(name)
+        self.spans.append(span)
+        return span
 
 
 class _PayloadMessage(AgentMessage):
@@ -3368,6 +3433,111 @@ async def test_agent_supervisor_single_backend_infers_missing_turn_backend() -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_supervisor_does_not_wait_for_thread_metadata_before_turn_dispatch() -> (
+    None
+):
+    backend = _SlowMetadataBackend(name="only")
+    supervisor = AgentSupervisor(agent_backends=[backend])
+    channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(backend.created_processes) == 1)
+        process = backend.created_processes[0]
+        await _wait_for(lambda: len(process.received) == 1)
+        assert isinstance(process.received[0].data, TurnStart)
+        assert backend.metadata_started.is_set()
+        assert [
+            payload.thread.name
+            for payload in channel.direct_payloads_by_participant_id[participant.id]
+            if isinstance(payload, ThreadCreated)
+        ] == ["Backend Thread"]
+        assert [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[participant.id]
+            if isinstance(payload, ThreadUpdated)
+        ] == []
+
+        backend.release_metadata.set()
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadUpdated)
+                for payload in channel.direct_payloads_by_participant_id[participant.id]
+            )
+        )
+        updated = [
+            payload
+            for payload in channel.direct_payloads_by_participant_id[participant.id]
+            if isinstance(payload, ThreadUpdated)
+        ]
+        assert updated[-1].thread.name == "Generated Backend Thread"
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_turn_start_hooks_can_replace_instructions() -> None:
+    backend = _RecordingBackend(name="only")
+    supervisor = _TurnHookSupervisor(agent_backends=[backend])
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    participant = _ThreadParticipant(name="User", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=StartThread(
+                    type=AGENT_MESSAGE_THREAD_START,
+                    content=[AgentTextContent(type="text", text="hello")],
+                    instructions="client instructions",
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+
+        await _wait_for(lambda: len(backend.created_processes) == 1)
+        first_process = backend.created_processes[0]
+        await _wait_for(lambda: len(first_process.received) == 1)
+        first_turn = first_process.received[0].data
+        assert isinstance(first_turn, TurnStart)
+        assert first_turn.instructions == "thread hook; turn hook"
+
+        await supervisor.route(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id=backend.thread_id,
+                    content=[AgentTextContent(type="text", text="again")],
+                    instructions="client instructions",
+                ),
+                sender=participant,
+                source=channel,
+            )
+        )
+        await _wait_for(lambda: len(first_process.received) == 2)
+        second_turn = first_process.received[1].data
+        assert isinstance(second_turn, TurnStart)
+        assert second_turn.instructions == "client instructions; turn hook"
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_supervisor_multiple_backends_require_turn_backend() -> None:
     first_backend = _RecordingBackend(name="first")
     second_backend = _RecordingBackend(name="second")
@@ -5646,7 +5816,11 @@ async def test_llm_agent_process_traces_turn_lifecycle(
 
     span_names = [span.name for span in recorded_tracer.spans]
     assert span_names == [
+        "agent.turn.queue",
+        "agent.turn.accepted.emit",
         "agent.turn",
+        "agent.turn.pending_status.remove",
+        "agent.turn.started.emit",
         "agent.turn.context.load",
         "agent.turn.context.initialize",
         "agent.turn.context.restore_hooks",
@@ -5654,6 +5828,10 @@ async def test_llm_agent_process_traces_turn_lifecycle(
         "agent.turn.rules.load",
         "agent.turn.toolkits.build",
         "agent.turn.llm",
+        "agent.turn.llm.start_session",
+        "agent.turn.llm.first_event",
+        "agent.turn.llm.first_text_delta",
+        "agent.turn.llm.create_response",
     ]
 
     turn_span = next(

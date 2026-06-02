@@ -44,7 +44,11 @@ from .thread_storage import (
     ThreadStorage,
     ThreadStorageRepository,
 )
-from .thread_naming import determine_thread_name, fallback_thread_name
+from .thread_naming import (
+    DEFAULT_THREAD_NAME,
+    determine_thread_name,
+    fallback_thread_name,
+)
 from .thread_status_publisher import ThreadStatusPublisher
 from .tool_call_accumulator import ToolCallAccumulator
 from .version import __version__ as agents_version
@@ -675,7 +679,8 @@ class Message:
 @dataclass(frozen=True, slots=True)
 class CreatedAgentThread:
     thread_id: str
-    name: str
+    name: str | None = None
+    metadata: Callable[[], Awaitable[ThreadListEntry | None]] | None = None
 
 
 class AgentBackend(Protocol):
@@ -1015,35 +1020,49 @@ class LLMBackend:
         start_thread: StartThread,
         sender: Participant | None,
     ) -> CreatedAgentThread:
-        del supervisor
-        thread_id = await self._thread_id_factory(start_thread, sender)
-        if isinstance(start_thread.name, str) and start_thread.name.strip() != "":
-            return CreatedAgentThread(
-                thread_id=thread_id,
-                name=start_thread.name.strip(),
-            )
-
         message_text, attachments = _start_thread_name_input(start_thread)
-        caller = (
-            self._thread_name_caller()
-            if self._thread_name_caller is not None
-            else sender
+        fallback_name = _fallback_start_thread_name(start_thread)
+        thread_id_task = asyncio.create_task(
+            self._thread_id_factory(start_thread, sender)
         )
-        if caller is None:
-            name = fallback_thread_name(
-                message_text=message_text,
-                attachments=attachments,
-            )
-        else:
-            name = await determine_thread_name(
-                adapter=self._thread_name_adapter,
-                caller=caller,
-                message_text=message_text,
-                attachments=attachments,
-                on_behalf_of=sender,
-                model=self._thread_name_model,
-            )
-        return CreatedAgentThread(thread_id=thread_id, name=name)
+
+        async def create_metadata() -> ThreadListEntry | None:
+            name = fallback_name
+            if not (
+                isinstance(start_thread.name, str) and start_thread.name.strip() != ""
+            ):
+                caller = (
+                    self._thread_name_caller()
+                    if self._thread_name_caller is not None
+                    else sender
+                )
+                if caller is not None:
+                    with tracer.start_as_current_span("agent.thread.name.generate"):
+                        name = await determine_thread_name(
+                            adapter=self._thread_name_adapter,
+                            caller=caller,
+                            message_text=message_text,
+                            attachments=attachments,
+                            on_behalf_of=sender,
+                            model=self._thread_name_model,
+                        )
+
+            thread_id = await thread_id_task
+            with tracer.start_as_current_span("agent.thread.storage.upsert"):
+                return await supervisor.on_thread_started(
+                    created_thread=CreatedAgentThread(thread_id=thread_id, name=name),
+                    start_thread=start_thread,
+                    sender=sender,
+                )
+
+        thread_id = await thread_id_task
+        return CreatedAgentThread(
+            thread_id=thread_id,
+            name=start_thread.name.strip()
+            if isinstance(start_thread.name, str) and start_thread.name.strip() != ""
+            else None,
+            metadata=create_metadata,
+        )
 
     def create_thread_process(
         self,
@@ -1164,11 +1183,21 @@ class ChatBackend:
         start_thread: StartThread,
         sender: Participant | None,
     ) -> CreatedAgentThread:
-        del supervisor
         thread_id = await self._thread_id_factory(start_thread, sender)
+        name = _fallback_start_thread_name(start_thread)
+
+        async def create_metadata() -> ThreadListEntry | None:
+            with tracer.start_as_current_span("agent.thread.storage.upsert"):
+                return await supervisor.on_thread_started(
+                    created_thread=CreatedAgentThread(thread_id=thread_id, name=name),
+                    start_thread=start_thread,
+                    sender=sender,
+                )
+
         return CreatedAgentThread(
             thread_id=thread_id,
-            name=_fallback_start_thread_name(start_thread),
+            name=name,
+            metadata=create_metadata,
         )
 
     def create_thread_process(
@@ -1387,6 +1416,7 @@ class AgentSupervisor:
         self._thread_isolation: ThreadIsolationMode = thread_isolation
         self._pending_stop_thread_ids_after_turn: set[str] = set()
         self._pending_stop_thread_tasks_by_thread_id: dict[str, asyncio.Task[None]] = {}
+        self._pending_thread_metadata_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def state(self) -> SupervisorState:
@@ -1785,6 +1815,132 @@ class AgentSupervisor:
             return None
         return await backend.validate_turn_start(turn_start)
 
+    async def on_participant_connect_message(
+        self, participant_connect: ParticipantConnect, sender: Participant | None
+    ) -> ParticipantConnect:
+        del sender
+        return participant_connect
+
+    async def on_participant_disconnect_message(
+        self, participant_disconnect: ParticipantDisconnect, sender: Participant | None
+    ) -> ParticipantDisconnect:
+        del sender
+        return participant_disconnect
+
+    async def on_thread_start_message(
+        self, start_thread: StartThread, sender: Participant | None
+    ) -> StartThread:
+        del sender
+        return start_thread
+
+    async def on_turn_start_message(
+        self, turn_start: TurnStart, sender: Participant | None
+    ) -> TurnStart:
+        del sender
+        return turn_start
+
+    async def on_model_change_message(
+        self, change_model: ChangeModel, sender: Participant | None
+    ) -> ChangeModel:
+        del sender
+        return change_model
+
+    async def on_turn_steer_message(
+        self, turn_steer: TurnSteer, sender: Participant | None
+    ) -> TurnSteer:
+        del sender
+        return turn_steer
+
+    async def on_turn_interrupt_message(
+        self, turn_interrupt: TurnInterrupt, sender: Participant | None
+    ) -> TurnInterrupt:
+        del sender
+        return turn_interrupt
+
+    async def on_realtime_audio_chunk_message(
+        self, audio_chunk: AgentRealtimeAudioChunk, sender: Participant | None
+    ) -> AgentRealtimeAudioChunk:
+        del sender
+        return audio_chunk
+
+    async def on_realtime_audio_commit_message(
+        self, audio_commit: AgentRealtimeAudioCommit, sender: Participant | None
+    ) -> AgentRealtimeAudioCommit:
+        del sender
+        return audio_commit
+
+    async def on_tool_call_approve_message(
+        self, approval: ApproveAgentToolCall, sender: Participant | None
+    ) -> ApproveAgentToolCall:
+        del sender
+        return approval
+
+    async def on_tool_call_reject_message(
+        self, rejection: RejectAgentToolCall, sender: Participant | None
+    ) -> RejectAgentToolCall:
+        del sender
+        return rejection
+
+    async def on_secret_response_message(
+        self, response: AgentSecretResponse, sender: Participant | None
+    ) -> AgentSecretResponse:
+        del sender
+        return response
+
+    async def on_thread_clear_message(
+        self, clear_thread: ClearThread, sender: Participant | None
+    ) -> ClearThread:
+        del sender
+        return clear_thread
+
+    async def on_thread_list_message(
+        self, list_threads: ListThreads, sender: Participant | None
+    ) -> ListThreads:
+        del sender
+        return list_threads
+
+    async def on_thread_watch_message(
+        self, watch_threads: WatchThreads, sender: Participant | None
+    ) -> WatchThreads:
+        del sender
+        return watch_threads
+
+    async def on_thread_unwatch_message(
+        self, unwatch_threads: UnwatchThreads, sender: Participant | None
+    ) -> UnwatchThreads:
+        del sender
+        return unwatch_threads
+
+    async def on_thread_delete_message(
+        self, delete_thread: DeleteThread, sender: Participant | None
+    ) -> DeleteThread:
+        del sender
+        return delete_thread
+
+    async def on_thread_rename_message(
+        self, rename_thread: RenameThread, sender: Participant | None
+    ) -> RenameThread:
+        del sender
+        return rename_thread
+
+    async def on_thread_open_message(
+        self, open_thread: OpenThread, sender: Participant | None
+    ) -> OpenThread:
+        del sender
+        return open_thread
+
+    async def on_thread_close_message(
+        self, close_thread: CloseThread, sender: Participant | None
+    ) -> CloseThread:
+        del sender
+        return close_thread
+
+    async def on_models_request_message(
+        self, models_request: ModelsRequest, sender: Participant | None
+    ) -> ModelsRequest:
+        del sender
+        return models_request
+
     async def create_realtime_connection(
         self,
         *,
@@ -1835,9 +1991,23 @@ class AgentSupervisor:
             start_thread=start_thread,
             sender=sender,
         )
+        metadata_name = _fallback_start_thread_name(start_thread)
+        immediate_name = (
+            start_thread.name.strip()
+            if isinstance(start_thread.name, str) and start_thread.name.strip() != ""
+            else None
+        )
         return CreatedAgentThread(
             thread_id=thread_id,
-            name=_fallback_start_thread_name(start_thread),
+            name=immediate_name,
+            metadata=lambda: self.on_thread_started(
+                created_thread=CreatedAgentThread(
+                    thread_id=thread_id,
+                    name=metadata_name,
+                ),
+                start_thread=start_thread,
+                sender=sender,
+            ),
         )
 
     def agent_backend_for_name(
@@ -1899,10 +2069,45 @@ class AgentSupervisor:
     ) -> ThreadListEntry:
         return ThreadListEntry(
             path=created_thread.thread_id,
-            name=created_thread.name,
+            name=created_thread.name or DEFAULT_THREAD_NAME,
             created_at=start_thread.created_at,
             modified_at=start_thread.created_at,
         )
+
+    def _emit_created_thread_and_publish_metadata(
+        self,
+        *,
+        created_thread: CreatedAgentThread,
+        start_thread: StartThread,
+        sender: Participant | None,
+    ) -> None:
+        immediate_entry = self._created_thread_list_entry(
+            created_thread=created_thread,
+            start_thread=start_thread,
+        )
+        self._emit_thread_created(entry=immediate_entry, sender=sender)
+
+        if created_thread.metadata is None:
+            return
+
+        async def publish_metadata() -> None:
+            try:
+                entry = await created_thread.metadata()
+                if entry is None:
+                    return
+                if (
+                    entry.path != immediate_entry.path
+                    or entry.name != immediate_entry.name
+                ):
+                    self._emit_thread_updated(entry=entry, sender=sender)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("failed to publish thread metadata")
+
+        task = asyncio.create_task(publish_metadata())
+        self._pending_thread_metadata_tasks.add(task)
+        task.add_done_callback(self._pending_thread_metadata_tasks.discard)
 
     async def on_thread_deleted(
         self,
@@ -1993,6 +2198,9 @@ class AgentSupervisor:
                 for task in self._pending_stop_thread_tasks_by_thread_id.values():
                     task.cancel()
                 self._pending_stop_thread_tasks_by_thread_id.clear()
+                for task in self._pending_thread_metadata_tasks:
+                    task.cancel()
+                self._pending_thread_metadata_tasks.clear()
                 self._queue.shutdown()
                 await self._run_task
                 await self.on_stop()
@@ -2563,7 +2771,10 @@ class AgentSupervisor:
             return
 
         if message_type == AGENT_MESSAGE_PARTICIPANT_CONNECT:
-            participant_connect = _coerce_message_data(message.data, ParticipantConnect)
+            participant_connect = await self.on_participant_connect_message(
+                _coerce_message_data(message.data, ParticipantConnect),
+                message.sender,
+            )
             self._track_participant_connected(
                 participant_id=participant_connect.participant_id,
                 sender=message.sender,
@@ -2571,9 +2782,12 @@ class AgentSupervisor:
             return
 
         elif message_type == AGENT_MESSAGE_PARTICIPANT_DISCONNECT:
-            participant_disconnect = _coerce_message_data(
-                message.data,
-                ParticipantDisconnect,
+            participant_disconnect = await self.on_participant_disconnect_message(
+                _coerce_message_data(
+                    message.data,
+                    ParticipantDisconnect,
+                ),
+                message.sender,
             )
             await self._track_participant_disconnected(
                 participant_id=participant_disconnect.participant_id
@@ -2586,8 +2800,32 @@ class AgentSupervisor:
                 self._pending_stop_thread_ids_after_turn.add(turn_ended.thread_id)
                 self._schedule_pending_thread_stop(thread_id=turn_ended.thread_id)
 
+        elif message_type == AGENT_EVENT_THREAD_CREATED:
+            self._send_thread_list_event(
+                payload=_coerce_message_data(message.data, ThreadCreated),
+                sender=message.sender,
+            )
+            return
+
+        elif message_type == AGENT_EVENT_THREAD_UPDATED:
+            self._send_thread_list_event(
+                payload=_coerce_message_data(message.data, ThreadUpdated),
+                sender=message.sender,
+            )
+            return
+
+        elif message_type == AGENT_EVENT_THREAD_DELETED:
+            self._send_thread_list_event(
+                payload=_coerce_message_data(message.data, ThreadDeleted),
+                sender=message.sender,
+            )
+            return
+
         elif message_type == AGENT_MESSAGE_THREAD_START:
-            start_thread = _coerce_message_data(message.data, StartThread)
+            start_thread = await self.on_thread_start_message(
+                _coerce_message_data(message.data, StartThread),
+                message.sender,
+            )
             if self._requires_explicit_backend(start_thread.backend):
                 self._emit_start_thread_rejected(
                     start_thread=start_thread,
@@ -2613,10 +2851,15 @@ class AgentSupervisor:
                 )
                 return
             try:
-                created_thread = await self.create_thread(
-                    start_thread=start_thread,
-                    sender=message.sender,
-                )
+                with tracer.start_as_current_span("agent.thread.create") as span:
+                    span.set_attribute(
+                        "agent.thread.backend", start_thread.backend or ""
+                    )
+                    created_thread = await self.create_thread(
+                        start_thread=start_thread,
+                        sender=message.sender,
+                    )
+                    span.set_attribute("agent.thread.id", created_thread.thread_id)
             except Exception as exc:
                 logger.exception("failed to create thread; rejecting start thread")
                 self._emit_start_thread_rejected(
@@ -2660,17 +2903,9 @@ class AgentSupervisor:
                         ),
                     )
                     return
-                created_entry = await self.on_thread_started(
+                self._emit_created_thread_and_publish_metadata(
                     created_thread=created_thread,
                     start_thread=start_thread,
-                    sender=message.sender,
-                )
-                self._emit_thread_created(
-                    entry=created_entry
-                    or self._created_thread_list_entry(
-                        created_thread=created_thread,
-                        start_thread=start_thread,
-                    ),
                     sender=message.sender,
                 )
                 self._emit_thread_started(
@@ -2704,6 +2939,10 @@ class AgentSupervisor:
                 tool_choice=start_thread.tool_choice,
                 storage=start_thread.storage,
             )
+            turn_start = await self.on_turn_start_message(
+                turn_start,
+                message.sender,
+            )
             error = await self.validate_turn_start(turn_start)
             if error is not None:
                 self._emit_start_thread_rejected(
@@ -2728,17 +2967,9 @@ class AgentSupervisor:
                             error=rejection,
                         )
                     return
-            created_entry = await self.on_thread_started(
+            self._emit_created_thread_and_publish_metadata(
                 created_thread=created_thread,
                 start_thread=start_thread,
-                sender=message.sender,
-            )
-            self._emit_thread_created(
-                entry=created_entry
-                or self._created_thread_list_entry(
-                    created_thread=created_thread,
-                    start_thread=start_thread,
-                ),
                 sender=message.sender,
             )
             self._emit_thread_started(
@@ -2751,7 +2982,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TURN_START:
-            turn_start = _coerce_message_data(message.data, TurnStart)
+            turn_start = await self.on_turn_start_message(
+                _coerce_message_data(message.data, TurnStart),
+                message.sender,
+            )
             error = await self.validate_turn_start(turn_start)
             if error is not None:
                 self._emit_turn_start_rejected(
@@ -2812,7 +3046,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_MODEL_CHANGE:
-            change_model = _coerce_message_data(message.data, ChangeModel)
+            change_model = await self.on_model_change_message(
+                _coerce_message_data(message.data, ChangeModel),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=change_model.thread_id,
                 message=message,
@@ -2844,7 +3081,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TURN_STEER:
-            turn_steer = _coerce_message_data(message.data, TurnSteer)
+            turn_steer = await self.on_turn_steer_message(
+                _coerce_message_data(message.data, TurnSteer),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=turn_steer.thread_id,
                 message=message,
@@ -2880,7 +3120,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TURN_INTERRUPT:
-            turn_interrupt = _coerce_message_data(message.data, TurnInterrupt)
+            turn_interrupt = await self.on_turn_interrupt_message(
+                _coerce_message_data(message.data, TurnInterrupt),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=turn_interrupt.thread_id,
                 message=message,
@@ -2898,7 +3141,10 @@ class AgentSupervisor:
                 target_processes = []
 
         elif message_type == AGENT_MESSAGE_REALTIME_AUDIO_CHUNK:
-            audio_chunk = _coerce_message_data(message.data, AgentRealtimeAudioChunk)
+            audio_chunk = await self.on_realtime_audio_chunk_message(
+                _coerce_message_data(message.data, AgentRealtimeAudioChunk),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=audio_chunk.thread_id,
                 message=message,
@@ -2916,7 +3162,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_REALTIME_AUDIO_COMMIT:
-            audio_commit = _coerce_message_data(message.data, AgentRealtimeAudioCommit)
+            audio_commit = await self.on_realtime_audio_commit_message(
+                _coerce_message_data(message.data, AgentRealtimeAudioCommit),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=audio_commit.thread_id,
                 message=message,
@@ -2934,7 +3183,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_TOOL_CALL_APPROVE:
-            approval = _coerce_message_data(message.data, ApproveAgentToolCall)
+            approval = await self.on_tool_call_approve_message(
+                _coerce_message_data(message.data, ApproveAgentToolCall),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=approval.thread_id,
                 message=message,
@@ -2952,7 +3204,10 @@ class AgentSupervisor:
                 target_processes = []
 
         elif message_type == AGENT_MESSAGE_TOOL_CALL_REJECT:
-            rejection = _coerce_message_data(message.data, RejectAgentToolCall)
+            rejection = await self.on_tool_call_reject_message(
+                _coerce_message_data(message.data, RejectAgentToolCall),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=rejection.thread_id,
                 message=message,
@@ -2970,7 +3225,10 @@ class AgentSupervisor:
                 target_processes = []
 
         elif message_type == AGENT_MESSAGE_SECRET_RESPONSE:
-            response = _coerce_message_data(message.data, AgentSecretResponse)
+            response = await self.on_secret_response_message(
+                _coerce_message_data(message.data, AgentSecretResponse),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=response.thread_id,
                 message=message,
@@ -2988,7 +3246,10 @@ class AgentSupervisor:
                 target_processes = []
 
         elif message_type == AGENT_MESSAGE_THREAD_CLEAR:
-            clear_thread = _coerce_message_data(message.data, ClearThread)
+            clear_thread = await self.on_thread_clear_message(
+                _coerce_message_data(message.data, ClearThread),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=clear_thread.thread_id,
                 message=message,
@@ -3010,7 +3271,10 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_THREAD_LIST:
-            list_threads = _coerce_message_data(message.data, ListThreads)
+            list_threads = await self.on_thread_list_message(
+                _coerce_message_data(message.data, ListThreads),
+                message.sender,
+            )
             page = await self.list_threads(
                 list_threads=list_threads,
                 sender=message.sender,
@@ -3035,17 +3299,26 @@ class AgentSupervisor:
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_WATCH:
-            _coerce_message_data(message.data, WatchThreads)
+            await self.on_thread_watch_message(
+                _coerce_message_data(message.data, WatchThreads),
+                message.sender,
+            )
             self._track_thread_watcher(sender=message.sender)
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_UNWATCH:
-            _coerce_message_data(message.data, UnwatchThreads)
+            await self.on_thread_unwatch_message(
+                _coerce_message_data(message.data, UnwatchThreads),
+                message.sender,
+            )
             self._untrack_thread_watcher(sender=message.sender)
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_DELETE:
-            delete_thread = _coerce_message_data(message.data, DeleteThread)
+            delete_thread = await self.on_thread_delete_message(
+                _coerce_message_data(message.data, DeleteThread),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=delete_thread.thread_id,
                 message=message,
@@ -3065,7 +3338,10 @@ class AgentSupervisor:
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_RENAME:
-            rename_thread = _coerce_message_data(message.data, RenameThread)
+            rename_thread = await self.on_thread_rename_message(
+                _coerce_message_data(message.data, RenameThread),
+                message.sender,
+            )
             access_error = self._ensure_thread_access_for_message(
                 thread_id=rename_thread.thread_id,
                 message=message,
@@ -3085,9 +3361,15 @@ class AgentSupervisor:
 
         elif message_type in {AGENT_MESSAGE_THREAD_OPEN, AGENT_MESSAGE_THREAD_CLOSE}:
             if message_type == AGENT_MESSAGE_THREAD_OPEN:
-                thread_message = _coerce_message_data(message.data, OpenThread)
+                thread_message = await self.on_thread_open_message(
+                    _coerce_message_data(message.data, OpenThread),
+                    message.sender,
+                )
             else:
-                thread_message = _coerce_message_data(message.data, CloseThread)
+                thread_message = await self.on_thread_close_message(
+                    _coerce_message_data(message.data, CloseThread),
+                    message.sender,
+                )
 
             routed_message = self._copy_message(
                 message,
@@ -3156,15 +3438,19 @@ class AgentSupervisor:
             target_processes = [process]
 
         elif message_type == AGENT_MESSAGE_MODELS_REQUEST:
-            models_request = _coerce_message_data(message.data, ModelsRequest)
+            models_request = await self.on_models_request_message(
+                _coerce_message_data(message.data, ModelsRequest),
+                message.sender,
+            )
             await self.on_models_request(
                 self._copy_message(message, data=models_request)
             )
             return
 
-        target_processes = await self._ensure_routing_processes_started(
-            processes=target_processes
-        )
+        with tracer.start_as_current_span("agent.route.dispatch"):
+            target_processes = await self._ensure_routing_processes_started(
+                processes=target_processes
+            )
         if (
             message_type == AGENT_MESSAGE_THREAD_OPEN
             and isinstance(routed_message.data, OpenThread)
@@ -5573,6 +5859,8 @@ class LLMAgentProcess(AgentProcess):
             raise RuntimeError("turn publisher requested without an active turn")
 
         llm_provider = self._current_provider.name
+        first_event_span: Any | None = None
+        first_text_delta_span: Any | None = None
 
         def enrich_llm_message(message: AgentMessage) -> AgentMessage:
             participant_name = self._sender_name(sender)
@@ -5810,9 +6098,23 @@ class LLMAgentProcess(AgentProcess):
             return None
 
         def publish_event(message: AgentMessage) -> None:
+            nonlocal first_event_span
+            nonlocal first_text_delta_span
             if self._interrupt_requested_turn_id == turn_id:
                 return
             message = enrich_llm_message(message)
+            if first_event_span is not None:
+                first_event_span.set_attribute("message_type", message.type)
+                first_event_span.end()
+                first_event_span = None
+            if (
+                first_text_delta_span is not None
+                and isinstance(message, AgentTextContentDelta)
+                and message.text != ""
+            ):
+                first_text_delta_span.set_attribute("message_type", message.type)
+                first_text_delta_span.end()
+                first_text_delta_span = None
             publish_agent_message_status(message)
             self.emit(sender=sender, payload=message)
 
@@ -5896,10 +6198,11 @@ class LLMAgentProcess(AgentProcess):
                     model=model,
                     publish_event=publish_event,
                 )
-                await self.llm_adapter.start_session(
-                    context=session,
-                    event_handler=handle_event,
-                )
+                with tracer.start_as_current_span("agent.turn.llm.start_session"):
+                    await self.llm_adapter.start_session(
+                        context=session,
+                        event_handler=handle_event,
+                    )
                 pending_audio_chunks = (
                     self._pending_realtime_audio_chunks_by_turn_id.pop(turn_id, None)
                 )
@@ -5917,25 +6220,42 @@ class LLMAgentProcess(AgentProcess):
                     turn_id, []
                 ):
                     handle_event(event)
-                next_task = asyncio.create_task(
-                    self.llm_adapter.create_response(
-                        context=session,
-                        toolkits=combined_toolkits,
-                        caller=self._participant,
-                        event_handler=handle_event,
-                        steering_callback=lambda: self._apply_pending_turn_steers(
-                            session=session
-                        ),
-                        model=model,
-                        on_behalf_of=sender,
-                        tool_choice=tool_choice,
-                        options=response_options,
-                    )
+                first_event_span = tracer.start_span("agent.turn.llm.first_event")
+                first_event_span.set_attribute("thread_id", thread_id)
+                first_event_span.set_attribute("turn_id", turn_id)
+                first_event_span.set_attribute("model", model)
+                first_text_delta_span = tracer.start_span(
+                    "agent.turn.llm.first_text_delta"
                 )
-                self._active_next_task = next_task
-                await next_task
+                first_text_delta_span.set_attribute("thread_id", thread_id)
+                first_text_delta_span.set_attribute("turn_id", turn_id)
+                first_text_delta_span.set_attribute("model", model)
+                with tracer.start_as_current_span("agent.turn.llm.create_response"):
+                    next_task = asyncio.create_task(
+                        self.llm_adapter.create_response(
+                            context=session,
+                            toolkits=combined_toolkits,
+                            caller=self._participant,
+                            event_handler=handle_event,
+                            steering_callback=lambda: self._apply_pending_turn_steers(
+                                session=session
+                            ),
+                            model=model,
+                            on_behalf_of=sender,
+                            tool_choice=tool_choice,
+                            options=response_options,
+                        )
+                    )
+                    self._active_next_task = next_task
+                    await next_task
                 completed = self._interrupt_requested_turn_id != turn_id
         finally:
+            if first_event_span is not None:
+                first_event_span.end()
+                first_event_span = None
+            if first_text_delta_span is not None:
+                first_text_delta_span.end()
+                first_text_delta_span = None
             usage_already_emitted = turn_id in self._usage_emitted_turn_ids
             if not (completed and usage_already_emitted):
                 await self._emit_usage_update(
@@ -6084,9 +6404,10 @@ class LLMAgentProcess(AgentProcess):
         turn_span.set_attribute("source_message_id", queued_turn.request.message_id)
         turn_span.set_attribute("queued_message_count", len(queued_turn_messages))
         try:
-            await self._remove_pending_status_messages(
-                queued_messages=queued_turn_messages
-            )
+            with tracer.start_as_current_span("agent.turn.pending_status.remove"):
+                await self._remove_pending_status_messages(
+                    queued_messages=queued_turn_messages
+                )
         except BaseException as exc:
             turn_span_context.__exit__(type(exc), exc, exc.__traceback__)
             raise
@@ -6106,15 +6427,16 @@ class LLMAgentProcess(AgentProcess):
         self._active_turn_queue_updated = asyncio.Event()
         for queued_message in queued_turn_messages:
             active_turn_queue.put_nowait(queued_message)
-        self.emit(
-            sender=queued_turn.sender,
-            payload=TurnStarted(
-                type=AGENT_EVENT_TURN_STARTED,
-                thread_id=queued_turn.request.thread_id,
-                turn_id=turn_id,
-                source_message_id=queued_turn.request.message_id,
-            ),
-        )
+        with tracer.start_as_current_span("agent.turn.started.emit"):
+            self.emit(
+                sender=queued_turn.sender,
+                payload=TurnStarted(
+                    type=AGENT_EVENT_TURN_STARTED,
+                    thread_id=queued_turn.request.thread_id,
+                    turn_id=turn_id,
+                    source_message_id=queued_turn.request.message_id,
+                ),
+            )
 
         error: AgentError | None = None
         session: AgentSessionContext | None = None
@@ -6559,21 +6881,23 @@ class LLMAgentProcess(AgentProcess):
         should_track_pending_status = (
             self._turn_task is not None or self._has_pending_turns()
         )
-        await self._pending_turns.put(
-            _QueuedTurn(
-                sender=message.sender,
-                request=turn,
+        with tracer.start_as_current_span("agent.turn.queue"):
+            await self._pending_turns.put(
+                _QueuedTurn(
+                    sender=message.sender,
+                    request=turn,
+                )
             )
-        )
-        self.emit(
-            sender=message.sender,
-            payload=TurnStartAccepted(
-                type=AGENT_EVENT_TURN_START_ACCEPTED,
-                thread_id=turn.thread_id,
-                turn_id=turn_id,
-                source_message_id=turn.message_id,
-            ),
-        )
+        with tracer.start_as_current_span("agent.turn.accepted.emit"):
+            self.emit(
+                sender=message.sender,
+                payload=TurnStartAccepted(
+                    type=AGENT_EVENT_TURN_START_ACCEPTED,
+                    thread_id=turn.thread_id,
+                    turn_id=turn_id,
+                    source_message_id=turn.message_id,
+                ),
+            )
         if should_track_pending_status:
             await self._add_pending_status_messages(queued_messages=[queued_message])
         self._schedule_next_turn()
