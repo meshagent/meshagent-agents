@@ -24,6 +24,8 @@ from meshagent.agents.messages import (
     AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_DELTA,
     AGENT_EVENT_IMAGE_GENERATION_COMPLETED,
+    AGENT_EVENT_REASONING_CONTENT_ENDED,
+    AGENT_EVENT_REASONING_CONTENT_STARTED,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_ENDED,
     AGENT_EVENT_TEXT_CONTENT_STARTED,
@@ -52,6 +54,8 @@ from meshagent.agents.messages import (
     AgentImageGenerationCompleted,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
+    AgentReasoningContentEnded,
+    AgentReasoningContentStarted,
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
     AgentTextContent,
@@ -356,8 +360,10 @@ class _DatasetStorageTestReader(AccumulatingAgentEventReader):
         text: str,
         metadata: dict[str, Any],
     ) -> None:
-        del metadata
-        self._emit_context_message({"role": "assistant", "content": text})
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        if metadata:
+            message["metadata"] = metadata
+        self._emit_context_message(message)
 
     def _append_assistant_file(self, *, url: str) -> None:
         self._emit_context_message({"role": "assistant", "content": url})
@@ -2485,10 +2491,7 @@ async def test_dataset_thread_storage_restores_context_with_llm_reader() -> None
         "error": None,
         "logs": [{"source": "stdout", "text": "searching\n"}],
     }
-    assert context.messages[3] == {
-        "role": "assistant",
-        "content": [{"type": "event", "event": {"kind": "shell", "cmd": "pwd"}}],
-    }
+    assert len(context.messages) == 3
     assert context.metadata["last_compaction"] == {
         "checkpoint_id": "checkpoint-1",
         "path": "dataset://threads/demo",
@@ -2496,6 +2499,52 @@ async def test_dataset_thread_storage_restores_context_with_llm_reader() -> None
         "created_at": "2026-05-05T00:00:00Z",
     }
     assert "agent_events" not in context.metadata
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_preserves_encrypted_reasoning_metadata_for_restore() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/demo",
+        persist_deltas=True,
+    )
+    await storage.start()
+    storage.push_message(
+        message=AgentReasoningContentStarted(
+            type=AGENT_EVENT_REASONING_CONTENT_STARTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="rs_1",
+            provider="openai",
+            model="gpt-5-mini",
+        )
+    )
+    storage.push_message(
+        message=AgentReasoningContentEnded(
+            type=AGENT_EVENT_REASONING_CONTENT_ENDED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-1",
+            item_id="rs_1",
+            provider="openai",
+            model="gpt-5-mini",
+            metadata={"openai": {"encrypted_content": "opaque-reasoning"}},
+        )
+    )
+    await storage.stop()
+
+    context = AgentSessionContext(system_role=None)
+    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+
+    assert context.messages == [
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {"openai": {"encrypted_content": "opaque-reasoning"}},
+        }
+    ]
 
 
 def test_dataset_thread_storage_default_name_uses_new_chat_for_uuid_paths() -> None:

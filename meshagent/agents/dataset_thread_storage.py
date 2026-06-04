@@ -1680,6 +1680,8 @@ class DatasetThreadStorage(ThreadStorage):
         if active.kind in {"text", "reasoning"}:
             text = "".join(active.parts)
             if text.strip() == "":
+                if active.kind == "reasoning" and ended_message is not None:
+                    await self._append_message_row(message=ended_message)
                 return
             message_cls = (
                 AgentTextContentDelta

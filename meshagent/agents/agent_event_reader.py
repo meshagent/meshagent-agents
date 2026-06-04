@@ -390,6 +390,8 @@ class AccumulatingAgentEventReader(ABC):
         item = self._reasoning.remove(item_id)
         metadata = self._reasoning_metadata_by_item_id.pop(item_id, {})
         if item is None:
+            if len(metadata) > 0:
+                self._append_assistant_reasoning(text="", metadata=metadata)
             return
         if item.text == "" and len(metadata) == 0:
             return
