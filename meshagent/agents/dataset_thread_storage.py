@@ -1674,6 +1674,11 @@ class DatasetThreadStorage(ThreadStorage):
     ) -> None:
         active = self._active_content_by_item_id.pop(item_id, None)
         if active is None:
+            if (
+                isinstance(ended_message, AgentReasoningContentEnded)
+                and len(ended_message.metadata) > 0
+            ):
+                await self._append_message_row(message=ended_message)
             return
 
         del reason

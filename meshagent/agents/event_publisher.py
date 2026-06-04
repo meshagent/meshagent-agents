@@ -934,6 +934,19 @@ class _AgentMessageEmitter:
     ) -> None:
         key = self._content_key(kind="reasoning", item_id=item_id)
         if key in self._ended_content:
+            if not metadata:
+                return
+            self.callback(
+                AgentReasoningContentEnded(
+                    type=AGENT_EVENT_REASONING_CONTENT_ENDED,
+                    thread_id=self.thread_id,
+                    turn_id=self.turn_id,
+                    item_id=item_id,
+                    provider=self.provider,
+                    model=self.model,
+                    metadata=metadata,
+                )
+            )
             return
         self._ensure_content_started(kind="reasoning", item_id=item_id)
         self._ended_content.add(key)
@@ -2067,8 +2080,6 @@ class _OpenAIAgentEventPublisher:
                 return
             for output_index, item in enumerate(outputs):
                 if not isinstance(item, dict):
-                    continue
-                if item.get("type") not in {"compaction", "message"}:
                     continue
                 self._on_output_item(
                     event={**event, "item": item, "output_index": output_index},
