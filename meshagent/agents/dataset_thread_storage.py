@@ -771,15 +771,27 @@ class DatasetThreadStorage(ThreadStorage):
                 pa.field("modified_at", pa.string()),
             ]
         )
-        try:
-            await client.inspect(table=table_name, namespace=namespace)
-        except Exception:
+        if not await cls._table_exists(
+            client=client,
+            table_name=table_name,
+            namespace=namespace,
+        ):
             await client.create_table_with_schema(
                 name=table_name,
                 schema=schema,
                 mode="create_if_not_exists",
                 namespace=namespace,
             )
+
+    @staticmethod
+    async def _table_exists(
+        *,
+        client: DatasetsClient,
+        table_name: str,
+        namespace: list[str] | None,
+    ) -> bool:
+        tables = await client.list_tables(namespace=namespace)
+        return table_name in tables
 
     @classmethod
     def _thread_list_table(cls, *, thread_dir: str) -> tuple[str, list[str] | None]:
@@ -1032,12 +1044,16 @@ class DatasetThreadStorage(ThreadStorage):
 
         schema = self._schema()
         existing_schema: pa.Schema | None = None
-        try:
+        if await self._table_exists(
+            client=self._client,
+            table_name=self._table_name,
+            namespace=self._namespace,
+        ):
             existing_schema = await self._client.inspect(
                 table=self._table_name,
                 namespace=self._namespace,
             )
-        except Exception:
+        else:
             await self._client.create_table_with_schema(
                 name=self._table_name,
                 schema=schema,

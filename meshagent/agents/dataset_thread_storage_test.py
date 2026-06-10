@@ -125,6 +125,18 @@ class _FakeDatasets:
         self.schemas.setdefault(key, schema)
         self.rows.setdefault(key, [])
 
+    async def list_tables(
+        self,
+        *,
+        namespace: list[str] | None = None,
+    ) -> list[str]:
+        namespace_key = tuple(namespace or [])
+        return [
+            table
+            for table_namespace, table in self.schemas
+            if table_namespace == namespace_key
+        ]
+
     async def inspect(
         self,
         *,
@@ -284,6 +296,22 @@ class _BlockingInspectDatasets(_FakeDatasets):
         self.inspect_started.set()
         await self.inspect_release.wait()
         return await super().inspect(table=table, namespace=namespace)
+
+
+class _BlockingListTablesDatasets(_FakeDatasets):
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_tables_started = asyncio.Event()
+        self.list_tables_release = asyncio.Event()
+
+    async def list_tables(
+        self,
+        *,
+        namespace: list[str] | None = None,
+    ) -> list[str]:
+        self.list_tables_started.set()
+        await self.list_tables_release.wait()
+        return await super().list_tables(namespace=namespace)
 
 
 class _BlockingInsertDatasets(_FakeDatasets):
@@ -480,12 +508,12 @@ def _row_data(row: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_dataset_thread_storage_start_does_not_wait_for_dataset_setup() -> None:
-    datasets = _BlockingInspectDatasets()
+    datasets = _BlockingListTablesDatasets()
     room = _FakeRoom(datasets=datasets)
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
 
     await asyncio.wait_for(storage.start(), timeout=0.1)
-    await asyncio.wait_for(datasets.inspect_started.wait(), timeout=0.1)
+    await asyncio.wait_for(datasets.list_tables_started.wait(), timeout=0.1)
 
     storage.push_message(
         message=AgentRealtimeAudioCommit(
@@ -496,7 +524,7 @@ async def test_dataset_thread_storage_start_does_not_wait_for_dataset_setup() ->
     )
     assert (("threads",), "demo") not in datasets.rows
 
-    datasets.inspect_release.set()
+    datasets.list_tables_release.set()
     await storage.stop()
 
     thread_rows = datasets.rows[(("threads",), "demo")]
