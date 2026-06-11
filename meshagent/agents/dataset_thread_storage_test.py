@@ -1601,7 +1601,7 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 2
+    assert len(rows) == 3
     data = _row_data(rows[0])
     assert rows[0]["item_id"] == "started-tool"
     assert data["type"] == AGENT_EVENT_TOOL_CALL_STARTED
@@ -1609,7 +1609,19 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     assert data["call_id"] == "call-started"
     assert data["toolkit"] == "shell"
     assert data["tool"] == "exec"
-    ended = _row_data(rows[1])
+    error_event = _row_data(rows[1])
+    assert error_event["type"] == AGENT_EVENT_THREAD_EVENT
+    assert rows[1]["turn_id"] == "turn-1"
+    assert error_event["event"] == {
+        "type": "turn.error",
+        "kind": "collab",
+        "state": "failed",
+        "summary": "Turn failed",
+        "headline": "Turn failed",
+        "details": ["cancelled"],
+        "error": {"message": "cancelled", "code": None},
+    }
+    ended = _row_data(rows[2])
     assert ended["type"] == AGENT_EVENT_TURN_ENDED
 
 

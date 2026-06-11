@@ -36,6 +36,7 @@ from .messages import (
     AGENT_EVENT_TEXT_CONTENT_DELTA,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
+    AGENT_EVENT_THREAD_EVENT,
     AGENT_EVENT_AUDIO_GENERATION_DELTA,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_COMPLETED,
     AGENT_EVENT_AUDIO_TRANSCRIPTION_FAILED,
@@ -1538,6 +1539,23 @@ class DatasetThreadStorage(ThreadStorage):
                 turn_id=message.turn_id,
                 reason="failed" if message.error is not None else "completed",
             )
+            if message.error is not None:
+                await self._append_message_row(
+                    message=AgentThreadEvent(
+                        type=AGENT_EVENT_THREAD_EVENT,
+                        thread_id=message.thread_id,
+                        event={
+                            "type": "turn.error",
+                            "kind": "collab",
+                            "state": "failed",
+                            "summary": "Turn failed",
+                            "headline": "Turn failed",
+                            "details": [message.error.message],
+                            "error": message.error.model_dump(mode="json"),
+                        },
+                    ),
+                    turn_id=message.turn_id,
+                )
             await self._append_message_row(message=message)
             return
 
