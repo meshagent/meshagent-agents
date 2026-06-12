@@ -7,7 +7,7 @@ from meshagent.tools import (
     Toolkit,
     FileContent,
 )
-from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
+from meshagent.tools.hosting import _RemoteToolkitWrapper, start_hosted_toolkit
 from meshagent.tools.storage import StorageToolkit
 from meshagent.api.room_server_client import RoomException
 from email import message_from_bytes
@@ -494,7 +494,7 @@ class MailBot(Worker):
             room_agent_started = True
             self._toolkit = self._create_toolkit(room=room)
             if self._toolkit is not None:
-                self._hosted_toolkit = await _start_hosted_toolkit(
+                self._hosted_toolkit = await start_hosted_toolkit(
                     room=room,
                     toolkit=self._toolkit,
                 )

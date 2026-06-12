@@ -42,7 +42,7 @@ from meshagent.agents.messages import (
     AgentThreadEvent,
 )
 from meshagent.tools import Toolkit
-from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
+from meshagent.tools.hosting import _RemoteToolkitWrapper, start_hosted_toolkit
 from meshagent.tools.storage import (
     StorageToolLocalMount,
     StorageToolRoomMount,
@@ -2186,7 +2186,7 @@ class MeshagentPackage(PythonPackage):
                         continue
                     for toolkit in channel.get_exposed_toolkits():
                         hosted_toolkits.append(
-                            await _start_hosted_toolkit(
+                            await start_hosted_toolkit(
                                 room=room_client, toolkit=toolkit
                             )
                         )

@@ -473,7 +473,7 @@ async def test_worker_start_builds_room_bound_toolkit(
         fake_single_room_stop,
     )
     monkeypatch.setattr(
-        "meshagent.agents.worker._start_hosted_toolkit",
+        "meshagent.agents.worker.start_hosted_toolkit",
         fake_start_hosted_toolkit,
     )
     monkeypatch.setattr(Worker, "run", fake_run)

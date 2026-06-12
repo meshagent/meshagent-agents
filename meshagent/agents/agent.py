@@ -1,8 +1,11 @@
 from collections.abc import AsyncIterable
-from typing import Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+import contextlib
 import json
+import signal
 from meshagent.api.room_server_client import (
     DatasetIndexConfig,
+    OAuthTokenRequest,
     RoomException,
     RequiredToolkit,
     Requirement,
@@ -22,9 +25,10 @@ from meshagent.tools import (
     LocalRoomTool,
     ToolContext,
 )
-from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
+from meshagent.tools.hosting import _RemoteToolkitWrapper, start_hosted_toolkit
 
 from meshagent.api.room_server_client import RoomClient
+from meshagent.api.protocol import Protocol
 from .context import AgentSessionContext
 from .web_participant import WebParticipant
 import logging
@@ -33,6 +37,9 @@ import warnings
 
 logger = logging.getLogger("agent")
 _legacy_init_chat_context_warned: set[type] = set()
+
+if TYPE_CHECKING:
+    import aiohttp
 
 
 def _participant_error_label(participant: Participant) -> str:
@@ -305,7 +312,7 @@ class SingleRoomAgent:
         self._hosted_exposed_toolkits = []
         try:
             for toolkit in self._exposed_toolkits:
-                hosted_toolkit = await _start_hosted_toolkit(
+                hosted_toolkit = await start_hosted_toolkit(
                     room=room,
                     toolkit=toolkit,
                 )
@@ -317,6 +324,53 @@ class SingleRoomAgent:
             self._exposed_toolkits = []
             self._room = None
             raise
+
+    async def run(
+        self,
+        *,
+        protocol_factory: Callable[[], Protocol] | None = None,
+        reconnect_timeout: float | None = None,
+        session: "aiohttp.ClientSession | None" = None,
+        oauth_token_request_handler: Optional[
+            Callable[[OAuthTokenRequest], Awaitable[object]]
+        ] = None,
+    ) -> None:
+        async with RoomClient(
+            protocol_factory=protocol_factory,
+            reconnect_timeout=reconnect_timeout,
+            session=session,
+            oauth_token_request_handler=oauth_token_request_handler,
+        ) as room:
+            await self.start(room=room)
+            room_closed_task = asyncio.create_task(room.wait_for_close())
+            termination = asyncio.Future[None]()
+            signal_handlers = {}
+
+            def clean_termination(signum, frame):
+                del signum, frame
+                if not termination.done():
+                    termination.set_result(None)
+
+            try:
+                for signum in (signal.SIGTERM, signal.SIGABRT):
+                    signal_handlers[signum] = signal.signal(signum, clean_termination)
+
+                done, pending = await asyncio.wait(
+                    [room_closed_task, termination],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for pending_task in pending:
+                    pending_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending_task
+
+                if room_closed_task in done:
+                    await room_closed_task
+            finally:
+                for signum, previous_handler in signal_handlers.items():
+                    signal.signal(signum, previous_handler)
+                await self.stop()
 
     async def stop(self) -> None:
         for hosted_toolkit in reversed(self._hosted_exposed_toolkits):

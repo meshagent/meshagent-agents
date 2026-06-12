@@ -1,4 +1,6 @@
 from typing import Any
+import asyncio
+import signal
 
 import pytest
 
@@ -93,6 +95,13 @@ class _FakeRoom:
     def __init__(self, *, agents: _FakeAgentsClient, token: str | None = None):
         self.agents = agents
         self.protocol = _FakeProtocol(token=token)
+        self.wait_for_close_calls = 0
+        self.wait_for_close_error: Exception | None = None
+
+    async def wait_for_close(self) -> None:
+        self.wait_for_close_calls += 1
+        if self.wait_for_close_error is not None:
+            raise self.wait_for_close_error
 
 
 class _FakeProtocol:
@@ -115,6 +124,41 @@ class _CredentialBindingAgent(SingleRoomAgent):
     def bind_runtime_credentials(self, *, room) -> None:
         self.bound_room = room
         self.bound_api_key = self.resolve_runtime_api_key(room=room)
+
+
+class _FakeRoomClientContext:
+    def __init__(self, room: _FakeRoom):
+        self.room = room
+        self.entered = False
+        self.exited = False
+        self.exit_exception_type = None
+
+    async def __aenter__(self) -> _FakeRoom:
+        self.entered = True
+        return self.room
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        del exc, traceback
+        self.exited = True
+        self.exit_exception_type = exc_type
+
+
+class _SignalTriggeredRoom(_FakeRoom):
+    def __init__(
+        self,
+        *,
+        agents: _FakeAgentsClient,
+        handlers: dict[int, Any],
+    ):
+        super().__init__(agents=agents)
+        self._handlers = handlers
+
+    async def wait_for_close(self) -> None:
+        self.wait_for_close_calls += 1
+        while signal.SIGTERM not in self._handlers:
+            await asyncio.sleep(0)
+        self._handlers[signal.SIGTERM](signal.SIGTERM, None)
+        await asyncio.Future()
 
 
 @pytest.mark.asyncio
@@ -215,6 +259,97 @@ async def test_single_room_agent_start_binds_runtime_credentials() -> None:
     assert agent.bound_api_key == "room-token"
 
     await agent.stop()
+
+
+@pytest.mark.asyncio
+async def test_single_room_agent_run_connects_waits_and_stops(monkeypatch) -> None:
+    room = _FakeRoom(
+        agents=_FakeAgentsClient(response=None),
+        token="  room-token  ",
+    )
+    context = _FakeRoomClientContext(room)
+    room_client_calls = []
+
+    def fake_room_client(**kwargs):
+        room_client_calls.append(kwargs)
+        return context
+
+    monkeypatch.setattr("meshagent.agents.agent.RoomClient", fake_room_client)
+    agent = _CredentialBindingAgent()
+
+    await agent.run(reconnect_timeout=3.5)
+
+    assert room_client_calls == [
+        {
+            "protocol_factory": None,
+            "reconnect_timeout": 3.5,
+            "session": None,
+            "oauth_token_request_handler": None,
+        }
+    ]
+    assert context.entered is True
+    assert context.exited is True
+    assert room.wait_for_close_calls == 1
+    assert agent.bound_room is room
+    assert agent.bound_api_key == "room-token"
+    assert agent.room is None
+
+
+@pytest.mark.asyncio
+async def test_single_room_agent_run_stops_when_wait_for_close_fails(
+    monkeypatch,
+) -> None:
+    room = _FakeRoom(agents=_FakeAgentsClient(response=None))
+    error = RuntimeError("closed unexpectedly")
+    room.wait_for_close_error = error
+    context = _FakeRoomClientContext(room)
+    monkeypatch.setattr(
+        "meshagent.agents.agent.RoomClient",
+        lambda **kwargs: context,
+    )
+    agent = _CredentialBindingAgent()
+
+    with pytest.raises(RuntimeError, match="closed unexpectedly"):
+        await agent.run()
+
+    assert context.exited is True
+    assert context.exit_exception_type is RuntimeError
+    assert agent.room is None
+
+
+@pytest.mark.asyncio
+async def test_single_room_agent_run_stops_on_termination_signal(monkeypatch) -> None:
+    handlers = {}
+    previous_handlers = {
+        signal.SIGTERM: object(),
+        signal.SIGABRT: object(),
+    }
+    restored_handlers = []
+    room = _SignalTriggeredRoom(
+        agents=_FakeAgentsClient(response=None),
+        handlers=handlers,
+    )
+    context = _FakeRoomClientContext(room)
+
+    def fake_signal(signum, handler):
+        if callable(handler):
+            handlers[signum] = handler
+            return previous_handlers[signum]
+        restored_handlers.append((signum, handler))
+        return handler
+
+    monkeypatch.setattr("meshagent.agents.agent.RoomClient", lambda **kwargs: context)
+    monkeypatch.setattr("meshagent.agents.agent.signal.signal", fake_signal)
+    agent = _CredentialBindingAgent()
+
+    await agent.run()
+
+    assert room.wait_for_close_calls == 1
+    assert agent.room is None
+    assert restored_handlers == [
+        (signal.SIGTERM, previous_handlers[signal.SIGTERM]),
+        (signal.SIGABRT, previous_handlers[signal.SIGABRT]),
+    ]
 
 
 @pytest.mark.asyncio
