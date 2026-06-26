@@ -17,7 +17,6 @@ from .adapter import ToolResponseAdapter, LLMAdapter, LLMProvider
 from .image_captioner import ImageCaptioner, LLMImageCaptioner
 from .images_dataset import ImageDatasetClient, ImageDatasetRecord, ImagesDataset
 from .dataset_thread_storage import DatasetThreadStorage
-from .process_thread_adapter import MeshDocumentThreadStorage
 from .threaded_channel import ThreadedChannel
 from .thread_status_publisher import (
     AgentMessageThreadStatusPublisher,
@@ -88,7 +87,6 @@ __all__ = [
     ImageDatasetRecord,
     ImagesDataset,
     DatasetThreadStorage,
-    MeshDocumentThreadStorage,
     AgentMessageThreadStatusPublisher,
     ParticipantAttributeThreadStatusPublisher,
     ThreadStatusPublisher,

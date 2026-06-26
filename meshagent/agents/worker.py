@@ -9,7 +9,7 @@ from meshagent.tools import (
     Toolkit,
     ToolContext,
 )
-from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
+from meshagent.tools.hosting import _RemoteToolkitWrapper, start_hosted_toolkit
 from .adapter import LLMAdapter
 import asyncio
 import contextlib
@@ -395,7 +395,7 @@ class Worker(SingleRoomAgent):
 
             self._worker_toolkit = self._create_worker_toolkit(room=room)
             if self._worker_toolkit is not None:
-                self._hosted_worker_toolkit = await _start_hosted_toolkit(
+                self._hosted_worker_toolkit = await start_hosted_toolkit(
                     room=room,
                     toolkit=self._worker_toolkit,
                 )

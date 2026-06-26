@@ -42,7 +42,7 @@ from meshagent.agents.messages import (
     AgentThreadEvent,
 )
 from meshagent.tools import Toolkit
-from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
+from meshagent.tools.hosting import _RemoteToolkitWrapper, start_hosted_toolkit
 from meshagent.tools.storage import (
     StorageToolLocalMount,
     StorageToolRoomMount,
@@ -51,9 +51,9 @@ from meshagent.tools.storage import (
 
 from .chat_channel import MessagingChatChannel
 from .config import RulesConfig
+from .dataset_thread_storage import DatasetThreadStorage
 from .mail_channel import MailChannel
 from .process import AgentSupervisor, ContentScheme, LLMAgentProcess, Message
-from .process_thread_adapter import MeshDocumentThreadStorage
 from .queue_channel import QueueChannel
 from .thread_status_publisher import AgentMessageThreadStatusPublisher
 from .toolkit_channel import ToolkitChannel
@@ -1864,9 +1864,14 @@ class MeshagentPackage(PythonPackage):
                 self._room = room
 
             def create_thread_process(self, thread_id: str) -> LLMAgentProcess:
-                thread_storage = MeshDocumentThreadStorage(
+                normalized_thread_id = thread_id.strip()
+                if not normalized_thread_id.startswith("dataset://"):
+                    normalized_thread_id = (
+                        f"dataset://{normalized_thread_id.lstrip('/')}"
+                    )
+                thread_storage = DatasetThreadStorage(
                     room=self._room,
-                    path=thread_id,
+                    path=normalized_thread_id,
                 )
 
                 async def _turn_instructions_provider(participant) -> str | None:
@@ -2186,7 +2191,7 @@ class MeshagentPackage(PythonPackage):
                         continue
                     for toolkit in channel.get_exposed_toolkits():
                         hosted_toolkits.append(
-                            await _start_hosted_toolkit(
+                            await start_hosted_toolkit(
                                 room=room_client, toolkit=toolkit
                             )
                         )

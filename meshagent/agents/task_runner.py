@@ -5,7 +5,7 @@ from meshagent.tools import (
     ToolContext,
     RoomToolContext,
 )
-from meshagent.tools.hosting import _RemoteToolkitWrapper, _start_hosted_toolkit
+from meshagent.tools.hosting import _RemoteToolkitWrapper, start_hosted_toolkit
 from meshagent.api import Participant
 from meshagent.api.messaging import ensure_content
 from meshagent.api.room_server_client import RoomClient
@@ -153,7 +153,7 @@ class TaskRunner(SingleRoomAgent):
                 RunTaskTool(agent=self, room=room),
             ],
         )
-        self._hosted_worker_toolkit = await _start_hosted_toolkit(
+        self._hosted_worker_toolkit = await start_hosted_toolkit(
             room=room,
             toolkit=self._worker_toolkit,
         )

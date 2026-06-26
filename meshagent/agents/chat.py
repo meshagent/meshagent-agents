@@ -1916,7 +1916,7 @@ class ChatBotBase(SingleRoomAgent, ABC):
                     context=context,
                     path=path,
                     message=payload,
-                    wait_for_result=False,
+                    wait_for_result=True,
                 )
                 outer._schedule_pending_thread_list_entry(
                     context=context,

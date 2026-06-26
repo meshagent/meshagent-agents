@@ -131,29 +131,29 @@ def test_thread_dir_for_namespace_rejects_relative_namespace_parts() -> None:
 
 def test_multi_thread_storage_upserts_to_path_scheme_provider() -> None:
     async def run() -> None:
-        meshdocument = _FakeThreadStorageRepository(scheme="meshdocument", entries=[])
+        archive = _FakeThreadStorageRepository(scheme="archive", entries=[])
         dataset = _FakeThreadStorageRepository(scheme="dataset", entries=[])
         repository = MultiThreadStorageRepository(
-            repositories=[meshdocument, dataset],
-            default_scheme="meshdocument",
+            repositories=[archive, dataset],
+            default_scheme="archive",
         )
 
         await repository.upsert_thread(path="dataset://threads/one", name="Dataset")
         await repository.upsert_thread(
-            path="meshdocument://threads/two.thread",
+            path="archive://threads/two.thread",
             name="Mesh",
         )
 
         assert dataset.upserts == ["dataset://threads/one"]
-        assert meshdocument.upserts == ["meshdocument://threads/two.thread"]
+        assert archive.upserts == ["archive://threads/two.thread"]
 
     asyncio.run(run())
 
 
 def test_multi_thread_storage_routes_unschemed_paths_by_existing_entry() -> None:
     async def run() -> None:
-        meshdocument = _FakeThreadStorageRepository(
-            scheme="meshdocument",
+        archive = _FakeThreadStorageRepository(
+            scheme="archive",
             entries=[
                 ThreadListEntry(
                     name="Legacy",
@@ -165,15 +165,15 @@ def test_multi_thread_storage_routes_unschemed_paths_by_existing_entry() -> None
         )
         dataset = _FakeThreadStorageRepository(scheme="dataset", entries=[])
         repository = MultiThreadStorageRepository(
-            repositories=[dataset, meshdocument],
+            repositories=[dataset, archive],
             default_scheme="dataset",
         )
 
         await repository.rename_thread(path="/threads/legacy.thread", name="Renamed")
         await repository.delete_thread(path="/threads/legacy.thread")
 
-        assert meshdocument.renames == [("/threads/legacy.thread", "Renamed")]
-        assert meshdocument.deletes == ["/threads/legacy.thread"]
+        assert archive.renames == [("/threads/legacy.thread", "Renamed")]
+        assert archive.deletes == ["/threads/legacy.thread"]
         assert dataset.renames == []
         assert dataset.deletes == []
 
@@ -182,12 +182,12 @@ def test_multi_thread_storage_routes_unschemed_paths_by_existing_entry() -> None
 
 def test_multi_thread_storage_lists_all_providers_sorted_descending() -> None:
     async def run() -> None:
-        meshdocument = _FakeThreadStorageRepository(
-            scheme="meshdocument",
+        archive = _FakeThreadStorageRepository(
+            scheme="archive",
             entries=[
                 ThreadListEntry(
                     name="Older",
-                    path="meshdocument://threads/older.thread",
+                    path="archive://threads/older.thread",
                     created_at="2026-01-01T00:00:00Z",
                     modified_at="2026-01-01T00:00:00Z",
                 )
@@ -205,15 +205,15 @@ def test_multi_thread_storage_lists_all_providers_sorted_descending() -> None:
             ],
         )
         repository = MultiThreadStorageRepository(
-            repositories=[meshdocument, dataset],
-            default_scheme="meshdocument",
+            repositories=[archive, dataset],
+            default_scheme="archive",
         )
 
         page = await repository.list_threads(limit=20, offset=0)
 
         assert [entry.path for entry in page.threads] == [
             "dataset://threads/newer",
-            "meshdocument://threads/older.thread",
+            "archive://threads/older.thread",
         ]
         assert page.total == 2
 
@@ -222,11 +222,11 @@ def test_multi_thread_storage_lists_all_providers_sorted_descending() -> None:
 
 def test_multi_thread_storage_watch_yields_events_from_all_providers() -> None:
     async def run() -> None:
-        meshdocument = _FakeThreadStorageRepository(scheme="meshdocument", entries=[])
+        archive = _FakeThreadStorageRepository(scheme="archive", entries=[])
         dataset = _FakeThreadStorageRepository(scheme="dataset", entries=[])
         repository = MultiThreadStorageRepository(
-            repositories=[meshdocument, dataset],
-            default_scheme="meshdocument",
+            repositories=[archive, dataset],
+            default_scheme="archive",
         )
 
         watch = repository.watch_threads()

@@ -236,10 +236,7 @@ class ThreadedChannel(Channel):
             return DatasetThreadStorage(room=self._room, thread_dir=thread_dir)
         if self._thread_url_scheme == "tmp://":
             return None
-
-        from .process_thread_adapter import MeshDocumentThreadStorage
-
-        return MeshDocumentThreadStorage(room=self._room, thread_dir=thread_dir)
+        return None
 
     def _thread_list_entry_name_for_path(self, *, path: str) -> str:
         filename = posixpath.basename(self._thread_path_from_url(path=path.strip()))

@@ -70,7 +70,7 @@ async def test_mailbot_start_builds_room_bound_toolkit(
     monkeypatch.setattr("meshagent.agents.worker.Worker.start", fake_worker_start)
     monkeypatch.setattr("meshagent.agents.worker.Worker.stop", fake_worker_stop)
     monkeypatch.setattr(
-        "meshagent.agents.mail._start_hosted_toolkit",
+        "meshagent.agents.mail.start_hosted_toolkit",
         fake_start_hosted_toolkit,
     )
 

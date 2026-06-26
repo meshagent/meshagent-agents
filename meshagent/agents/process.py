@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import mimetypes
+import os
 import re
 import shlex
 import uuid
@@ -5459,19 +5460,69 @@ class LLMAgentProcess(AgentProcess):
                 configured_options["mcp"] = {
                     "servers": [*turn.mcp.servers],
                 }
+                proxy_config = self._meshagent_proxy_config_from_environment()
+                if proxy_config is not None:
+                    configured_options["mcp"]["meshagent_proxy_config"] = proxy_config
             if turn.toolkits is None:
                 continue
             for toolkit_name, toolkit_config in turn.toolkits.items():
                 client_options = toolkit_config.client_options
                 if client_options is None:
                     continue
-                configured_options[toolkit_name] = client_options
+                if toolkit_name == "mcp":
+                    configured_options[toolkit_name] = (
+                        self._with_environment_meshagent_proxy_config(client_options)
+                    )
+                else:
+                    configured_options[toolkit_name] = client_options
 
         if configured_options is not None:
             self._active_turn_toolkit_client_options = configured_options
             return dict(configured_options)
 
         return dict(self._active_turn_toolkit_client_options)
+
+    @staticmethod
+    def _meshagent_proxy_config_from_environment() -> dict[str, str] | None:
+        api_key = os.getenv("MESHAGENT_API_KEY")
+        if api_key is None or api_key.strip() == "":
+            return None
+
+        api_url = (
+            os.getenv("MESHAGENT_LOCAL_API_URL")
+            or os.getenv("MESHAGENT_API_URL")
+            or os.getenv("MESHAGENT_ROOM_URL")
+        )
+        if api_url is None or api_url.strip() == "":
+            return None
+
+        normalized_url = api_url.strip().rstrip("/")
+        parsed = urlparse(normalized_url)
+        if parsed.scheme == "ws":
+            normalized_url = f"http://{parsed.netloc}{parsed.path}".rstrip("/")
+        elif parsed.scheme == "wss":
+            normalized_url = f"https://{parsed.netloc}{parsed.path}".rstrip("/")
+
+        return {
+            "api_url": normalized_url,
+            "api_key": api_key.strip(),
+        }
+
+    @classmethod
+    def _with_environment_meshagent_proxy_config(
+        cls,
+        client_options: dict[str, Any],
+    ) -> dict[str, Any]:
+        if client_options.get("meshagent_proxy_config") is not None:
+            return client_options
+
+        proxy_config = cls._meshagent_proxy_config_from_environment()
+        if proxy_config is None:
+            return client_options
+
+        updated_options = dict(client_options)
+        updated_options["meshagent_proxy_config"] = proxy_config
+        return updated_options
 
     def _resolve_turn_tool_choice(
         self,
