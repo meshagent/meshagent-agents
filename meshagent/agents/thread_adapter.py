@@ -547,10 +547,3 @@ class ThreadAdapter(ABC):
             image.set_attribute(key, value)
 
         return resolved_message_id
-
-
-# Backwards-compatible import path for existing callers.
-def response_event_to_agent_event(event: dict) -> Optional[dict]:
-    from .responses_thread_adapter import response_event_to_agent_event as _convert
-
-    return _convert(event)

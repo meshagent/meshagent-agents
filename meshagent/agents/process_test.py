@@ -8381,22 +8381,6 @@ async def test_llm_agent_process_automatic_realtime_audio_turn_starts_on_speech(
         await process.stop(supervisor)
 
 
-def test_llm_agent_process_accepts_generic_thread_adapter() -> None:
-    room = _ThreadRoom(document=_ThreadDocument())
-
-    process = LLMAgentProcess(
-        thread_id="/threads/test.thread",
-        participant=room.local_participant,
-        llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
-        thread_adapter=_GenericThreadAdapter(
-            room=room,
-            path="/threads/test.thread",
-        ),
-    )
-
-    assert process.thread_adapter is not None
-
-
 def test_llm_agent_process_allows_storage_path_to_differ_from_thread_id() -> None:
     room = _ThreadRoom(document=_ThreadDocument())
 

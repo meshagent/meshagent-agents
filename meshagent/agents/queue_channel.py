@@ -387,10 +387,9 @@ class QueueChannel(ThreadedChannel):
         payload: dict[str, Any],
         thread_text: str,
     ) -> str:
-        for key in ("thread_id", "path"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip() != "":
-                return self._expand_thread_id_template(value=value.strip())
+        value = payload.get("path")
+        if isinstance(value, str) and value.strip() != "":
+            return self._expand_thread_id_template(value=value.strip())
 
         path, _ = await self.new_thread(
             message_text=thread_text,

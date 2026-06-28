@@ -38,7 +38,6 @@ from .chat_client import (
     LocalChatClient,
     MessagingChatClient,
     PendingAgentInput,
-    QueuedAgentInput,
     WebSocketChatClient,
 )
 from .mail_channel import MailChannel
@@ -46,17 +45,6 @@ from .queue_channel import QueueChannel
 from .toolkit_channel import ToolkitChannel
 from .thread_schema import thread_schema, thread_list_schema
 from .mcp import MCPHeader, MCPServerConfig, MCPToolkitClientOptions
-from .managed import (
-    AllowedAnthropicModel,
-    AllowedModel,
-    AllowedOpenAIModel,
-    ManagedAgentImageGeneration,
-    ManagedAgentMetadata,
-    ManagedAgentSpec,
-    ManagedAgentToolkit,
-    ManagedAgentWebFetch,
-    ManagedAgentWebSearch,
-)
 from .process import ContentScheme
 from .version import __version__
 
@@ -103,7 +91,6 @@ __all__ = [
     LocalChatClient,
     MessagingChatClient,
     PendingAgentInput,
-    QueuedAgentInput,
     WebSocketChatClient,
     MailChannel,
     QueueChannel,
@@ -114,14 +101,5 @@ __all__ = [
     MCPHeader,
     MCPServerConfig,
     MCPToolkitClientOptions,
-    AllowedAnthropicModel,
-    AllowedModel,
-    AllowedOpenAIModel,
-    ManagedAgentImageGeneration,
-    ManagedAgentMetadata,
-    ManagedAgentSpec,
-    ManagedAgentToolkit,
-    ManagedAgentWebFetch,
-    ManagedAgentWebSearch,
     __version__,
 ]

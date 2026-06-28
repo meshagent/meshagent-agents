@@ -197,6 +197,31 @@ async def test_queue_channel_emits_turn_start_from_prompt_and_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_queue_channel_does_not_accept_thread_id_as_path_alias() -> None:
+    room = _FakeRoom()
+    supervisor = _RecordingSupervisor()
+    channel = QueueChannel(room=room, queue_name="jobs")
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await room.queues.push(
+            {
+                "prompt": "Process webhook payload",
+                "thread_id": ".threads/jobs/webhook.thread",
+            }
+        )
+        await _drain()
+
+        assert len(supervisor.sent) == 1
+        outbound = supervisor.sent[0]
+        assert isinstance(outbound.data, TurnStart)
+        assert outbound.data.thread_id != ".threads/jobs/webhook.thread"
+        assert outbound.data.thread_id.startswith(".threads/assistant/")
+        assert outbound.data.thread_id.endswith(".thread")
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_queue_channel_generates_thread_path_and_uses_payload_json_when_prompt_missing() -> (
     None
 ):
@@ -249,7 +274,7 @@ async def test_queue_channel_supports_structured_prompt_with_room_file_include()
     try:
         await room.queues.push(
             {
-                "thread_id": "/threads/heartbeats/current.thread",
+                "path": "/threads/heartbeats/current.thread",
                 "prompt": [
                     {"type": "file", "url": "room:///prompts/heartbeat.md"},
                     {"type": "text", "text": "Summarize the room status"},
@@ -282,7 +307,7 @@ async def test_queue_channel_preserves_structured_content_room_files() -> None:
     try:
         await room.queues.push(
             {
-                "thread_id": "/threads/uploads/current.thread",
+                "path": "/threads/uploads/current.thread",
                 "content": [
                     {"type": "file", "url": "room:///docs/report.md"},
                 ],
@@ -301,7 +326,7 @@ async def test_queue_channel_preserves_structured_content_room_files() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queue_channel_expands_datetime_tokens_in_thread_id(
+async def test_queue_channel_expands_datetime_tokens_in_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     room = _FakeRoom()
@@ -315,7 +340,7 @@ async def test_queue_channel_expands_datetime_tokens_in_thread_id(
         await room.queues.push(
             {
                 "prompt": "Run the hourly heartbeat",
-                "thread_id": "/threads/{YYYY}/{MM}/{DD}/{HH}/{mm}/heartbeat.thread",
+                "path": "/threads/{YYYY}/{MM}/{DD}/{HH}/{mm}/heartbeat.thread",
             }
         )
         await _drain()
@@ -329,7 +354,7 @@ async def test_queue_channel_expands_datetime_tokens_in_thread_id(
 
 
 @pytest.mark.asyncio
-async def test_queue_channel_expands_case_insensitive_datetime_aliases_in_thread_id(
+async def test_queue_channel_expands_case_insensitive_datetime_aliases_in_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     room = _FakeRoom()
@@ -343,7 +368,7 @@ async def test_queue_channel_expands_case_insensitive_datetime_aliases_in_thread
         await room.queues.push(
             {
                 "prompt": "Run the hourly heartbeat",
-                "thread_id": "/threads/{yEaR}/{mOnTh}/{DaY}/{hOuR}/{mInUtE}/{sEcOnD}/heartbeat.thread",
+                "path": "/threads/{yEaR}/{mOnTh}/{DaY}/{hOuR}/{mInUtE}/{sEcOnD}/heartbeat.thread",
             }
         )
         await _drain()

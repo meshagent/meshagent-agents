@@ -1036,14 +1036,6 @@ class BaseChatChannel(ThreadedChannel):
         if not isinstance(message.message, dict):
             return None
 
-        raw_payload = message.message.get("payload")
-        if "type" not in message.message and isinstance(raw_payload, dict):
-            logger.warning(
-                "received deprecated agent-message payload wrapper; send agent "
-                "message fields at the top level"
-            )
-            return raw_payload
-
         return message.message
 
     @classmethod

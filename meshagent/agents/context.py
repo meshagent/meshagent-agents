@@ -248,10 +248,6 @@ class AgentSessionContext:
         )
 
 
-# Backwards compatibility for code still importing AgentChatContext.
-AgentChatContext = AgentSessionContext
-
-
 class TaskContext:
     def __init__(
         self,

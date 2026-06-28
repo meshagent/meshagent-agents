@@ -3579,9 +3579,6 @@ class AgentSupervisor:
             await self._stop_children()
 
 
-ProcessState = LifecycleState
-
-
 class AgentProcess:
     def __init__(
         self,
@@ -3589,15 +3586,9 @@ class AgentProcess:
         *,
         thread_id: str | None = None,
         thread_storage: ThreadStorage | None = None,
-        thread_adapter: ThreadStorage | None = None,
         backend: str | None = None,
     ) -> None:
         del supervisor
-        if thread_storage is None:
-            thread_storage = thread_adapter
-        elif thread_adapter is not None:
-            raise ValueError("thread_storage and thread_adapter cannot both be set")
-
         if thread_storage is not None:
             if thread_id is None:
                 thread_id = thread_storage.path
@@ -3606,7 +3597,7 @@ class AgentProcess:
         self._thread_id = thread_id
         self._backend = backend
         self._thread_storage = thread_storage
-        self._state: ProcessState = "stopped"
+        self._state: LifecycleState = "stopped"
         self._run_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._queue: asyncio.Queue[Message] = asyncio.Queue()
@@ -3667,7 +3658,7 @@ class AgentProcess:
         return message_type not in _THREAD_ADAPTER_REQUEST_MESSAGE_TYPES
 
     @property
-    def state(self) -> ProcessState:
+    def state(self) -> LifecycleState:
         return self._state
 
     @property
@@ -3684,10 +3675,6 @@ class AgentProcess:
 
     @property
     def thread_storage(self) -> ThreadStorage | None:
-        return self._thread_storage
-
-    @property
-    def thread_adapter(self) -> ThreadStorage | None:
         return self._thread_storage
 
     @property
@@ -4036,18 +4023,12 @@ class LLMAgentProcess(AgentProcess):
         backend_name: str | None = "llm",
         toolkits: Optional[list[Toolkit]] = None,
         thread_storage: ThreadStorage | None = None,
-        thread_adapter: ThreadStorage | None = None,
         thread_status_publisher: ThreadStatusPublisher | None = None,
         format_message: Callable[..., str] | None = None,
         session_initializer: SessionInitializer | None = None,
         turn_instructions_provider: TurnInstructionsProvider | None = None,
         turn_toolkits_builder: TurnToolkitsBuilder | None = None,
     ) -> None:
-        if thread_storage is None:
-            thread_storage = thread_adapter
-        elif thread_adapter is not None:
-            raise ValueError("thread_storage and thread_adapter cannot both be set")
-
         super().__init__(
             thread_id=thread_id,
             thread_storage=thread_storage,

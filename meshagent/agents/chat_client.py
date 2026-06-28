@@ -154,9 +154,6 @@ class PendingAgentInput:
         )
 
 
-QueuedAgentInput = PendingAgentInput
-
-
 @dataclass(frozen=True, slots=True)
 class AcceptedAgentInput:
     message_id: str
@@ -2083,14 +2080,9 @@ class MessagingChatClient(BaseChatClient):
         raw_message = message.message
         if not isinstance(raw_message, dict):
             return
-        raw_payload = (
-            raw_message
-            if isinstance(raw_message.get("type"), str)
-            else raw_message.get("payload")
-        )
-        if not isinstance(raw_payload, dict):
+        if not isinstance(raw_message.get("type"), str):
             return
-        self._handle_agent_payload(raw_payload)
+        self._handle_agent_payload(raw_message)
 
     async def _send_agent_message(self, payload: AgentMessage) -> None:
         if self._participant is None:
