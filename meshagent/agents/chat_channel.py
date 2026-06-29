@@ -276,6 +276,9 @@ class BaseChatChannel(ThreadedChannel):
         if isinstance(data, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)):
             data = data.model_copy(update={"data": b""})
         payload = data.model_dump(mode="json", exclude_none=True)
+        payload.pop("created_at", None)
+        if payload.get("metadata") == {}:
+            payload.pop("metadata", None)
         if isinstance(
             message.data, (AgentAudioGenerationDelta, AgentRealtimeAudioChunk)
         ):
@@ -1035,6 +1038,10 @@ class BaseChatChannel(ThreadedChannel):
     ) -> dict[str, Any] | None:
         if not isinstance(message.message, dict):
             return None
+
+        payload = message.message.get("payload")
+        if isinstance(payload, dict):
+            return dict(payload)
 
         return message.message
 

@@ -165,6 +165,16 @@ class CompletionsThreadAdapter(ThreadAdapter):
             event=event,
         )
 
+    def _messages_element(self) -> Element:
+        if self._thread is None:
+            raise RoomException("thread was not opened")
+
+        for prop in self._thread.root.get_children():
+            if prop.tag_name == "messages":
+                return prop
+
+        raise RoomException("messages element is missing from thread document")
+
     async def _handle_custom_event_for_messages(
         self,
         *,
