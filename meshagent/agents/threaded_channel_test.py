@@ -4,6 +4,7 @@ import logging
 import pytest
 
 from meshagent.agents.thread_schema import thread_list_schema
+from meshagent.agents.thread_storage import ThreadListEntry, ThreadListPage
 from meshagent.agents.threaded_channel import ThreadedChannel
 
 
@@ -116,6 +117,81 @@ class _FakeThreadNameAdapter:
         return {"thread_name": " generated title.thread "}
 
 
+class _FakeThreadRepository:
+    def __init__(self) -> None:
+        self.list_calls: list[dict[str, int]] = []
+        self.upsert_calls: list[dict] = []
+
+    @property
+    def scheme(self) -> str:
+        return "repo"
+
+    @property
+    def is_ephemeral(self) -> bool:
+        return False
+
+    def thread_list_path(self) -> str:
+        return "repo://threads/index.threadl"
+
+    async def list_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ThreadListPage:
+        self.list_calls.append({"limit": limit, "offset": offset})
+        return ThreadListPage(
+            threads=[
+                ThreadListEntry(
+                    name="Repo Thread",
+                    path="repo://threads/repo.thread",
+                    created_at="2026-01-01T00:00:00Z",
+                    modified_at="2026-01-02T00:00:00Z",
+                )
+            ],
+            total=1,
+            offset=offset,
+            limit=limit,
+        )
+
+    async def upsert_thread(
+        self,
+        *,
+        path: str,
+        name: str | None = None,
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> ThreadListEntry:
+        self.upsert_calls.append(
+            {
+                "path": path,
+                "name": name,
+                "created_at": created_at,
+                "modified_at": modified_at,
+            }
+        )
+        return ThreadListEntry(
+            name=name or "",
+            path=path,
+            created_at=created_at or "",
+            modified_at=modified_at or "",
+        )
+
+
+class _RepositoryBackedThreadedChannel(ThreadedChannel):
+    def __init__(self, *, repository: _FakeThreadRepository, room: _FakeRoom) -> None:
+        self.repository = repository
+        super().__init__(
+            room=room,  # type: ignore[arg-type]
+            threading_mode="default-new",
+            thread_dir="threads",
+            thread_url_scheme="repo",
+        )
+
+    def _thread_storage_repository(self):
+        return self.repository
+
+
 @pytest.mark.asyncio
 async def test_threaded_channel_publish_and_document_lifecycle_execute_provider_calls() -> (
     None
@@ -180,6 +256,33 @@ async def test_threaded_channel_list_and_bump_threads_mutate_open_document() -> 
 
 
 @pytest.mark.asyncio
+async def test_threaded_channel_repository_backed_list_and_upsert_delegate() -> None:
+    repository = _FakeThreadRepository()
+    room = _FakeRoom()
+    channel = _RepositoryBackedThreadedChannel(repository=repository, room=room)
+
+    page = await channel.list_threads(limit=500, offset=-10)
+    channel.bump_thread(
+        path="repo://threads/repo.thread",
+        name="Repo Name",
+    )
+    await channel._wait_for_thread_list_background_tasks()
+
+    assert repository.list_calls == [{"limit": 200, "offset": 0}]
+    assert page.threads[0].name == "Repo Thread"
+    assert repository.upsert_calls == [
+        {
+            "path": "repo://threads/repo.thread",
+            "name": "Repo Name",
+            "created_at": None,
+            "modified_at": repository.upsert_calls[0]["modified_at"],
+        }
+    ]
+    assert repository.upsert_calls[0]["modified_at"] is not None
+    assert channel._thread_list_background_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_threaded_channel_new_thread_determines_name_before_bump(
     monkeypatch,
 ) -> None:
@@ -228,7 +331,34 @@ async def test_threaded_channel_new_thread_determines_name_before_bump(
 
 
 @pytest.mark.asyncio
-async def test_threaded_channel_determine_thread_name_calls_configured_adapter() -> None:
+async def test_threaded_channel_new_thread_allocates_path_and_indexes_thread() -> None:
+    room = _FakeRoom()
+    channel = ThreadedChannel(
+        room=room,  # type: ignore[arg-type]
+        threading_mode="default-new",
+    )
+    await channel.open_thread_list_document()
+
+    path, name = await channel.new_thread(
+        message_text="new project thread",
+        attachments=None,
+    )
+
+    assert name == "New Project Thread"
+    assert path.startswith(".threads/assistant/")
+    assert path.endswith(".thread")
+    assert len(room.document.root.children) == 1
+    entry = room.document.root.children[0]
+    assert entry.get_attribute("name") == "New Project Thread"
+    assert entry.get_attribute("path") == path
+    assert entry.get_attribute("created_at") is not None
+    assert entry.get_attribute("modified_at") is not None
+
+
+@pytest.mark.asyncio
+async def test_threaded_channel_determine_thread_name_calls_configured_adapter() -> (
+    None
+):
     adapter = _FakeThreadNameAdapter()
     room = _FakeRoom()
     channel = ThreadedChannel(

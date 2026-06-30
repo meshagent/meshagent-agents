@@ -3201,6 +3201,28 @@ async def test_chat_channel_sets_threading_attributes_and_tracks_thread_list() -
     supervisor = _RecordingSupervisor()
 
     await channel.start(supervisor)
+    pending_started = asyncio.Event()
+
+    async def _pending_thread_list_task() -> None:
+        pending_started.set()
+        await asyncio.Event().wait()
+
+    pending_task = asyncio.create_task(_pending_thread_list_task())
+    channel._track_thread_list_background_task(task=pending_task)
+    channel._pending_thread_list_paths.add("/threads/chat/pending.thread")
+    channel._active_turn_ids_by_thread["/threads/chat/example.thread"] = "turn-1"
+    channel._open_participant_ids_by_thread["/threads/chat/example.thread"] = {
+        caller.id
+    }
+    channel._event_buffer_by_thread["/threads/chat/example.thread"] = [{"type": "x"}]
+    channel._tool_argument_delta_buffer_by_thread_item[
+        ("/threads/chat/example.thread", "item-1")
+    ] = {"arguments": "partial"}
+    channel._thread_status_by_thread["/threads/chat/example.thread"] = {
+        "status": "Working"
+    }
+    channel._turn_input_payloads_by_message_id["message-1"] = {"type": "input"}
+    await pending_started.wait()
     try:
         assert room.local_participant.set_attribute_calls == [
             ("meshagent.chatbot.threading", "default-new"),
@@ -3229,6 +3251,19 @@ async def test_chat_channel_sets_threading_attributes_and_tracks_thread_list() -
     finally:
         await channel.stop(supervisor)
 
+    assert pending_task.cancelled()
+    assert channel._thread_list_background_tasks == set()
+    assert channel._pending_thread_list_paths == set()
+    assert channel._active_turn_ids_by_thread == {}
+    assert channel._open_participant_ids_by_thread == {}
+    assert channel._event_buffer_by_thread == {}
+    assert channel._tool_argument_delta_buffer_by_thread_item == {}
+    assert channel._thread_status_by_thread == {}
+    assert channel._turn_input_payloads_by_message_id == {}
+    assert room.local_participant.set_attribute_calls[-1] == (
+        "supports_agent_messages",
+        None,
+    )
     assert sync.close_calls == ["/threads/chat/index.threadl"]
 
 
