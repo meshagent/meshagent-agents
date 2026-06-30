@@ -3,6 +3,7 @@ import logging
 
 import pytest
 
+from meshagent.agents.dataset_thread_storage import DatasetThreadStorage
 from meshagent.agents.thread_schema import thread_list_schema
 from meshagent.agents.thread_storage import ThreadListEntry, ThreadListPage
 from meshagent.agents.threaded_channel import ThreadedChannel
@@ -67,11 +68,54 @@ class _FakeSync:
         self.close_calls.append(path)
 
 
+class _FakeSearchTable:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def to_pylist(self) -> list[dict]:
+        return [dict(row) for row in self.rows]
+
+
+class _FakeDatasets:
+    def __init__(self, *, tables: list[str], rows: list[dict]) -> None:
+        self.tables = tables
+        self.rows = rows
+        self.list_tables_calls: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.search_calls: list[dict] = []
+
+    async def list_tables(self, *, namespace=None) -> list[str]:
+        self.list_tables_calls.append({"namespace": namespace})
+        return [*self.tables]
+
+    async def create_table_with_schema(
+        self,
+        *,
+        name: str,
+        schema=None,
+        mode=None,
+        namespace=None,
+    ) -> None:
+        self.create_calls.append(
+            {"name": name, "schema": schema, "mode": mode, "namespace": namespace}
+        )
+
+    async def search(self, *, table: str, namespace=None) -> _FakeSearchTable:
+        self.search_calls.append({"table": table, "namespace": namespace})
+        return _FakeSearchTable(self.rows)
+
+
 class _FakeRoom:
-    def __init__(self, *, participant_name: str = "assistant") -> None:
+    def __init__(
+        self,
+        *,
+        participant_name: str = "assistant",
+        datasets: _FakeDatasets | None = None,
+    ) -> None:
         self.local_participant = _FakeParticipant(name=participant_name)
         self.document = _FakeDocument()
         self.sync = _FakeSync(self.document)
+        self.datasets = datasets
 
 
 class _FakeThreadNameContext:
@@ -192,6 +236,14 @@ class _RepositoryBackedThreadedChannel(ThreadedChannel):
         return self.repository
 
 
+class _DatasetBackedThreadedChannel(ThreadedChannel):
+    def _thread_storage_repository(self):
+        return DatasetThreadStorage(
+            room=self.room,  # type: ignore[arg-type]
+            thread_dir=self.get_thread_dir(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_threaded_channel_publish_and_document_lifecycle_execute_provider_calls() -> (
     None
@@ -280,6 +332,74 @@ async def test_threaded_channel_repository_backed_list_and_upsert_delegate() -> 
     ]
     assert repository.upsert_calls[0]["modified_at"] is not None
     assert channel._thread_list_background_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_threaded_channel_dataset_repository_list_threads_executes_client_path() -> (
+    None
+):
+    datasets = _FakeDatasets(
+        tables=["index"],
+        rows=[
+            {
+                "path": "dataset://threads/older.thread",
+                "name": " Older ",
+                "created_at": "2026-01-01T00:00:00Z",
+                "modified_at": "2026-01-01T00:00:00Z",
+            },
+            {
+                "path": "dataset://threads/missing-modified.thread",
+                "name": 7,
+                "created_at": "2026-01-03T00:00:00Z",
+                "modified_at": None,
+            },
+            {
+                "path": "  dataset://threads/newer.thread  ",
+                "name": " Newer ",
+                "created_at": "2026-01-02T00:00:00Z",
+                "modified_at": "2026-01-04T00:00:00Z",
+            },
+            {
+                "path": "",
+                "name": "ignored",
+                "created_at": "2026-01-05T00:00:00Z",
+                "modified_at": "2026-01-05T00:00:00Z",
+            },
+        ],
+    )
+    room = _FakeRoom(datasets=datasets)
+    channel = _DatasetBackedThreadedChannel(
+        room=room,  # type: ignore[arg-type]
+        threading_mode="default-new",
+        thread_dir="threads",
+        thread_url_scheme="dataset",
+    )
+
+    page = await channel.list_threads(limit=2, offset=0)
+
+    assert datasets.list_tables_calls == [{"namespace": ["threads"]}]
+    assert datasets.create_calls == []
+    assert datasets.search_calls == [{"table": "index", "namespace": ["threads"]}]
+    assert page.total == 3
+    assert page.offset == 0
+    assert page.limit == 2
+    assert [entry.path for entry in page.threads] == [
+        "dataset://threads/newer.thread",
+        "dataset://threads/older.thread",
+    ]
+    assert [entry.name for entry in page.threads] == ["Newer", "Older"]
+    assert [entry.created_at for entry in page.threads] == [
+        "2026-01-02T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+    ]
+    assert page.threads[0].modified_at == "2026-01-04T00:00:00Z"
+
+    second_page = await channel.list_threads(limit=2, offset=2)
+    assert [entry.path for entry in second_page.threads] == [
+        "dataset://threads/missing-modified.thread"
+    ]
+    assert second_page.threads[0].name == ""
+    assert second_page.threads[0].modified_at == ""
 
 
 @pytest.mark.asyncio

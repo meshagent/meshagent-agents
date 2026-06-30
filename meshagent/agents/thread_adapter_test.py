@@ -42,6 +42,19 @@ async def test_thread_adapter_async_manager_calls_start_and_stop() -> None:
     assert adapter.stopped == 1
 
 
+@pytest.mark.asyncio
+async def test_thread_adapter_async_manager_stops_and_preserves_exception() -> None:
+    adapter = _FakeThreadAdapter()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with adapter:
+            assert adapter.started == 1
+            raise RuntimeError("boom")
+
+    assert adapter.started == 1
+    assert adapter.stopped == 1
+
+
 class _FakeSync:
     def __init__(self) -> None:
         self.sync_calls: list[dict] = []

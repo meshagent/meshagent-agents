@@ -2,6 +2,9 @@ import pytest
 import asyncio
 
 from meshagent.api import RoomException
+from meshagent.agents import (
+    completions_thread_adapter as completions_thread_adapter_module,
+)
 from meshagent.agents.completions_thread_adapter import CompletionsThreadAdapter
 from meshagent.agents.thread_adapter import ThreadAdapter
 
@@ -63,6 +66,31 @@ class _FakeParticipant:
 class _FakeRoom:
     def __init__(self) -> None:
         self.local_participant = _FakeParticipant()
+
+
+class _FakeSpan:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.attributes: dict[str, str] = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+    def set_attribute(self, key: str, value: str) -> None:
+        self.attributes[key] = value
+
+
+class _FakeTracer:
+    def __init__(self) -> None:
+        self.spans: list[_FakeSpan] = []
+
+    def start_as_current_span(self, name: str) -> _FakeSpan:
+        span = _FakeSpan(name)
+        self.spans.append(span)
+        return span
 
 
 def test_completions_init_runs_base_thread_adapter_initialization() -> None:
@@ -246,9 +274,12 @@ async def test_completions_custom_event_appends_with_python_normalization() -> N
 
 
 @pytest.mark.asyncio
-async def test_completions_process_llm_events_mutates_thread_and_exits_on_queue_shutdown() -> (
-    None
-):
+async def test_completions_process_llm_events_mutates_thread_and_exits_on_queue_shutdown(
+    monkeypatch,
+) -> None:
+    tracer = _FakeTracer()
+    monkeypatch.setattr(completions_thread_adapter_module, "tracer", tracer)
+
     adapter = object.__new__(CompletionsThreadAdapter)
     messages = _FakeElement("messages")
     adapter._thread = _FakeThread([messages])
@@ -301,3 +332,84 @@ async def test_completions_process_llm_events_mutates_thread_and_exits_on_queue_
     assert event.tag_name == "event"
     assert event.get_attribute("kind") == "tool"
     assert event.get_attribute("state") == "completed"
+    assert [(span.name, span.attributes) for span in tracer.spans] == [
+        (
+            "chatbot.thread.message",
+            {
+                "from_participant_name": "assistant",
+                "role": "assistant",
+                "text": "hello",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_completions_process_llm_events_handles_multiple_choices(
+    monkeypatch,
+) -> None:
+    tracer = _FakeTracer()
+    monkeypatch.setattr(completions_thread_adapter_module, "tracer", tracer)
+
+    adapter = object.__new__(CompletionsThreadAdapter)
+    messages = _FakeElement("messages")
+    adapter._thread = _FakeThread([messages])
+    adapter._room = _FakeRoom()
+    adapter._active_events_by_key = {}
+    adapter._llm_messages = asyncio.Queue()
+
+    adapter._llm_messages.put_nowait("ignored non-dict queue entry")
+    adapter._llm_messages.put_nowait(
+        {
+            "type": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 1,
+                    "delta": {"content": "hel"},
+                    "finish_reason": None,
+                },
+                {
+                    "index": 2,
+                    "delta": {"content": [{"text": "wor"}]},
+                    "finish_reason": None,
+                },
+            ],
+        }
+    )
+    adapter._llm_messages.put_nowait(
+        {
+            "type": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 1,
+                    "delta": {"content": "lo"},
+                    "finish_reason": "stop",
+                },
+                {
+                    "index": 2,
+                    "delta": {"content": {"text": "ld"}},
+                    "finish_reason": "stop",
+                },
+            ],
+        }
+    )
+    adapter._llm_messages.shutdown()
+
+    await adapter._process_llm_events()
+
+    assert [message.tag_name for message in messages.children] == [
+        "message",
+        "message",
+    ]
+    assert [message.values["text"] for message in messages.children] == [
+        "hello",
+        "world",
+    ]
+    assert [message.get_attribute("author_name") for message in messages.children] == [
+        "assistant",
+        "assistant",
+    ]
+    assert [span.attributes["text"] for span in tracer.spans] == [
+        "hello",
+        "world",
+    ]

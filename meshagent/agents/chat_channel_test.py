@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 from aiohttp import WSMessage, WSMsgType, web
-from aiohttp.test_utils import make_mocked_request
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents import chat_channel as chat_channel_module
@@ -174,9 +174,14 @@ class _FakeSync:
 class _FakeDatasets:
     def __init__(self) -> None:
         self.records: list[dict[str, object]] = []
+        self.list_tables_calls: list[dict[str, object]] = []
         self.inspect_calls: list[dict[str, object]] = []
         self.create_calls: list[dict[str, object]] = []
         self.merge_calls: list[dict[str, object]] = []
+
+    async def list_tables(self, *, namespace=None) -> list[str]:
+        self.list_tables_calls.append({"namespace": namespace})
+        return []
 
     async def inspect(self, *, table: str, namespace=None):
         self.inspect_calls.append({"table": table, "namespace": namespace})
@@ -258,6 +263,11 @@ class _FakeMessaging:
         if handlers is None:
             return
         handlers.remove(func)
+
+    def handler_counts(self) -> dict[str, int]:
+        return {
+            event_name: len(handlers) for event_name, handlers in self._handlers.items()
+        }
 
     def get_participant(self, participant_id: str) -> Participant | None:
         return self._participants.get(participant_id)
@@ -722,10 +732,7 @@ async def test_messaging_chat_channel_start_thread_with_backend_publishes_thread
             for sent in room.messaging.sent_messages
             if sent["message"]["type"] == AGENT_EVENT_THREAD_CREATED
         ]
-        assert {sent["to"].id for sent in created_messages} == {
-            sender.id,
-            viewer.id,
-        }
+        assert {sent["to"].id for sent in created_messages} == {sender.id}
         assert all(
             sent["message"]["thread"]["path"] == "/threads/chat/created.thread"
             for sent in created_messages
@@ -2163,6 +2170,93 @@ async def test_chat_channel_sends_audio_generation_delta_as_attachment() -> None
 
 
 @pytest.mark.asyncio
+async def test_messaging_chat_channel_direct_send_methods_delegate_to_room_messaging() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = MessagingChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        first = channel.send_agent_message_to_participant(
+            participant=caller,
+            payload=AgentThreadStatus(
+                type=AGENT_EVENT_THREAD_STATUS,
+                thread_id="/threads/test.thread",
+                status="Thinking",
+            ),
+        )
+        second = await channel.send_agent_message_to_participant_and_wait(
+            participant=caller,
+            payload=AgentThreadStatus(
+                type=AGENT_EVENT_THREAD_STATUS,
+                thread_id="/threads/test.thread",
+                status="Done",
+            ),
+        )
+    finally:
+        await channel.stop(supervisor)
+
+    assert first is True
+    assert second is True
+    assert [sent["to"] for sent in room.messaging.sent_messages] == [caller, caller]
+    assert [sent["type"] for sent in room.messaging.sent_messages] == [
+        "agent-message",
+        "agent-message",
+    ]
+    assert [sent["message"]["type"] for sent in room.messaging.sent_messages] == [
+        AGENT_EVENT_THREAD_STATUS,
+        AGENT_EVENT_THREAD_STATUS,
+    ]
+    assert [sent["message"]["status"] for sent in room.messaging.sent_messages] == [
+        "Thinking",
+        "Done",
+    ]
+    assert [sent["message"]["thread_id"] for sent in room.messaging.sent_messages] == [
+        "/threads/test.thread",
+        "/threads/test.thread",
+    ]
+    assert [sent["message"]["turn_id"] for sent in room.messaging.sent_messages] == [
+        None,
+        None,
+    ]
+    assert ["attachment" not in sent for sent in room.messaging.sent_messages] == [
+        True,
+        True,
+    ]
+
+
+def test_messaging_chat_channel_agent_message_from_room_message_uses_attachment_bytes() -> (
+    None
+):
+    caller = _FakeParticipant(name="caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = MessagingChatChannel(room=room)
+
+    parsed = channel._agent_message_from_room_message(
+        message=RoomMessage(
+            from_participant_id=caller.id,
+            type="agent-message",
+            message={
+                "payload": {
+                    "type": AGENT_EVENT_AUDIO_GENERATION_DELTA,
+                    "thread_id": "/threads/test.thread",
+                    "turn_id": "turn-1",
+                    "item_id": "audio-1",
+                    "data": "ignored-json-data",
+                }
+            },
+            attachment=b"\xf7\x00\x01",
+        )
+    )
+
+    assert isinstance(parsed, AgentAudioGenerationDelta)
+    assert parsed.data == b"\xf7\x00\x01"
+
+
+@pytest.mark.asyncio
 async def test_chat_channel_agent_open_replays_buffered_events_and_close_unsubscribes() -> (
     None
 ):
@@ -3431,6 +3525,20 @@ def test_websocket_chat_channel_preserves_authorized_participant_id() -> None:
     assert first.get_attribute("role") == "user"
 
 
+def test_websocket_chat_connection_is_storage_only_dataclass() -> None:
+    participant = _FakeParticipant(name="Caller", participant_id="caller-id")
+    websocket = _FakeWebSocket()
+
+    connection = chat_channel_module._WebSocketChatConnection(
+        participant=participant,
+        websocket=websocket,
+    )
+
+    assert connection.participant is participant
+    assert connection.websocket is websocket
+    assert set(connection.__dataclass_fields__) == {"participant", "websocket"}
+
+
 def test_msgpack_websocket_chat_encoding_round_trips_agent_message() -> None:
     encoding = MsgpackWebSocketChatEncoding()
     message = TurnStart(
@@ -3612,12 +3720,71 @@ async def test_websocket_chat_channel_rejects_before_channel_is_started() -> Non
 
 
 @pytest.mark.asyncio
+async def test_websocket_chat_channel_handler_receives_msgpack_agent_message() -> None:
+    room = _FakeRoom()
+    count_updates: list[dict[str, int]] = []
+    channel = WebSocketChatChannel(
+        room=room,
+        on_participant_counts_changed=count_updates.append,
+    )
+    supervisor = _RecordingSupervisor()
+    app = web.Application()
+    app.router.add_get("/agent", channel.websocket_handler)
+    client = TestClient(TestServer(app))
+
+    await channel.start(supervisor)
+    await client.start_server()
+    try:
+        websocket = await client.ws_connect(
+            "/agent",
+            headers={
+                "X-Meshagent-Participant-Id": "caller-id",
+                "X-Meshagent-Participant-Name": "Caller",
+            },
+            protocols=("meshagent-msgpack",),
+        )
+
+        encoding = MsgpackWebSocketChatEncoding()
+        await websocket.send_bytes(
+            encoding.encode(
+                OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/test.thread",
+                )
+            )
+        )
+
+        await _wait_until(lambda: len(supervisor.sent) == 1)
+        await websocket.close()
+        await _wait_until(lambda: count_updates == [{"user": 1}, {}])
+    finally:
+        await client.close()
+        await channel.stop(supervisor)
+
+    assert websocket.protocol == "meshagent-msgpack"
+    assert [type(message.data) for message in supervisor.lifecycle] == [
+        ParticipantConnect,
+        ParticipantDisconnect,
+    ]
+    assert isinstance(supervisor.sent[0].data, OpenThread)
+    assert supervisor.sent[0].data.thread_id == "/threads/test.thread"
+    assert supervisor.sent[0].sender is not None
+    assert supervisor.sent[0].sender.id == "caller-id"
+    assert channel._connections_by_participant_id == {}
+    assert channel._participants_by_id == {}
+
+
+@pytest.mark.asyncio
 async def test_websocket_chat_channel_sends_participant_disconnect_on_disconnect() -> (
     None
 ):
     caller = _FakeParticipant(name="Caller", participant_id="caller-id")
     room = _FakeRoom()
-    channel = WebSocketChatChannel(room=room)
+    count_updates: list[dict[str, int]] = []
+    channel = WebSocketChatChannel(
+        room=room,
+        on_participant_counts_changed=count_updates.append,
+    )
     supervisor = _RecordingSupervisor()
     connection = chat_channel_module._WebSocketChatConnection(
         participant=caller,
@@ -3654,6 +3821,7 @@ async def test_websocket_chat_channel_sends_participant_disconnect_on_disconnect
         OpenThread,
         OpenThread,
     ]
+    assert count_updates == [{"user": 1}, {}]
     assert channel._open_participant_ids_by_thread == {}
 
 
@@ -3667,6 +3835,12 @@ async def test_messaging_chat_channel_sends_participant_lifecycle_messages() -> 
 
     await channel.start(supervisor)
     try:
+        assert room.messaging.handler_counts() == {
+            "message": 1,
+            "participant_added": 1,
+            "participant_removed": 1,
+            "messaging_enabled": 1,
+        }
         channel._handle_agent_control_payload(
             sender=caller,
             payload=OpenThread(
@@ -3680,6 +3854,12 @@ async def test_messaging_chat_channel_sends_participant_lifecycle_messages() -> 
     finally:
         await channel.stop(supervisor)
 
+    assert room.messaging.handler_counts() == {
+        "message": 0,
+        "participant_added": 0,
+        "participant_removed": 0,
+        "messaging_enabled": 0,
+    }
     assert [message.data.participant_id for message in supervisor.lifecycle] == [
         "caller-id",
         "viewer-id",
