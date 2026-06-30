@@ -59,6 +59,7 @@ class _FakeRoom:
 class _FakeMeshDocument:
     def __init__(self, *, state: Optional[bytes] = None) -> None:
         self._state = state if state is not None else b""
+        self.root = _FakeElement(tag_name="thread")
 
     def get_state(self, vector: bytes | None = None) -> bytes:
         del vector
@@ -71,6 +72,46 @@ class _BaseStopThreadAdapter(ThreadAdapter):
 
     async def _process_llm_events(self) -> None:
         return None
+
+
+class _FakeOpenSync(_FakeSync):
+    def __init__(self, document: _FakeMeshDocument) -> None:
+        super().__init__()
+        self.document = document
+        self.open_calls: list[dict] = []
+
+    async def open(self, *, path: str, schema) -> _FakeMeshDocument:
+        self.open_calls.append({"path": path, "schema": schema})
+        return self.document
+
+
+class _FakeStartRoom(_FakeRoom):
+    def __init__(self, document: _FakeMeshDocument) -> None:
+        super().__init__()
+        self.sync = _FakeOpenSync(document)
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_start_opens_sync_document_and_schedules_processor() -> (
+    None
+):
+    document = _FakeMeshDocument()
+    room = _FakeStartRoom(document)
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+
+    await adapter.start()
+    await asyncio.sleep(0)
+
+    assert room.sync.open_calls == [
+        {"path": "/threads/test", "schema": thread_adapter_module.thread_schema}
+    ]
+    assert adapter.thread is document
+    assert [child.tag_name for child in document.root.get_children()] == [
+        "members",
+        "messages",
+    ]
+    assert adapter._processor_task is not None
+    assert adapter._processor_task.done()
 
 
 @pytest.mark.asyncio
@@ -89,6 +130,39 @@ async def test_thread_adapter_stop_flushes_state_before_close(monkeypatch) -> No
     assert room.sync.sync_calls == [
         {"path": "/threads/test", "data": base64.standard_b64encode(b"state")}
     ]
+    assert room.sync.close_calls == ["/threads/test"]
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_stop_drains_pending_events_before_queue_shutdown(
+    monkeypatch,
+) -> None:
+    original_sleep = asyncio.sleep
+    sleep_calls: list[float] = []
+
+    async def _yielding_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _yielding_sleep)
+
+    room = _FakeRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+    adapter._thread = _FakeMeshDocument()
+    adapter._llm_messages.put_nowait({"type": "event"})
+    consumed: list[dict] = []
+
+    async def _processor() -> None:
+        consumed.append(await adapter._llm_messages.get())
+
+    adapter._processor_task = asyncio.create_task(_processor())
+
+    await adapter.stop()
+
+    assert consumed == [{"type": "event"}]
+    assert sleep_calls == [0.01, 3]
+    assert adapter._processor_task is None
+    assert adapter.thread is None
     assert room.sync.close_calls == ["/threads/test"]
 
 
