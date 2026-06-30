@@ -230,3 +230,13 @@ def test_write_image_backfills_role_on_existing_message() -> None:
     )
 
     assert message.get_attribute("role") == "agent"
+
+
+def test_write_image_without_messages_element_uses_python_index_error() -> None:
+    room = _FakeWriteRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")  # type: ignore[arg-type]
+    adapter._thread = _FakeThreadDocumentForWrite()  # type: ignore[assignment]
+    adapter._thread.root._children.clear()  # type: ignore[attr-defined]
+
+    with pytest.raises(IndexError, match="list index out of range"):
+        adapter.write_image(message_id="image-message")
