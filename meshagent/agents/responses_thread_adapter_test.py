@@ -1,5 +1,6 @@
 import pytest
 
+from meshagent.api import RoomException
 from meshagent.anthropic.event_publisher import make_anthropic_agent_event_publisher
 from meshagent.openai.tools.event_publisher import make_openai_agent_event_publisher
 from meshagent.agents.messages import (
@@ -21,6 +22,7 @@ from meshagent.agents.responses_thread_adapter import (
     _extract_image_dimensions,
     response_event_to_agent_event,
 )
+from meshagent.agents.thread_adapter import ThreadAdapter
 
 
 class _FakeParticipant:
@@ -36,6 +38,93 @@ class _FakeParticipant:
 class _FakeRoom:
     def __init__(self):
         self.local_participant = _FakeParticipant(name="assistant")
+
+
+class _FakeElement:
+    def __init__(self, tag_name: str) -> None:
+        self.tag_name = tag_name
+
+
+class _FakeRoot:
+    def __init__(self, children: list[_FakeElement]) -> None:
+        self._children = children
+
+    def get_children(self) -> list[_FakeElement]:
+        return self._children
+
+
+class _FakeThread:
+    def __init__(self, children: list[_FakeElement]) -> None:
+        self.root = _FakeRoot(children)
+
+
+@pytest.mark.asyncio
+async def test_responses_stop_awaits_base_stop_before_clearing_runtime_maps(
+    monkeypatch,
+) -> None:
+    adapter = object.__new__(ResponsesThreadAdapter)
+    active_event = object()
+    adapter._active_events_by_key = {"tool-1": active_event}
+    adapter._saved_image_ids_by_item_id = {"item-1": "image-1"}
+    adapter._saved_image_stage_by_item_id = {"item-1": "final"}
+    calls: list[dict] = []
+
+    async def _fake_base_stop(self):
+        calls.append(
+            {
+                "active_events": dict(self._active_events_by_key),
+                "saved_image_ids": dict(self._saved_image_ids_by_item_id),
+                "saved_image_stages": dict(self._saved_image_stage_by_item_id),
+            }
+        )
+
+    monkeypatch.setattr(ThreadAdapter, "stop", _fake_base_stop)
+
+    await adapter.stop()
+
+    assert calls == [
+        {
+            "active_events": {"tool-1": active_event},
+            "saved_image_ids": {"item-1": "image-1"},
+            "saved_image_stages": {"item-1": "final"},
+        }
+    ]
+    assert adapter._active_events_by_key == {}
+    assert adapter._saved_image_ids_by_item_id == {}
+    assert adapter._saved_image_stage_by_item_id == {}
+
+
+@pytest.mark.asyncio
+async def test_responses_handle_custom_event_resolves_messages_element() -> None:
+    adapter = object.__new__(ResponsesThreadAdapter)
+    messages = _FakeElement("messages")
+    adapter._thread = _FakeThread([_FakeElement("members"), messages])
+
+    calls: list[dict] = []
+
+    async def _fake_handle_custom_event_for_messages(*, messages, event):
+        calls.append({"messages": messages, "event": event})
+
+    adapter._handle_custom_event_for_messages = (  # type: ignore[method-assign]
+        _fake_handle_custom_event_for_messages
+    )
+
+    event = {"type": "agent.event", "kind": "tool"}
+    await adapter.handle_custom_event(event=event)
+
+    assert calls == [{"messages": messages, "event": event}]
+
+
+@pytest.mark.asyncio
+async def test_responses_handle_custom_event_requires_messages_element() -> None:
+    adapter = object.__new__(ResponsesThreadAdapter)
+    adapter._thread = _FakeThread([_FakeElement("members")])
+
+    with pytest.raises(
+        RoomException,
+        match="messages element is missing from thread document",
+    ):
+        await adapter.handle_custom_event(event={"type": "agent.event", "kind": "tool"})
 
 
 def test_openai_event_publisher_preserves_commentary_message_phase() -> None:

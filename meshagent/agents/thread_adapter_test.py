@@ -2,9 +2,13 @@ import pytest
 import base64
 from typing import Optional
 import asyncio
+import logging
+import re
 
 import meshagent.agents.thread_adapter as thread_adapter_module
+from meshagent.api.messaging import JsonContent, TextContent
 from meshagent.agents.thread_adapter import ThreadAdapter
+from meshagent.tools import ToolContext
 
 
 class _FakeThreadAdapter(ThreadAdapter):
@@ -64,6 +68,12 @@ class _FakeMeshDocument:
     def get_state(self, vector: bytes | None = None) -> bytes:
         del vector
         return self._state
+
+
+class _FailingStateMeshDocument(_FakeMeshDocument):
+    def get_state(self, vector: bytes | None = None) -> bytes:
+        del vector
+        raise RuntimeError("state failed")
 
 
 class _BaseStopThreadAdapter(ThreadAdapter):
@@ -221,6 +231,64 @@ async def test_thread_adapter_stop_times_out_stalled_sync_close(monkeypatch) -> 
     assert adapter.thread is None
 
 
+@pytest.mark.asyncio
+async def test_thread_adapter_stop_warns_and_closes_when_state_collection_fails(
+    monkeypatch,
+    caplog,
+) -> None:
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    room = _FakeRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+    adapter._thread = _FailingStateMeshDocument()
+
+    with caplog.at_level(logging.WARNING, logger="thread_adapter"):
+        await adapter.stop()
+
+    assert room.sync.sync_calls == []
+    assert room.sync.close_calls == ["/threads/test"]
+    assert adapter.thread is None
+    assert "unable to collect final thread state for /threads/test" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_stop_warns_when_final_state_sync_fails(
+    monkeypatch,
+    caplog,
+) -> None:
+    async def _fast_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(thread_adapter_module.asyncio, "sleep", _fast_sleep)
+
+    class _FailingSync(_FakeSync):
+        async def sync(self, *, path: str, data: bytes) -> None:
+            self.sync_calls.append({"path": path, "data": data})
+            raise RuntimeError("sync failed")
+
+    class _FailingSyncRoom:
+        def __init__(self) -> None:
+            self.sync = _FailingSync()
+            self.is_closed = False
+
+    room = _FailingSyncRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")
+    adapter._thread = _FakeMeshDocument(state=b"state")
+
+    with caplog.at_level(logging.WARNING, logger="thread_adapter"):
+        await adapter.stop()
+
+    assert room.sync.sync_calls == [
+        {"path": "/threads/test", "data": base64.standard_b64encode(b"state")}
+    ]
+    assert room.sync.close_calls == ["/threads/test"]
+    assert adapter.thread is None
+    assert "unable to flush final thread state for /threads/test" in caplog.text
+
+
 class _FakeElement:
     def __init__(self, *, tag_name: str, attributes: Optional[dict] = None) -> None:
         self.tag_name = tag_name
@@ -232,6 +300,9 @@ class _FakeElement:
 
     def set_attribute(self, name: str, value) -> None:
         self._attributes[name] = value
+
+    def __getitem__(self, name: str):
+        return self._attributes[name]
 
     def get_children(self) -> list["_FakeElement"]:
         return [*self._children]
@@ -245,6 +316,37 @@ class _FakeElement:
         child = _FakeElement(tag_name=tag_name, attributes=attributes)
         self._children.append(child)
         return child
+
+    def delete(self) -> None:
+        self._children.clear()
+
+    def grep(
+        self,
+        pattern: str,
+        *,
+        ignore_case: bool,
+        before: int,
+        after: int,
+    ) -> list["_FakeElement"]:
+        flags = re.IGNORECASE if ignore_case else 0
+        regex = re.compile(pattern, flags)
+        matches = [
+            index
+            for index, child in enumerate(self._children)
+            if regex.search(
+                " ".join(str(value) for value in child._attributes.values())
+            )
+        ]
+        selected_indexes: set[int] = set()
+        for index in matches:
+            start = max(index - before, 0)
+            end = min(index + after + 1, len(self._children))
+            selected_indexes.update(range(start, end))
+        return [
+            child
+            for index, child in enumerate(self._children)
+            if index in selected_indexes
+        ]
 
 
 class _FakeThreadDocumentForWrite:
@@ -263,6 +365,178 @@ class _FakeLocalParticipant:
 class _FakeWriteRoom:
     def __init__(self) -> None:
         self.local_participant = _FakeLocalParticipant()
+
+
+class _FakeAgentSessionContext:
+    def __init__(self) -> None:
+        self.assistant_messages: list[str] = []
+        self.user_messages: list[str] = []
+
+    def append_assistant_message(self, message: str) -> None:
+        self.assistant_messages.append(message)
+
+    def append_user_message(self, message: str) -> None:
+        self.user_messages.append(message)
+
+
+@pytest.mark.asyncio
+async def test_thread_adapter_make_toolkit_invokes_registered_tools_against_thread(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(thread_adapter_module, "Element", _FakeElement)
+    room = _FakeWriteRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")  # type: ignore[arg-type]
+    thread = _FakeThreadDocumentForWrite()
+    thread.messages.append_child(
+        tag_name="message",
+        attributes={
+            "text": "hello",
+            "created_at": "2026-05-01T00:00:00Z",
+            "author_name": "Alice",
+        },
+    )
+    thread.messages.append_child(
+        tag_name="ignored",
+        attributes={
+            "text": "this is not a message",
+            "created_at": "2026-05-01T00:01:00Z",
+            "author_name": "System",
+        },
+    )
+    thread.messages.append_child(
+        tag_name="message",
+        attributes={
+            "text": "needle",
+            "created_at": "2026-05-01T00:02:00Z",
+            "author_name": "Bob",
+        },
+    )
+    adapter._thread = thread  # type: ignore[assignment]
+    toolkit = adapter.make_toolkit()
+    context = ToolContext(caller=object())  # type: ignore[arg-type]
+
+    range_result = await toolkit.execute(
+        context=context,
+        name="get_message_range",
+        input=JsonContent(json={"start": 0, "end": 10}),
+    )
+    assert isinstance(range_result, TextContent)
+    assert range_result.text == (
+        "matching messages:\n"
+        "Alice said at 2026-05-01T00:00:00Z: hello\n"
+        "Bob said at 2026-05-01T00:02:00Z: needle"
+    )
+
+    count_result = await toolkit.execute(
+        context=context,
+        name="count_current_thread_messages",
+        input=JsonContent(
+            json={
+                "pattern": "unused",
+                "ignore_case": False,
+                "messages_before": 0,
+                "messages_after": 0,
+            }
+        ),
+    )
+    assert isinstance(count_result, TextContent)
+    assert count_result.text == "2"
+
+    grep_result = await toolkit.execute(
+        context=context,
+        name="grep_current_thread",
+        input=JsonContent(
+            json={
+                "pattern": "NEEDLE",
+                "ignore_case": True,
+                "messages_before": 2,
+                "messages_after": 0,
+            }
+        ),
+    )
+    assert isinstance(grep_result, TextContent)
+    assert grep_result.text == (
+        "matching messages:\n"
+        "Alice said at 2026-05-01T00:00:00Z: hello\n"
+        "Bob said at 2026-05-01T00:02:00Z: needle"
+    )
+
+
+def test_thread_adapter_member_and_text_message_mutate_thread_elements(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(thread_adapter_module, "Element", _FakeElement)
+    monkeypatch.setattr(thread_adapter_module, "Participant", _FakeLocalParticipant)
+    room = _FakeWriteRoom()
+    adapter = _BaseStopThreadAdapter(room=room, path="/threads/test")  # type: ignore[arg-type]
+    thread = _FakeThreadDocumentForWrite()
+    adapter._thread = thread  # type: ignore[assignment]
+
+    adapter.ensure_member(participant=" Alice ")
+    adapter.ensure_member(participant="Alice")
+    adapter.ensure_member(participant=" ")
+    adapter.write_text_message(
+        text="hello",
+        participant=room.local_participant,
+        message_id=" message-1 ",
+        turn_id=" turn-1 ",
+        attachments=[{"path": "/files/a.txt"}, {"path": ""}, {"other": "ignored"}],
+    )
+
+    members = thread.root.get_children_by_tag_name("members")[0]
+    assert [member.get_attribute("name") for member in members.get_children()] == [
+        "Alice",
+        "assistant",
+    ]
+    message = thread.messages.get_children()[0]
+    assert message.get_attribute("text") == "hello"
+    assert message.get_attribute("author_name") == "assistant"
+    assert message.get_attribute("role") == "agent"
+    assert message.get_attribute("id") == "message-1"
+    assert message.get_attribute("turn_id") == "turn-1"
+    assert [child.get_attribute("path") for child in message.get_children()] == [
+        "/files/a.txt"
+    ]
+
+
+def test_thread_adapter_append_messages_uses_concrete_thread_elements(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(thread_adapter_module, "Element", _FakeElement)
+    room = _FakeWriteRoom()
+    adapter = _BaseStopThreadAdapter(
+        room=room,
+        path="/threads/test",
+        max_append_message_count=1,
+    )  # type: ignore[arg-type]
+    thread = _FakeThreadDocumentForWrite()
+    thread.messages.append_child(
+        tag_name="message",
+        attributes={
+            "text": "old",
+            "created_at": "2026-05-01T00:00:00Z",
+            "author_name": "Alice",
+        },
+    )
+    recent = thread.messages.append_child(
+        tag_name="message",
+        attributes={
+            "text": "recent",
+            "created_at": "2026-05-01T00:02:00Z",
+            "author_name": "Bob",
+        },
+    )
+    recent.append_child(tag_name="file", attributes={"path": None})
+    adapter._thread = thread  # type: ignore[assignment]
+    context = _FakeAgentSessionContext()
+
+    adapter.append_messages(context=context)  # type: ignore[arg-type]
+
+    assert context.assistant_messages == [
+        "there are more messages outside the current context window, the index of the first message loaded is 1",
+        "the user attached a file at the path 'None'",
+    ]
+    assert context.user_messages == ["Bob said at 2026-05-01T00:02:00Z: recent"]
 
 
 def test_write_image_marks_created_message_as_agent() -> None:
