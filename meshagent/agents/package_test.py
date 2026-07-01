@@ -602,7 +602,7 @@ async def test_build_package_image_uses_room_image_build_api(
     assert (
         captured["dockerfile"]
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}cli:{package_module.__version__}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}cli:{package_module.__version__}-nydus\n"
         "RUN uv pip install requests\n"
         "RUN echo hello\n"
     )
