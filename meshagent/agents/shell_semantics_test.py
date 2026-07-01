@@ -146,6 +146,30 @@ def test_analyze_shell_command_groups_multi_file_heredoc_writes() -> None:
     )
 
 
+def test_analyze_shell_command_handles_mixed_absolute_and_dynamic_write_paths() -> None:
+    analysis = analyze_shell_command(
+        command=(
+            "cat > /data/webserver/index.html <<'EOF'\n"
+            "<!doctype html>\n"
+            "EOF\n"
+            "cat > $PROJECT/src/index.ts <<'EOF'\n"
+            "console.log('hi')\n"
+            "EOF"
+        )
+    )
+
+    assert analysis.operations[0].kind == "write"
+    assert analysis.operations[0].path == "/data/webserver"
+    assert analysis.operations[0].paths == (
+        "/data/webserver/index.html",
+        "$PROJECT/src/index.ts",
+    )
+    assert analysis.display.event_kind == "file"
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to write files in /data/webserver"
+    )
+
+
 def test_analyze_shell_command_treats_python_heredoc_file_generation_as_write() -> None:
     analysis = analyze_shell_command(
         command=(
@@ -171,6 +195,31 @@ def test_analyze_shell_command_treats_python_heredoc_file_generation_as_write() 
     )
     assert analysis.display.phase_for_state(state="completed").headline == (
         "Wrote files in /data/docs"
+    )
+
+
+def test_analyze_shell_command_handles_mixed_python_heredoc_write_paths() -> None:
+    analysis = analyze_shell_command(
+        command=(
+            "python - <<'PY'\n"
+            "name = 'contact.html'\n"
+            "open('/data/webserver/index.html', 'w').write('hi')\n"
+            "open('$PROJECT/src/index.ts', 'w').write('hi')\n"
+            "open(name, 'w').write('hi')\n"
+            "PY"
+        )
+    )
+
+    assert analysis.operations[0].kind == "write"
+    assert analysis.operations[0].path == "/data/webserver"
+    assert analysis.operations[0].multi is True
+    assert analysis.operations[0].paths == (
+        "/data/webserver/index.html",
+        "$PROJECT/src/index.ts",
+        "/data/webserver",
+    )
+    assert analysis.display.phase_for_state(state="pending").headline == (
+        "Preparing to write files in /data/webserver"
     )
 
 

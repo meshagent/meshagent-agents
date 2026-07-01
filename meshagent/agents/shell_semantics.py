@@ -408,6 +408,37 @@ def _looks_dynamic_shell_path(*, path: str) -> bool:
     )
 
 
+def _safe_common_path(*, paths: tuple[str, ...], fallback: str = "") -> str:
+    normalized_paths = tuple(dict.fromkeys(path for path in paths if path != ""))
+    if len(normalized_paths) == 0:
+        return fallback
+    if len(normalized_paths) == 1:
+        return normalized_paths[0]
+
+    absolute_states = {PurePosixPath(path).is_absolute() for path in normalized_paths}
+    if len(absolute_states) == 1:
+        with contextlib.suppress(ValueError):
+            return posixpath.commonpath(normalized_paths)
+
+    return _mixed_common_path_fallback(paths=normalized_paths, fallback=fallback)
+
+
+def _mixed_common_path_fallback(*, paths: tuple[str, ...], fallback: str) -> str:
+    if fallback != "":
+        return fallback
+
+    absolute_paths = tuple(path for path in paths if PurePosixPath(path).is_absolute())
+    if len(absolute_paths) == 1:
+        return posixpath.dirname(absolute_paths[0]) or absolute_paths[0]
+    if len(absolute_paths) > 1:
+        with contextlib.suppress(ValueError):
+            common_path = posixpath.commonpath(absolute_paths)
+            if common_path != "":
+                return common_path
+
+    return "."
+
+
 def _leading_cd_path(*, script: str) -> str | None:
     stripped = script.strip()
     if stripped == "":
@@ -546,7 +577,7 @@ def _collect_write_operation(
         return None
 
     target_path = (
-        posixpath.commonpath(normalized_paths)
+        _safe_common_path(paths=normalized_paths)
         if saw_multi or len(normalized_paths) > 1
         else normalized_paths[0]
     )
@@ -701,9 +732,7 @@ def _python_heredoc_write_paths(
         return (), False, False
 
     if collector.saw_dynamic_path:
-        fallback_path = cwd or (
-            posixpath.commonpath(normalized_paths) if len(normalized_paths) > 0 else ""
-        )
+        fallback_path = cwd or _safe_common_path(paths=normalized_paths)
         if fallback_path != "":
             normalized_paths = tuple(dict.fromkeys((*normalized_paths, fallback_path)))
         return normalized_paths, collector.saw_append, True
@@ -1812,7 +1841,7 @@ def _stat_path_from_tokens(*, tokens: tuple[str, ...], cwd: str | None) -> str:
         return ""
     if len(resolved_paths) == 1:
         return resolved_paths[0]
-    return posixpath.commonpath(resolved_paths)
+    return _safe_common_path(paths=tuple(resolved_paths))
 
 
 def _find_path_from_tokens(*, tokens: tuple[str, ...], cwd: str | None) -> str:
