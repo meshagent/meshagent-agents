@@ -75,11 +75,8 @@ logger = logging.getLogger("package")
 
 
 def _meshagent_default_image_tag_for_repository(*, repository: str) -> str:
-    if repository == "cli":
-        return f"{__version__}-nydus"
-    if repository.startswith("shell-"):
-        return f"{__version__}-esgz"
-    return __version__
+    del repository
+    return f"{__version__}-nydus"
 
 
 @dataclass(frozen=True, slots=True)

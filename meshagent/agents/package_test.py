@@ -475,12 +475,12 @@ def test_package_meshagent_default_base_image_renders_docker_args() -> None:
     assert (
         dockerfile
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}python-sdk-slim:{package_module.__version__}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}python-sdk-slim:{package_module.__version__}-nydus\n"
         "RUN uv pip install requests\n"
     )
 
 
-def test_package_shell_default_base_image_keeps_estargz_tag() -> None:
+def test_package_shell_default_base_image_uses_nydus_tag() -> None:
     dockerfile = package_module._package_dockerfile_text(
         package=Package(name="assistant"),
         base_image="meshagent/shell-codex:default",
@@ -489,7 +489,7 @@ def test_package_shell_default_base_image_keeps_estargz_tag() -> None:
     assert (
         dockerfile
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}shell-codex:{package_module.__version__}-esgz\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}shell-codex:{package_module.__version__}-nydus\n"
     )
 
 
@@ -674,7 +674,7 @@ async def test_build_meshagent_package_image_uses_python_sdk_base(
     assert (
         captured["dockerfile"]
         == f"ARG MESHAGENT_IMAGE_PREFIX={package_module._DEFAULT_MESHAGENT_IMAGE_PREFIX}\n"
-        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}python-sdk-slim:{package_module.__version__}\n"
+        f"FROM ${{MESHAGENT_IMAGE_PREFIX}}python-sdk-slim:{package_module.__version__}-nydus\n"
         "RUN uv pip install requests\n"
     )
 
