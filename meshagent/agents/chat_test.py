@@ -1327,6 +1327,47 @@ def test_sorted_thread_list_entries_uses_created_at_then_path_for_ties() -> None
     ]
 
 
+def test_sorted_thread_list_entries_falls_back_to_created_at_when_modified_missing() -> (
+    None
+):
+    adapter = _CaptureChatAdapter()
+    bot = ChatBot(llm_adapter=adapter, thread_dir="custom")
+    doc = _FakeThreadListDocument()
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "created-newest",
+            "path": "custom/new.thread",
+            "created_at": "2026-06-26T09:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "modified-older",
+            "path": "custom/older.thread",
+            "created_at": "2026-06-26T07:00:00Z",
+            "modified_at": "2026-06-26T08:00:00Z",
+        },
+    )
+    doc.root.append_child(
+        tag_name="thread",
+        attributes={
+            "name": "created-oldest",
+            "path": "custom/old.thread",
+            "created_at": "2026-06-26T06:00:00Z",
+        },
+    )
+    bot._thread_list_document = doc
+
+    entries = bot._sorted_thread_list_entries()
+    assert [entry.get_attribute("name") for entry in entries] == [
+        "created-newest",
+        "modified-older",
+        "created-oldest",
+    ]
+
+
 def test_record_new_thread_in_index_is_noop_without_explicit_thread_dir() -> None:
     adapter = _CaptureChatAdapter()
     bot = ChatBot(llm_adapter=adapter)
