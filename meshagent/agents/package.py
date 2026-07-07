@@ -1667,7 +1667,7 @@ class MeshagentPackage(PythonPackage):
             return None
         return HeartbeatSpec(
             queue=self._heartbeat_queue(),
-            path="/threads/heartbeats/{YYYY}/{MM}/{DD}/{HH}/{mm}/heartbeat.thread",
+            thread_id="/threads/heartbeats/{YYYY}/{MM}/{DD}/{HH}/{mm}/heartbeat.thread",
             prompt=[
                 AgentTextContent(
                     type=AGENT_CONTENT_TYPE_TEXT,
