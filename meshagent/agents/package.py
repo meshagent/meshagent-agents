@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import shlex
@@ -10,7 +11,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable
-from typing import ClassVar, Literal, Optional
+from typing import Annotated, ClassVar, Literal, Optional
+
+from pydantic import BaseModel, Field
 
 from meshagent.api import (
     ApiScope,
@@ -206,6 +209,118 @@ class _PythonInstallBuildStep:
 
 type _ImageBuildStep = _RunBuildStep | _AptGetInstallBuildStep | _PythonInstallBuildStep
 type _StatusCallback = Callable[[str], None]
+
+
+class PackageAssetManifest(BaseModel):
+    kind: AssetKind
+    source: Path
+    dest: str
+    read_only: bool
+    base_path: Path | None = None
+
+
+class PackageRunBuildStepManifest(BaseModel):
+    type: Literal["run"] = "run"
+    command: str
+
+
+class PackageAptGetInstallBuildStepManifest(BaseModel):
+    type: Literal["apt_get_install"] = "apt_get_install"
+    packages: list[str]
+
+
+class PackagePythonInstallBuildStepManifest(BaseModel):
+    type: Literal["python_install"] = "python_install"
+    requirements: list[str]
+
+
+PackageImageBuildStepManifest = Annotated[
+    PackageRunBuildStepManifest
+    | PackageAptGetInstallBuildStepManifest
+    | PackagePythonInstallBuildStepManifest,
+    Field(discriminator="type"),
+]
+
+
+class PackageHeartbeatManifest(BaseModel):
+    cron: str
+    prompt: str
+
+
+class PackageMemoryToolManifest(BaseModel):
+    name: str
+    namespace: list[str] | None = None
+    model: str | None = None
+
+
+class PackageComputerUseManifest(BaseModel):
+    starting_url: str | None = None
+    allow_goto_url: bool = False
+
+
+class PackageManifest(BaseModel):
+    kind: Literal["base", "debian", "python", "meshagent"]
+    name: str
+    base_path: Path | None = None
+    mounts: list[PackageAssetManifest] = Field(default_factory=list)
+    files: list[PackageAssetManifest] = Field(default_factory=list)
+    skills: list[PackageAssetManifest] = Field(default_factory=list)
+    instructions: list[PackageAssetManifest] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    image_build_steps: list[PackageImageBuildStepManifest] = Field(default_factory=list)
+    optimize_image: bool = True
+    include_workspace: bool = False
+    module_path: Path | None = None
+    module_export_name: str | None = None
+    module_export_is_factory: bool = False
+    model: str = "gpt-5.4"
+    channels: list[str] = Field(default_factory=list)
+    heartbeat: PackageHeartbeatManifest | None = None
+    shell_image: str | None = None
+    shell_enabled: bool = False
+    advanced_shell_image: str | None = None
+    advanced_shell_enabled: bool = False
+    web_fetch_enabled: bool = False
+    web_search_enabled: bool = False
+    image_gen_enabled: bool = False
+    image_gen_model: str | None = None
+    apply_patch_enabled: bool = False
+    storage_enabled: bool | None = None
+    storage_read_only: bool = False
+    table_read: list[str] = Field(default_factory=list)
+    table_write: list[str] = Field(default_factory=list)
+    dataset_namespace: list[str] | None = None
+    time_enabled: bool = False
+    uuid_enabled: bool = False
+    memory_config: PackageMemoryToolManifest | None = None
+    document_authoring_enabled: bool = False
+    discovery_enabled: bool = False
+    computer_use_config: PackageComputerUseManifest | None = None
+    mcp_enabled: bool = False
+
+
+def _asset_manifest(asset: _Asset) -> PackageAssetManifest:
+    return PackageAssetManifest(
+        kind=asset.kind,
+        source=asset.source,
+        dest=asset.dest.as_posix(),
+        read_only=asset.read_only,
+        base_path=asset.base_path,
+    )
+
+
+def _image_build_step_manifest(
+    step: _ImageBuildStep,
+) -> PackageImageBuildStepManifest:
+    if isinstance(step, _RunBuildStep):
+        return PackageRunBuildStepManifest(command=step.command)
+    if isinstance(step, _AptGetInstallBuildStep):
+        return PackageAptGetInstallBuildStepManifest(packages=list(step.packages))
+    if isinstance(step, _PythonInstallBuildStep):
+        return PackagePythonInstallBuildStepManifest(
+            requirements=list(step.requirements)
+        )
+    raise AssertionError(f"unsupported image build step: {type(step)}")
 
 
 @contextmanager
@@ -813,6 +928,93 @@ class Package:
             *self._instructions,
         ]
 
+    def to_manifest(self) -> PackageManifest:
+        if isinstance(self, MeshagentPackage):
+            kind: Literal["base", "debian", "python", "meshagent"] = "meshagent"
+        elif isinstance(self, PythonPackage):
+            kind = "python"
+        elif isinstance(self, DebianPackage):
+            kind = "debian"
+        else:
+            kind = "base"
+
+        manifest = PackageManifest(
+            kind=kind,
+            name=self.name,
+            base_path=self._base_path,
+            mounts=[_asset_manifest(asset) for asset in self._mounts],
+            files=[_asset_manifest(asset) for asset in self._files],
+            skills=[_asset_manifest(asset) for asset in self._skills],
+            instructions=[_asset_manifest(asset) for asset in self._instructions],
+            env=self._env,
+            image_build_steps=[
+                _image_build_step_manifest(step) for step in self._image_build_steps
+            ],
+            optimize_image=self._optimize_image,
+            include_workspace=self._include_workspace,
+            module_path=self._module_path,
+            module_export_name=self._module_export_name,
+            module_export_is_factory=self._module_export_is_factory,
+        )
+        if not isinstance(self, MeshagentPackage):
+            return manifest
+
+        manifest.model = self.model
+        manifest.channels = list(self._channels)
+        manifest.heartbeat = (
+            PackageHeartbeatManifest(
+                cron=self._heartbeat.cron,
+                prompt=self._heartbeat.prompt,
+            )
+            if self._heartbeat is not None
+            else None
+        )
+        manifest.shell_image = self._shell_image
+        manifest.shell_enabled = self._shell_enabled
+        manifest.advanced_shell_image = self._advanced_shell_image
+        manifest.advanced_shell_enabled = self._advanced_shell_enabled
+        manifest.web_fetch_enabled = self._web_fetch_enabled
+        manifest.web_search_enabled = self._web_search_enabled
+        manifest.image_gen_enabled = self._image_gen_enabled
+        manifest.image_gen_model = self._image_gen_model
+        manifest.apply_patch_enabled = self._apply_patch_enabled
+        manifest.storage_enabled = self._storage_enabled
+        manifest.storage_read_only = self._storage_read_only
+        manifest.table_read = list(self._table_read)
+        manifest.table_write = list(self._table_write)
+        manifest.dataset_namespace = (
+            list(self._dataset_namespace)
+            if self._dataset_namespace is not None
+            else None
+        )
+        manifest.time_enabled = self._time_enabled
+        manifest.uuid_enabled = self._uuid_enabled
+        manifest.memory_config = (
+            PackageMemoryToolManifest(
+                name=self._memory_config.name,
+                namespace=(
+                    list(self._memory_config.namespace)
+                    if self._memory_config.namespace is not None
+                    else None
+                ),
+                model=self._memory_config.model,
+            )
+            if self._memory_config is not None
+            else None
+        )
+        manifest.document_authoring_enabled = self._document_authoring_enabled
+        manifest.discovery_enabled = self._discovery_enabled
+        manifest.computer_use_config = (
+            PackageComputerUseManifest(
+                starting_url=self._computer_use_config.starting_url,
+                allow_goto_url=self._computer_use_config.allow_goto_url,
+            )
+            if self._computer_use_config is not None
+            else None
+        )
+        manifest.mcp_enabled = self._mcp_enabled
+        return manifest
+
     def _instruction_paths(self) -> list[PurePosixPath]:
         return [asset.dest for asset in self._instructions]
 
@@ -933,7 +1135,7 @@ class Package:
 
     def _custom_image_tag(self) -> str:
         slug = _slugify_segment(self.name)
-        return f"registry.meshagent.com/packages/{slug}:latest"
+        return f"package-{slug}:latest"
 
     def _custom_builder_name(self) -> str:
         slug = _slugify_segment(self.name)
@@ -2205,6 +2407,48 @@ class MeshagentPackage(PythonPackage):
 Package.meshagent = MeshagentPackage
 
 
+def load_package(*, module_path: str | Path, export_name: str) -> Package:
+    resolved_module_path = Path(module_path).expanduser().resolve()
+    with _agent_base_path_scope(resolved_module_path.parent):
+        spec = importlib.util.spec_from_file_location(
+            resolved_module_path.stem,
+            resolved_module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load spec for {resolved_module_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        if export_name not in module.__dict__:
+            raise ImportError(f"{resolved_module_path} does not define {export_name}")
+
+        exported = module.__dict__[export_name]
+        if isinstance(exported, Package):
+            exported._bind_module_path(module_path=resolved_module_path)
+            exported._bind_module_export(
+                export_name=export_name,
+                export_is_factory=False,
+            )
+            return exported
+
+        if callable(exported):
+            built = exported()
+            if isinstance(built, Package):
+                built._bind_module_path(module_path=resolved_module_path)
+                built._bind_module_export(
+                    export_name=export_name,
+                    export_is_factory=True,
+                )
+                return built
+            raise TypeError(
+                f"{resolved_module_path}:{export_name} returned {type(built).__name__}, expected meshagent.agents.Package"
+            )
+
+        raise TypeError(
+            f"{resolved_module_path}:{export_name} is {type(exported).__name__}, expected meshagent.agents.Package or a zero-argument callable returning one"
+        )
+
+
 def _package_dockerfile_base_lines(*, base_image: str) -> list[str]:
     if base_image.startswith("meshagent/") and base_image.endswith(":default"):
         repository = base_image.removeprefix("meshagent/").removesuffix(":default")
@@ -2263,12 +2507,17 @@ async def _build_package_image(
 
     image_tag = package._custom_image_tag()
     parsed_tag = image_module._parse_build_tag(image_tag)
+    project_registry, parsed_tag = await image_module._resolve_room_registry_target(
+        project_id=resolved_project_id,
+        parsed_tag=parsed_tag,
+    )
+    resolved_image_tag = parsed_tag.value
     resolved_builder_name = (
         builder_name if builder_name is not None else package._custom_builder_name()
     )
     _emit_status(
         status_callback=status_callback,
-        message=f"Building package image {image_tag} with builder {resolved_builder_name}",
+        message=f"Building package image {resolved_image_tag} with builder {resolved_builder_name}",
     )
     with tempfile.TemporaryDirectory(prefix="meshagent-package-") as temp_dir:
         context_dir = Path(temp_dir)
@@ -2283,6 +2532,7 @@ async def _build_package_image(
             resolved_project_id=resolved_project_id,
             resolved_room=resolved_room,
             parsed_tag=parsed_tag,
+            project_registry=project_registry,
             context_path=None,
             dockerfile_path=None,
             pack=str(context_dir),
@@ -2294,9 +2544,9 @@ async def _build_package_image(
         )
     _emit_status(
         status_callback=status_callback,
-        message=f"Built package image {image_tag}",
+        message=f"Built package image {resolved_image_tag}",
     )
-    return image_tag
+    return resolved_image_tag
 
 
 async def deploy_package(
