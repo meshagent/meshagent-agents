@@ -28,7 +28,8 @@ _THREAD_SYNC_CLOSE_TIMEOUT_SEC = 5.0
 
 
 def default_format_message(*, user_name: str, message: str, iso_timestamp: str) -> str:
-    return f"{user_name} said at {iso_timestamp}: {message}"
+    model_user_name = "user" if user_name.strip().casefold() == "you" else user_name
+    return f"{model_user_name} said at {iso_timestamp}: {message}"
 
 
 class ThreadAdapter(ABC):
