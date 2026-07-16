@@ -7,7 +7,13 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-from meshagent.api.messaging import BinaryContent, Content, JsonContent, TextContent
+from meshagent.api.messaging import (
+    BinaryContent,
+    Content,
+    EmptyContent,
+    JsonContent,
+    TextContent,
+)
 
 from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
@@ -423,7 +429,7 @@ def _content_from_handler_result(value: Any):
         return JsonContent(json=value)
     if isinstance(value, list):
         return JsonContent(json={"result": value})
-    if isinstance(value, str) and value.strip() != "":
+    if isinstance(value, str):
         return TextContent(text=value)
     return None
 
@@ -2316,6 +2322,9 @@ class _OpenAIAgentEventPublisher:
                 )
 
             error_text = _as_str(event.get("error"))
+            error_code = _as_str(event.get("error_code"))
+            if result is None and error_text is None:
+                result = EmptyContent()
             self._finished_handler_tool_call_ids.add(pending_tool_call.item_id)
             self.emitter.emit_tool_ended(
                 info=replace(
@@ -2324,7 +2333,7 @@ class _OpenAIAgentEventPublisher:
                     error=(
                         AgentError(
                             message=error_text,
-                            code="tool_call_failed",
+                            code=error_code or "tool_call_failed",
                         )
                         if error_text is not None
                         else pending_tool_call.error

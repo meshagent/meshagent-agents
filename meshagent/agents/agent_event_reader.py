@@ -468,6 +468,8 @@ class AccumulatingAgentEventReader(ABC):
                 text = result.get("text")
                 if isinstance(text, str):
                     return text
+            if result_type == "empty":
+                return "ok"
             return json.dumps(result, separators=(",", ":"), ensure_ascii=False)
         if logs:
             return "\n".join(

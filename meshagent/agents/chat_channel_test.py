@@ -74,6 +74,7 @@ from meshagent.agents.messages import (
     ClearThread,
     CloseThread,
     AgentContextWindowUsage,
+    AgentConnectionStatus,
     AgentModelInfo,
     AgentProviderInfo,
     AgentRealtimeAudioChunk,
@@ -3504,7 +3505,7 @@ def test_websocket_chat_channel_uses_canonical_msgpack_subprotocol() -> None:
     assert channel._response_protocols(request) == ("meshagent-msgpack",)
 
 
-def test_websocket_chat_channel_preserves_authorized_participant_id() -> None:
+def test_websocket_chat_channel_assigns_connection_participant_id() -> None:
     participant = Participant(
         id="caller-id",
         attributes={"name": "Caller", "role": "user"},
@@ -3515,8 +3516,10 @@ def test_websocket_chat_channel_preserves_authorized_participant_id() -> None:
 
     assert isinstance(first, WebParticipant)
     assert isinstance(second, WebParticipant)
-    assert first.id == "caller-id"
-    assert second.id == "caller-id"
+    assert first.id != "caller-id"
+    assert second.id != "caller-id"
+    assert first.id != second.id
+    assert first.id == first.get_attribute("websocket_connection_id")
     assert first.get_attribute("websocket_connection_id") != second.get_attribute(
         "websocket_connection_id"
     )
@@ -3745,6 +3748,11 @@ async def test_websocket_chat_channel_handler_receives_msgpack_agent_message() -
         )
 
         encoding = MsgpackWebSocketChatEncoding()
+        handshake = encoding.decode(await websocket.receive())
+        assert isinstance(handshake, AgentConnectionStatus)
+        assert handshake.status == "connected"
+        assert handshake.participant_id is not None
+        assert handshake.participant_id != "caller-id"
         await websocket.send_bytes(
             encoding.encode(
                 OpenThread(
@@ -3769,7 +3777,12 @@ async def test_websocket_chat_channel_handler_receives_msgpack_agent_message() -
     assert isinstance(supervisor.sent[0].data, OpenThread)
     assert supervisor.sent[0].data.thread_id == "/threads/test.thread"
     assert supervisor.sent[0].sender is not None
-    assert supervisor.sent[0].sender.id == "caller-id"
+    assert supervisor.sent[0].sender.id == handshake.participant_id
+    assert supervisor.sent[0].sender.get_attribute("base_participant_id") == "caller-id"
+    assert (
+        supervisor.sent[0].sender.get_attribute("websocket_connection_id")
+        == supervisor.sent[0].sender.id
+    )
     assert channel._connections_by_participant_id == {}
     assert channel._participants_by_id == {}
 

@@ -253,6 +253,7 @@ class BaseChatClient(ABC):
         self._thread_sessions: dict[str, ChatThreadSession] = {}
         self._pending_thread_sessions: set[ChatThreadSession] = set()
         self._connection_status: AgentConnectionStatus | None = None
+        self._local_participant_id: str | None = None
         self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._event_subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
 
@@ -377,6 +378,10 @@ class BaseChatClient(ABC):
         return self._connection_status
 
     @property
+    def local_participant_id(self) -> str | None:
+        return self._local_participant_id
+
+    @property
     def events(self) -> AsyncIterable[dict[str, Any]]:
         async def _events() -> AsyncIterator[dict[str, Any]]:
             queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -424,6 +429,19 @@ class BaseChatClient(ABC):
 
     def _handle_agent_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
+        if payload_type == AGENT_EVENT_CONNECTION_STATUS:
+            participant_id = _normalized_string(payload.get("participant_id"))
+            if participant_id is not None:
+                self._local_participant_id = participant_id
+        if payload_type == AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED:
+            target_participant_id = _normalized_string(
+                payload.get("target_participant_id")
+            )
+            if (
+                target_participant_id is not None
+                and target_participant_id != self.local_participant_id
+            ):
+                return
         self._emit_event(payload)
         if payload_type in (
             AGENT_EVENT_THREAD_STARTED,
@@ -499,6 +517,7 @@ class ChatThreadSession:
         self._current_model: AgentModelChanged | None = None
         self._models_response: ModelsResponse | None = None
         self._client_toolkits_by_tool_name: dict[str, Toolkit] = {}
+        self._claimed_client_tool_request_ids: set[str] = set()
         self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
         self._closed = False
         if self.has_thread_path:
@@ -1556,6 +1575,19 @@ class ChatThreadSession:
         if self._is_duplicate_delta_payload(payload):
             return
         if payload_type == AGENT_EVENT_CLIENT_TOOL_CALL_REQUESTED:
+            target_participant_id = _normalized_string(
+                payload.get("target_participant_id")
+            )
+            if (
+                target_participant_id is not None
+                and target_participant_id != self._client.local_participant_id
+            ):
+                return
+            request_id = _normalized_string(payload.get("request_id"))
+            if request_id is not None:
+                if request_id in self._claimed_client_tool_request_ids:
+                    return
+                self._claimed_client_tool_request_ids.add(request_id)
             task = asyncio.create_task(self._respond_to_client_tool_call(payload))
             task.add_done_callback(_consume_task_exception)
         try:
@@ -1647,23 +1679,32 @@ class ChatThreadSession:
             callback(payload)
 
     async def _respond_to_client_tool_call(self, payload: dict[str, Any]) -> None:
+        request_id = _normalized_string(payload.get("request_id"))
+        response_sent = False
         try:
             request = AgentClientToolCallRequested.model_validate(payload)
         except Exception:
+            if request_id is not None:
+                self._claimed_client_tool_request_ids.discard(request_id)
             return
         try:
             response = await self._invoke_client_tool(request)
         except Exception as exc:
             response = ErrorContent(text=str(exc))
-        await self.send(
-            AgentClientToolCallResponse(
-                type=AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
-                thread_id=self.thread_path,
-                turn_id=request.turn_id,
-                request_id=request.request_id,
-                response=response,
+        try:
+            await self.send(
+                AgentClientToolCallResponse(
+                    type=AGENT_MESSAGE_CLIENT_TOOL_CALL_RESPONSE,
+                    thread_id=self.thread_path,
+                    turn_id=request.turn_id,
+                    request_id=request.request_id,
+                    response=response,
+                )
             )
-        )
+            response_sent = True
+        finally:
+            if not response_sent and request_id is not None:
+                self._claimed_client_tool_request_ids.discard(request_id)
 
     async def _invoke_client_tool(self, request: AgentClientToolCallRequested) -> Any:
         if request.toolkit != "client":
@@ -1873,6 +1914,11 @@ class MessagingChatClient(BaseChatClient):
     @property
     def remote_participant_name(self) -> str:
         return self._participant_name
+
+    @property
+    def local_participant_id(self) -> str | None:
+        participant = self._room.local_participant
+        return None if participant is None else participant.id
 
     async def _start_transport(self) -> None:
         self._room.on("room.status", self._on_room_status)
@@ -2165,6 +2211,7 @@ class WebSocketChatClient(BaseChatClient):
             self._connecting = False
         self._session = session
         self._websocket = websocket
+        self._local_participant_id = None
         self._close_code = None
         self._receive_exception = None
         self._reconnect_attempts = 0
@@ -2195,6 +2242,7 @@ class WebSocketChatClient(BaseChatClient):
         self._websocket = None
         session = self._session
         self._session = None
+        self._local_participant_id = None
         if receive_task is not None:
             receive_task.cancel()
             await asyncio.gather(receive_task, return_exceptions=True)
@@ -2240,6 +2288,7 @@ class WebSocketChatClient(BaseChatClient):
             self._close_code = websocket.close_code
             if self._websocket is websocket:
                 self._websocket = None
+                self._local_participant_id = None
                 session = self._session
                 self._session = None
                 if not websocket.closed:

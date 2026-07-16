@@ -5202,6 +5202,7 @@ class LLMAgentProcess(AgentProcess):
                 pending.future.set_result(
                     ErrorContent(
                         text=f"client toolkit call cancelled: {reason}",
+                        code="cancelled",
                     )
                 )
             with contextlib.suppress(Exception):
@@ -5212,6 +5213,7 @@ class LLMAgentProcess(AgentProcess):
                         thread_id=pending.thread_id,
                         turn_id=pending.turn_id,
                         request_id=pending.request_id,
+                        target_participant_id=pending.participant.id,
                         toolkit=pending.toolkit,
                         tool=pending.tool,
                         reason=reason,
@@ -5270,6 +5272,7 @@ class LLMAgentProcess(AgentProcess):
                 thread_id=thread_id,
                 turn_id=turn_id,
                 request_id=request_id,
+                target_participant_id=participant.id,
                 toolkit=pending.toolkit,
                 tool=tool,
                 arguments=arguments,
@@ -5295,6 +5298,7 @@ class LLMAgentProcess(AgentProcess):
                     thread_id=thread_id,
                     turn_id=turn_id,
                     request_id=request_id,
+                    target_participant_id=participant.id,
                     toolkit=pending.toolkit,
                     tool=tool,
                     reason="timeout",
@@ -5302,6 +5306,7 @@ class LLMAgentProcess(AgentProcess):
             )
             return ErrorContent(
                 text="client toolkit call timed out",
+                code="cancelled",
             )
         finally:
             existing_pending = self._pending_client_tool_calls.get(request_id)

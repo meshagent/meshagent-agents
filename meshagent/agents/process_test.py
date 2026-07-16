@@ -5624,6 +5624,7 @@ async def test_client_toolkit_request_targets_turn_start_participant() -> None:
         assert request.toolkit == "client"
         assert request.tool == "pick_color"
         assert request.arguments == {"color": "blue"}
+        assert request.target_participant_id == sender.id
 
         process.send(
             Message(
@@ -5685,6 +5686,7 @@ async def test_client_toolkit_disconnect_cancels_pending_call() -> None:
         await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
         assert isinstance(adapter.result, ErrorContent)
         assert "participant_disconnected" in adapter.result.text
+        assert adapter.result.code == "cancelled"
         payloads = channel.direct_payloads_by_participant_id[sender.id]
         assert len(payloads) == 1
     finally:
@@ -5705,9 +5707,11 @@ async def test_client_toolkit_timeout_cancels_pending_call() -> None:
         await asyncio.wait_for(adapter.call_event.wait(), timeout=1)
         assert isinstance(adapter.result, ErrorContent)
         assert adapter.result.text == "client toolkit call timed out"
+        assert adapter.result.code == "cancelled"
         payloads = channel.direct_payloads_by_participant_id[sender.id]
         assert isinstance(payloads[1], AgentClientToolCallCancelled)
         assert payloads[1].reason == "timeout"
+        assert payloads[1].target_participant_id == sender.id
     finally:
         await process.stop(supervisor)
 

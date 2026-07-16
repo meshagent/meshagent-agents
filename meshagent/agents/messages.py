@@ -730,6 +730,7 @@ class AgentClientToolCallRequested(AgentLLMMessage):
     toolkit: str
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    target_participant_id: str | None = None
 
 
 class AgentClientToolCallCancelled(AgentLLMMessage):
@@ -741,6 +742,7 @@ class AgentClientToolCallCancelled(AgentLLMMessage):
     toolkit: str
     tool: str
     reason: str | None = None
+    target_participant_id: str | None = None
 
 
 class AgentSecretOAuthRequest(BaseModel):
@@ -783,6 +785,7 @@ class AgentConnectionStatus(AgentMessage):
     message: str | None = None
     reason: str | None = None
     retry_in_seconds: float | None = None
+    participant_id: str | None = None
 
 
 class AgentThreadEvent(AgentLLMMessage):
