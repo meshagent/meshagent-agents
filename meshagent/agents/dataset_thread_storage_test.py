@@ -578,12 +578,19 @@ def _row_data(row: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-_CONFORMANCE_CORPUS_PATH = (
-    Path(__file__).resolve().parents[4]
-    / "testdata"
-    / "agents"
-    / "dataset_thread_storage_conformance.json"
-)
+def _find_conformance_corpus() -> Path:
+    relative_path = Path("testdata/agents/dataset_thread_storage_conformance.json")
+    search_roots = (Path.cwd(), *Path(__file__).resolve().parents)
+    for root in search_roots:
+        candidate = root / relative_path
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find {relative_path} from the working directory or test module"
+    )
+
+
+_CONFORMANCE_CORPUS_PATH = _find_conformance_corpus()
 _CONFORMANCE_CORPUS = json.loads(_CONFORMANCE_CORPUS_PATH.read_text(encoding="utf-8"))
 
 
