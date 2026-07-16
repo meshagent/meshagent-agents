@@ -77,7 +77,7 @@ from meshagent.agents.messages import (
     TurnSteer,
     TurnSteerAccepted,
 )
-from meshagent.api import DatasetJson, Participant, RoomException
+from meshagent.api import DatasetJson, DatasetTableStats, Participant, RoomException
 from meshagent.api.messaging import BinaryContent, JsonContent, TextContent
 
 
@@ -88,7 +88,9 @@ class _FakeDatasets:
         self.create_calls: list[dict[str, Any]] = []
         self.insert_calls: list[dict[str, Any]] = []
         self.merge_calls: list[dict[str, Any]] = []
+        self.stats_calls: list[dict[str, Any]] = []
         self.optimize_calls: list[dict[str, Any]] = []
+        self.fragment_counts: dict[tuple[tuple[str, ...], str], int] = {}
         self.update_calls: list[dict[str, Any]] = []
         self.raise_on_existing_create = False
 
@@ -278,6 +280,24 @@ class _FakeDatasets:
                 "namespace": namespace,
                 "config": config,
             }
+        )
+
+    async def stats(
+        self,
+        *,
+        table: str,
+        namespace: list[str] | None = None,
+    ) -> DatasetTableStats:
+        self.stats_calls.append(
+            {
+                "table": table,
+                "namespace": namespace,
+            }
+        )
+        key = self._key(table=table, namespace=namespace)
+        return DatasetTableStats(
+            dataset={"num_fragments": self.fragment_counts.get(key, 1)},
+            data={},
         )
 
 
@@ -910,6 +930,51 @@ async def test_dataset_thread_storage_opens_existing_table_without_recreating() 
     assert room.datasets.create_calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("num_fragments", "expected_optimize_calls"), [(1, 0), (2, 1)])
+async def test_dataset_thread_storage_optimizes_fragmented_existing_table_on_load(
+    num_fragments: int,
+    expected_optimize_calls: int,
+) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    key = (("threads",), "demo")
+    room.datasets.schemas[key] = storage._schema()
+    room.datasets.rows[key] = []
+    room.datasets.fragment_counts[key] = num_fragments
+
+    await storage.wait_until_ready()
+
+    assert room.datasets.stats_calls == [{"table": "demo", "namespace": ["threads"]}]
+    assert len(room.datasets.optimize_calls) == expected_optimize_calls
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_optimizes_fragmented_thread_list_on_load() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        thread_dir="dataset://agents/demo/threads",
+    )
+    await storage._ensure_thread_list_table(
+        client=room.datasets,
+        thread_dir="dataset://agents/demo/threads",
+    )
+    key = (("agents", "demo", "threads"), "index")
+    room.datasets.fragment_counts[key] = 3
+
+    page = await storage.list_threads()
+
+    assert page.threads == []
+    assert room.datasets.stats_calls == [
+        {"table": "index", "namespace": ["agents", "demo", "threads"]}
+    ]
+    assert len(room.datasets.optimize_calls) == 1
+    assert room.datasets.optimize_calls[0]["table"] == "index"
+
+
 def test_dataset_thread_storage_rejects_non_dataset_paths() -> None:
     room = _FakeRoom()
 
@@ -964,30 +1029,72 @@ async def test_dataset_thread_storage_persists_only_accepted_user_turns() -> Non
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 3
-    unaccepted_data = _row_data(rows[0])
-    accepted_input_data = _row_data(rows[1])
-    accepted_data = _row_data(rows[2])
-    assert unaccepted_data["type"] == AGENT_MESSAGE_TURN_START
-    assert unaccepted_data["content"] == [{"type": "text", "text": "do not save"}]
-    assert unaccepted_data["sender_name"] == "caller"
-    assert rows[0]["item_id"] == "unaccepted"
-    assert rows[0]["type"] == AGENT_MESSAGE_TURN_START
+    assert len(rows) == 2
+    accepted_input_data = _row_data(rows[0])
+    accepted_data = _row_data(rows[1])
     assert accepted_input_data["type"] == AGENT_MESSAGE_TURN_START
     assert accepted_input_data["turn_id"] == "turn-accepted"
     assert accepted_input_data["content"] == [{"type": "text", "text": "save this"}]
     assert accepted_input_data["sender_name"] == "caller"
-    assert rows[1]["item_id"] == "accepted"
-    assert rows[1]["turn_id"] == "turn-accepted"
-    assert rows[1]["type"] == AGENT_MESSAGE_TURN_START
-    assert room.datasets.merge_calls[0]["on"] == "sequence"
-    assert room.datasets.merge_calls[0]["records"][0]["sequence"] == rows[1]["sequence"]
+    assert rows[0]["item_id"] == "accepted"
+    assert rows[0]["turn_id"] == "turn-accepted"
+    assert rows[0]["type"] == AGENT_MESSAGE_TURN_START
     assert accepted_data["type"] == AGENT_EVENT_TURN_START_ACCEPTED
     assert accepted_data["turn_id"] == "turn-accepted"
     assert accepted_data["source_message_id"] == "accepted"
     assert accepted_data["content"] == []
-    assert rows[2]["type"] == AGENT_EVENT_TURN_START_ACCEPTED
+    assert rows[1]["type"] == AGENT_EVENT_TURN_START_ACCEPTED
     assert "sender_name" not in accepted_data or accepted_data["sender_name"] is None
+    assert [row["sequence"] for row in rows] == sorted(row["sequence"] for row in rows)
+    assert room.datasets.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_holds_later_writes_until_reserved_row_resolves() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="dataset://threads/demo",
+            message_id="delayed",
+            content=[{"type": "text", "text": "wait for acceptance"}],
+        )
+    )
+    storage.push_message(
+        message=AgentThreadEvent(
+            type=AGENT_EVENT_THREAD_EVENT,
+            thread_id="dataset://threads/demo",
+            event={"kind": "intervening"},
+        )
+    )
+    await storage.flush()
+
+    key = (("threads",), "demo")
+    assert room.datasets.rows[key] == []
+
+    storage.push_message(
+        message=TurnStartAccepted(
+            type=AGENT_EVENT_TURN_START_ACCEPTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-delayed",
+            source_message_id="delayed",
+        )
+    )
+    await storage.flush()
+    await storage.stop()
+
+    rows = room.datasets.rows[key]
+    assert [row["sequence"] for row in rows] == [0, 1, 2]
+    assert [_row_data(row)["type"] for row in rows] == [
+        AGENT_MESSAGE_TURN_START,
+        AGENT_EVENT_THREAD_EVENT,
+        AGENT_EVENT_TURN_START_ACCEPTED,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1664,10 +1771,13 @@ async def test_dataset_thread_storage_does_not_write_tool_argument_deltas() -> N
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert [row["type"] for row in rows] == [
+    row_types = [row["type"] for row in rows]
+    assert row_types == [
         AGENT_EVENT_TOOL_CALL_STARTED,
+        AGENT_EVENT_THREAD_EVENT,
         AGENT_EVENT_TURN_ENDED,
     ]
+    assert AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA not in row_types
 
 
 @pytest.mark.asyncio

@@ -383,6 +383,31 @@ def test_accumulating_agent_event_reader_preserves_commentary_phase() -> None:
     ]
 
 
+def test_accumulating_agent_event_reader_cancels_incomplete_tool_call() -> None:
+    messages: list[dict[str, Any]] = []
+    reader = _TestAgentEventReader(emit_message=messages.append)
+
+    reader.consume(
+        AgentToolCallStarted(
+            type=AGENT_EVENT_TOOL_CALL_STARTED,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            item_id="tool-1",
+            namespace="meshagent",
+            call_id="call-1",
+            toolkit="test",
+            tool="blocking_tool",
+            arguments={"marker": "cancel-me"},
+        )
+    )
+    reader.finalize()
+
+    assert messages[0]["tool_call"]["error"] == {
+        "message": "tool call was cancelled before completion",
+        "code": "cancelled",
+    }
+
+
 def test_accumulating_agent_event_reader_treats_final_text_snapshot_as_replacement() -> (
     None
 ):
