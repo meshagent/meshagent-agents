@@ -43,7 +43,7 @@ from meshagent.agents.messages import (
 
 def _property_settings() -> settings:
     profile = os.getenv("MESHAGENT_AGENT_PROPERTY_PROFILE", "pr").strip().lower()
-    max_examples = 500 if profile == "nightly" else 40
+    max_examples = 500 if profile == "full" else 40
     database_path = Path(
         os.getenv(
             "MESHAGENT_AGENT_PROPERTY_DATABASE",

@@ -30,6 +30,12 @@ dependencies = [
   "pathspec>=1.0.3,<2",
 ]
 
+[project.scripts]
+meshagent-channel-chat = "meshagent.agents.channel_process:chat_main"
+meshagent-channel-mail = "meshagent.agents.channel_process:mail_main"
+meshagent-channel-queue = "meshagent.agents.channel_process:queue_main"
+meshagent-channel-toolkit = "meshagent.agents.channel_process:toolkit_main"
+
 [project.optional-dependencies]
 test = [
     "hypothesis==6.156.4",

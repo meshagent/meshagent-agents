@@ -671,12 +671,82 @@ def _tool_status_text(
     return f"Called {humanized}" if humanized != "" else "Called tool"
 
 
+@dataclass(frozen=True, slots=True)
+class ParticipantInfo:
+    participant_id: str
+    name: str
+    attributes: dict[str, Any]
+
+    @classmethod
+    def from_participant(cls, participant: Participant) -> ParticipantInfo:
+        raw_name = participant.get_attribute("name")
+        return cls(
+            participant_id=participant.id,
+            name=raw_name if isinstance(raw_name, str) else "",
+            attributes=dict(participant.attributes),
+        )
+
+    def to_participant(self) -> Participant:
+        attributes = dict(self.attributes)
+        if self.name != "" or "name" in attributes:
+            attributes["name"] = self.name
+        return Participant(id=self.participant_id, attributes=attributes)
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelParticipant:
+    channel_id: int
+    participant: ParticipantInfo
+
+    @property
+    def participant_id(self) -> str:
+        return self.participant.participant_id
+
+    @property
+    def key(self) -> tuple[int, str]:
+        return (self.channel_id, self.participant_id)
+
+    def to_participant(self) -> Participant:
+        return self.participant.to_participant()
+
+
 @dataclass(slots=True)
 class Message:
     data: AgentMessage
     sender: Participant | None = None
     source: Channel | AgentProcess | None = None
     to_participant_id: str | None = None
+    source_channel_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_channel_id is None and isinstance(self.source, Channel):
+            self.source_channel_id = self.source.channel_id
+
+    @property
+    def channel_participant(self) -> ChannelParticipant | None:
+        if self.source_channel_id is None:
+            return None
+        if self.sender is None:
+            return None
+        return ChannelParticipant(
+            channel_id=self.source_channel_id,
+            participant=ParticipantInfo.from_participant(self.sender),
+        )
+
+    def channel_participant_for_id(
+        self, *, participant_id: str
+    ) -> ChannelParticipant | None:
+        if self.source_channel_id is None:
+            return None
+        participant = self.sender
+        if participant is None or participant.id.strip() == "":
+            participant = Participant(id=participant_id)
+        if participant.id.strip() == "":
+            return None
+        return ChannelParticipant(
+            channel_id=self.source_channel_id,
+            participant=ParticipantInfo.from_participant(participant),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1235,6 +1305,7 @@ class ChatBackend:
 
 class Channel:
     def __init__(self) -> None:
+        self._channel_id: int | None = None
         self._supervisor: AgentSupervisor | None = None
         self._state: ChannelState = "stopped"
         self._run_task: asyncio.Task[None] | None = None
@@ -1249,6 +1320,10 @@ class Channel:
     @property
     def supervisor(self) -> AgentSupervisor | None:
         return self._supervisor
+
+    @property
+    def channel_id(self) -> int | None:
+        return self._channel_id
 
     def handles(self, message: Message) -> bool:
         del message
@@ -1352,13 +1427,17 @@ class Channel:
 
             try:
                 self._supervisor = supervisor
+                self._channel_id = supervisor.register_channel(self)
 
                 await self.on_start()
 
                 self._run_task = asyncio.create_task(self.run())
                 self._state = "started"
             except Exception:
+                if self._channel_id is not None:
+                    supervisor.unregister_channel(self._channel_id, self)
                 self._state = "failed"
+                self._channel_id = None
                 self._supervisor = None
                 self._run_task = None
                 raise
@@ -1378,11 +1457,17 @@ class Channel:
                 await self.on_stop()
             except Exception:
                 logger.exception("channel failed during stop")
+                if self._channel_id is not None:
+                    supervisor.unregister_channel(self._channel_id, self)
                 self._state = "failed"
+                self._channel_id = None
                 self._supervisor = None
                 self._run_task = None
                 raise
             else:
+                if self._channel_id is not None:
+                    supervisor.unregister_channel(self._channel_id, self)
+                self._channel_id = None
                 self._supervisor = None
                 self._run_task = None
                 self._state = "stopped"
@@ -1402,6 +1487,8 @@ class AgentSupervisor:
         agent_backends: list[AgentBackend] | None = None,
     ) -> None:
         self.channels: list[Channel] = []
+        self._next_channel_id = 1
+        self._active_channels_by_id: dict[int, Channel] = {}
         self.processes: list[AgentProcess] = []
         self._set_agent_backends(list(agent_backends or []))
         self._thread_storage_repository = (
@@ -1413,11 +1500,15 @@ class AgentSupervisor:
         self._queue: asyncio.Queue[Message] = asyncio.Queue()
         self._lifecycle_lock = asyncio.Lock()
         self._route_lock = asyncio.Lock()
-        self._participants_by_client_id: dict[str, Participant] = {}
-        self._participant_connection_counts_by_client_id: dict[str, int] = {}
-        self._thread_watchers_by_client_id: dict[str, Participant] = {}
-        self._open_thread_ids_by_client_id: dict[str, set[str]] = {}
-        self._open_client_ids_by_thread_id: dict[str, set[str]] = {}
+        self._participants_by_client_id: dict[tuple[int, str], ChannelParticipant] = {}
+        self._participant_connection_counts_by_client_id: dict[
+            tuple[int, str], int
+        ] = {}
+        self._thread_watchers_by_client_id: dict[
+            tuple[int, str], ChannelParticipant
+        ] = {}
+        self._open_thread_ids_by_client_id: dict[tuple[int, str], set[str]] = {}
+        self._open_client_ids_by_thread_id: dict[str, set[tuple[int, str]]] = {}
         self._thread_namespace_by_thread_id: dict[str, str | None] = {}
         self._backend_by_thread_id: dict[str, str] = {}
         self._thread_isolation: ThreadIsolationMode = thread_isolation
@@ -1470,6 +1561,84 @@ class AgentSupervisor:
 
     def add_channel(self, channel: Channel) -> None:
         self.channels.append(channel)
+
+    def register_channel(self, channel: Channel) -> int:
+        channel_id = self._next_channel_id
+        self._next_channel_id += 1
+        self._active_channels_by_id[channel_id] = channel
+        return channel_id
+
+    def unregister_channel(self, channel_id: int, channel: Channel) -> None:
+        registered = self._active_channels_by_id.get(channel_id)
+        if registered is channel:
+            self._active_channels_by_id.pop(channel_id, None)
+            self._participants_by_client_id = {
+                key: participant
+                for key, participant in self._participants_by_client_id.items()
+                if key[0] != channel_id
+            }
+            self._participant_connection_counts_by_client_id = {
+                key: count
+                for key, count in self._participant_connection_counts_by_client_id.items()
+                if key[0] != channel_id
+            }
+            self._thread_watchers_by_client_id = {
+                key: participant
+                for key, participant in self._thread_watchers_by_client_id.items()
+                if key[0] != channel_id
+            }
+            self._open_thread_ids_by_client_id = {
+                key: thread_ids
+                for key, thread_ids in self._open_thread_ids_by_client_id.items()
+                if key[0] != channel_id
+            }
+            for thread_id, client_ids in list(
+                self._open_client_ids_by_thread_id.items()
+            ):
+                client_ids.difference_update(
+                    {key for key in client_ids if key[0] == channel_id}
+                )
+                if len(client_ids) == 0:
+                    self._open_client_ids_by_thread_id.pop(thread_id, None)
+
+    def _channel_participant_for_message(
+        self,
+        *,
+        message: Message,
+        participant_id: str | None = None,
+    ) -> ChannelParticipant | None:
+        participant = (
+            message.channel_participant_for_id(participant_id=participant_id)
+            if participant_id is not None
+            else message.channel_participant
+        )
+        if participant is not None:
+            return participant
+        if len(self._active_channels_by_id) != 1:
+            return None
+        sender = message.sender
+        if sender is None:
+            if participant_id is None or participant_id.strip() == "":
+                return None
+            sender = Participant(id=participant_id)
+        if sender.id.strip() == "":
+            return None
+        channel_id = next(iter(self._active_channels_by_id))
+        return ChannelParticipant(
+            channel_id=channel_id,
+            participant=ParticipantInfo.from_participant(sender),
+        )
+
+    def _channel_participant_for_sender(
+        self, *, sender: Participant | None
+    ) -> ChannelParticipant | None:
+        if sender is None or len(self._active_channels_by_id) != 1:
+            return None
+        channel_id = next(iter(self._active_channels_by_id))
+        return ChannelParticipant(
+            channel_id=channel_id,
+            participant=ParticipantInfo.from_participant(sender),
+        )
 
     def stop_channel(self, channel: Channel) -> None:
         if channel in self.channels:
@@ -1691,7 +1860,8 @@ class AgentSupervisor:
         fallback: Participant | None = None,
     ) -> list[Participant]:
         participants_by_id: dict[str, Participant] = {}
-        for participant in self._participants_by_client_id.values():
+        for channel_participant in self._participants_by_client_id.values():
+            participant = channel_participant.to_participant()
             if self._participant_namespace(participant=participant) == namespace:
                 participants_by_id[participant.id] = participant
         if (
@@ -1706,63 +1876,87 @@ class AgentSupervisor:
         *,
         fallback: Participant | None = None,
     ) -> list[Participant]:
-        participants_by_id = dict(self._participants_by_client_id)
+        participants_by_id = {
+            participant.participant_id: participant.to_participant()
+            for participant in self._participants_by_client_id.values()
+        }
         if fallback is not None:
             participants_by_id[fallback.id] = fallback
         return list(participants_by_id.values())
 
-    def _track_thread_watcher(self, *, sender: Participant | None) -> None:
-        if sender is None or sender.id.strip() == "":
+    def _track_thread_watcher(self, *, message: Message) -> None:
+        sender = self._channel_participant_for_message(message=message)
+        if sender is None or sender.participant_id.strip() == "":
             return
-        self._thread_watchers_by_client_id[sender.id.strip()] = sender
+        self._thread_watchers_by_client_id[sender.key] = sender
 
-    def _untrack_thread_watcher(self, *, sender: Participant | None) -> None:
-        if sender is None or sender.id.strip() == "":
+    def _untrack_thread_watcher(self, *, message: Message) -> None:
+        sender = self._channel_participant_for_message(message=message)
+        if sender is None:
             return
-        self._thread_watchers_by_client_id.pop(sender.id.strip(), None)
+        self._thread_watchers_by_client_id.pop(sender.key, None)
 
-    def _thread_watchers(
-        self,
-        *,
-        fallback: Participant | None = None,
-    ) -> list[Participant]:
+    def _thread_watchers(self) -> list[ChannelParticipant]:
         participants_by_id = dict(self._thread_watchers_by_client_id)
-        if fallback is not None:
-            participants_by_id[fallback.id] = fallback
         return list(participants_by_id.values())
 
     def _thread_watchers_for_namespace(
         self,
         *,
         namespace: str,
-        fallback: Participant | None = None,
-    ) -> list[Participant]:
-        participants_by_id: dict[str, Participant] = {}
+    ) -> list[ChannelParticipant]:
+        participants_by_id: dict[tuple[int, str], ChannelParticipant] = {}
         for participant in self._thread_watchers_by_client_id.values():
-            if self._participant_namespace(participant=participant) == namespace:
-                participants_by_id[participant.id] = participant
-        if (
-            fallback is not None
-            and self._participant_namespace(participant=fallback) == namespace
-        ):
-            participants_by_id[fallback.id] = fallback
+            if participant.participant.name.strip() == namespace:
+                participants_by_id[participant.key] = participant
         return list(participants_by_id.values())
 
     def _participant_for_targeted_message(
         self,
         *,
         participant_id: str,
+        preferred_channel_id: int | None = None,
         fallback: Participant | None = None,
-    ) -> Participant | None:
+    ) -> ChannelParticipant | None:
         client_id = participant_id.strip()
         if client_id == "":
             return None
-        participant = self._participants_by_client_id.get(client_id)
-        if participant is not None:
-            return participant
+        if preferred_channel_id is not None:
+            participant = self._participants_by_client_id.get(
+                (preferred_channel_id, client_id)
+            )
+            if participant is not None:
+                return participant
+            if fallback is not None and fallback.id == client_id:
+                return ChannelParticipant(
+                    channel_id=preferred_channel_id,
+                    participant=ParticipantInfo.from_participant(fallback),
+                )
+            return None
+        matches = [
+            participant
+            for participant in self._participants_by_client_id.values()
+            if participant.participant_id == client_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
         if fallback is not None and fallback.id == client_id:
-            return fallback
+            return self._channel_participant_for_sender(sender=fallback)
         return None
+
+    def _send_agent_message_to_channel_participant(
+        self,
+        *,
+        participant: ChannelParticipant,
+        payload: AgentMessage,
+    ) -> bool:
+        channel = self._active_channels_by_id.get(participant.channel_id)
+        if channel is None:
+            return False
+        return channel.send_agent_message_to_participant(
+            participant=participant.to_participant(),
+            payload=payload,
+        )
 
     def create_thread_process(self, thread_id: str) -> AgentProcess:
         backend = self.agent_backend_for_thread(thread_id=thread_id)
@@ -2383,14 +2577,17 @@ class AgentSupervisor:
             sender=message.sender,
             source=message.source,
             to_participant_id=message.to_participant_id,
+            source_channel_id=message.source_channel_id,
         )
 
-    @staticmethod
-    def _client_id_for_thread_tracking(message: Message) -> str | None:
-        sender = message.sender
-        if sender is None or sender.id.strip() == "":
+    def _client_id_for_thread_tracking(
+        self,
+        message: Message,
+    ) -> tuple[int, str] | None:
+        sender = self._channel_participant_for_message(message=message)
+        if sender is None or sender.participant_id.strip() == "":
             return None
-        return sender.id
+        return sender.key
 
     def _participant_namespace_for_message(self, message: Message) -> str | None:
         return self._participant_namespace(participant=message.sender)
@@ -2432,7 +2629,7 @@ class AgentSupervisor:
         self,
         *,
         thread_id: str,
-        client_id: str | None,
+        client_id: tuple[int, str] | None,
     ) -> bool:
         if client_id is None:
             return False
@@ -2466,7 +2663,7 @@ class AgentSupervisor:
         self,
         *,
         thread_id: str,
-        client_id: str | None,
+        client_id: tuple[int, str] | None,
     ) -> bool:
         if client_id is None:
             self._forget_thread_tracking(thread_id=thread_id)
@@ -2493,48 +2690,84 @@ class AgentSupervisor:
         self,
         *,
         participant_id: str,
-        sender: Participant | None,
+        message: Message | None = None,
+        sender: Participant | None = None,
     ) -> None:
-        client_id = participant_id.strip()
-        if client_id == "":
+        participant = (
+            self._channel_participant_for_message(
+                message=message,
+                participant_id=participant_id,
+            )
+            if message is not None
+            else None
+        )
+        if participant is None and sender is not None:
+            participant = self._channel_participant_for_sender(sender=sender)
+        if participant is None:
             return
-        if sender is not None:
-            self._participants_by_client_id[client_id] = sender
-        self._participant_connection_counts_by_client_id[client_id] = (
-            self._participant_connection_counts_by_client_id.get(client_id, 0) + 1
+        participant_key = participant.key
+        self._participants_by_client_id[participant_key] = participant
+        self._participant_connection_counts_by_client_id[participant_key] = (
+            self._participant_connection_counts_by_client_id.get(participant_key, 0) + 1
         )
 
     def is_participant_connected(self, *, participant_id: str) -> bool:
         client_id = participant_id.strip()
         if client_id == "":
             return False
-        return self._participant_connection_counts_by_client_id.get(client_id, 0) > 0
+        return any(
+            candidate_id == client_id and count > 0
+            for (
+                _,
+                candidate_id,
+            ), count in self._participant_connection_counts_by_client_id.items()
+        )
 
-    async def _track_participant_disconnected(self, *, participant_id: str) -> None:
-        client_id = participant_id.strip()
-        if client_id == "":
+    async def _track_participant_disconnected(
+        self, *, participant_id: str, message: Message | None = None
+    ) -> None:
+        participant = (
+            self._channel_participant_for_message(
+                message=message,
+                participant_id=participant_id,
+            )
+            if message is not None
+            else None
+        )
+        if participant is None:
+            matches = [
+                candidate
+                for candidate in self._participants_by_client_id.values()
+                if candidate.participant_id == participant_id.strip()
+            ]
+            participant = matches[0] if len(matches) == 1 else None
+        if participant is None:
             return
+        participant_key = participant.key
+        client_id = participant.participant_id
 
         connection_count = (
-            self._participant_connection_counts_by_client_id.get(client_id, 0) - 1
+            self._participant_connection_counts_by_client_id.get(participant_key, 0) - 1
         )
         if connection_count > 0:
-            self._participant_connection_counts_by_client_id[client_id] = (
+            self._participant_connection_counts_by_client_id[participant_key] = (
                 connection_count
             )
             return
 
-        self._participant_connection_counts_by_client_id.pop(client_id, None)
-        self._participants_by_client_id.pop(client_id, None)
-        self._thread_watchers_by_client_id.pop(client_id, None)
+        self._participant_connection_counts_by_client_id.pop(participant_key, None)
+        self._participants_by_client_id.pop(participant_key, None)
+        self._thread_watchers_by_client_id.pop(participant_key, None)
         for process in list(self.processes):
             await process.on_participant_disconnected(participant_id=client_id)
-        thread_ids = list(self._open_thread_ids_by_client_id.pop(client_id, set()))
+        thread_ids = list(
+            self._open_thread_ids_by_client_id.pop(participant_key, set())
+        )
         for thread_id in thread_ids:
             client_ids = self._open_client_ids_by_thread_id.get(thread_id)
             if client_ids is None:
                 continue
-            client_ids.discard(client_id)
+            client_ids.discard(participant_key)
             if len(client_ids) > 0:
                 continue
             self._open_client_ids_by_thread_id.pop(thread_id, None)
@@ -2553,8 +2786,10 @@ class AgentSupervisor:
     def _send_to_channels(self, message: Message) -> None:
         to_participant_id = message.to_participant_id
         if to_participant_id is not None:
+            preferred_channel_id = message.source_channel_id
             participant = self._participant_for_targeted_message(
                 participant_id=to_participant_id,
+                preferred_channel_id=preferred_channel_id,
                 fallback=message.sender,
             )
             if participant is None:
@@ -2564,13 +2799,10 @@ class AgentSupervisor:
                     to_participant_id,
                 )
                 return
-            for channel in self.channels:
-                if message.source is channel:
-                    continue
-                channel.send_agent_message_to_participant(
-                    participant=participant,
-                    payload=message.data,
-                )
+            self._send_agent_message_to_channel_participant(
+                participant=participant,
+                payload=message.data,
+            )
             return
 
         for channel in self.channels:
@@ -2584,13 +2816,12 @@ class AgentSupervisor:
         request: Message,
         response: ThreadsListed,
     ) -> None:
-        if request.sender is not None:
-            for channel in self.channels:
-                if channel.send_agent_message_to_participant(
-                    participant=request.sender,
-                    payload=response,
-                ):
-                    return
+        participant = self._channel_participant_for_message(message=request)
+        if participant is not None and self._send_agent_message_to_channel_participant(
+            participant=participant,
+            payload=response,
+        ):
+            return
         self._send_to_channels(Message(data=response, sender=request.sender))
 
     def _agent_thread_list_entry(self, entry: ThreadListEntry) -> AgentThreadListEntry:
@@ -2641,17 +2872,22 @@ class AgentSupervisor:
                 return
             participants = self._thread_watchers_for_namespace(
                 namespace=namespace,
-                fallback=sender,
             )
         else:
-            participants = self._thread_watchers(fallback=sender)
+            participants = self._thread_watchers()
 
-        for participant in participants:
-            for channel in self.channels:
-                channel.send_agent_message_to_participant(
-                    participant=participant,
-                    payload=payload,
-                )
+        fallback = self._channel_participant_for_sender(sender=sender)
+        participants_by_key = {
+            participant.key: participant for participant in participants
+        }
+        if fallback is not None:
+            participants_by_key[fallback.key] = fallback
+
+        for participant in participants_by_key.values():
+            self._send_agent_message_to_channel_participant(
+                participant=participant,
+                payload=payload,
+            )
 
     def _send_to_processes(
         self,
@@ -2820,7 +3056,7 @@ class AgentSupervisor:
             )
             self._track_participant_connected(
                 participant_id=participant_connect.participant_id,
-                sender=message.sender,
+                message=message,
             )
             return
 
@@ -2833,7 +3069,8 @@ class AgentSupervisor:
                 message.sender,
             )
             await self._track_participant_disconnected(
-                participant_id=participant_disconnect.participant_id
+                participant_id=participant_disconnect.participant_id,
+                message=message,
             )
             return
 
@@ -3346,7 +3583,7 @@ class AgentSupervisor:
                 _coerce_message_data(message.data, WatchThreads),
                 message.sender,
             )
-            self._track_thread_watcher(sender=message.sender)
+            self._track_thread_watcher(message=message)
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_UNWATCH:
@@ -3354,7 +3591,7 @@ class AgentSupervisor:
                 _coerce_message_data(message.data, UnwatchThreads),
                 message.sender,
             )
-            self._untrack_thread_watcher(sender=message.sender)
+            self._untrack_thread_watcher(message=message)
             return
 
         elif message_type == AGENT_MESSAGE_THREAD_DELETE:
@@ -3710,6 +3947,8 @@ class AgentProcess:
             data=message.data.model_copy(update={"sender_name": sender_name}),
             sender=message.sender,
             source=message.source,
+            to_participant_id=message.to_participant_id,
+            source_channel_id=message.source_channel_id,
         )
 
     def emit(self, *, sender: Participant | None, payload: AgentMessage) -> None:

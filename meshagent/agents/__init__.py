@@ -43,6 +43,7 @@ from .chat_client import (
 from .mail_channel import MailChannel
 from .queue_channel import QueueChannel
 from .toolkit_channel import ToolkitChannel
+from .external_process_channel import ExternalChannelConnection, ExternalProcessChannel
 from .thread_schema import thread_schema, thread_list_schema
 from .mcp import MCPHeader, MCPServerConfig, MCPToolkitClientOptions
 from .process import ContentScheme
@@ -95,6 +96,8 @@ __all__ = [
     "MailChannel",
     "QueueChannel",
     "ToolkitChannel",
+    "ExternalProcessChannel",
+    "ExternalChannelConnection",
     "thread_schema",
     "thread_list_schema",
     "ContentScheme",

@@ -133,6 +133,7 @@ from meshagent.agents.process import (
     CreatedAgentThread,
     LLMAgentProcess,
     Message,
+    ParticipantInfo,
     ThreadIsolationMode,
 )
 from meshagent.agents.thread_adapter import ThreadAdapter
@@ -163,6 +164,19 @@ class _LifecycleChannel(Channel):
     async def on_stop(self) -> None:
         self.stopped += 1
         self.stop_event.set()
+
+
+def test_participant_info_preserves_typed_name_when_converted_to_wire_participant() -> (
+    None
+):
+    participant = ParticipantInfo(
+        participant_id="participant-1",
+        name="Display Name",
+        attributes={"role": "user"},
+    ).to_participant()
+
+    assert participant.id == "participant-1"
+    assert participant.attributes == {"name": "Display Name", "role": "user"}
 
 
 def test_supervisor_rejects_duplicate_channel_turn_tools() -> None:
@@ -4530,6 +4544,8 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_start_until_disc
     None
 ):
     supervisor = _ThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
     client = _ThreadParticipant(name="Client", participant_id="client-1")
 
     await supervisor.start()
@@ -4537,6 +4553,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_start_until_disc
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=ParticipantConnect(
                     type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
                     participant_id=client.id,
@@ -4546,6 +4563,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_start_until_disc
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=TurnStart(
                     type=AGENT_MESSAGE_TURN_START,
                     thread_id="/threads/implicit",
@@ -4555,7 +4573,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_start_until_disc
         )
 
         assert supervisor._open_client_ids_by_thread_id == {
-            "/threads/implicit": {"client-1"}
+            "/threads/implicit": {(channel.channel_id, "client-1")}
         }
         assert len(supervisor.created_processes) == 1
         process = supervisor.created_processes[0]
@@ -4564,6 +4582,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_start_until_disc
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=ParticipantDisconnect(
                     type=AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
                     participant_id=client.id,
@@ -4584,6 +4603,8 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_steer_until_clos
     None
 ):
     supervisor = _ThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
     client = _ThreadParticipant(name="Client", participant_id="client-1")
 
     await supervisor.start()
@@ -4591,6 +4612,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_steer_until_clos
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=TurnSteer(
                     type=AGENT_MESSAGE_TURN_STEER,
                     thread_id="/threads/implicit",
@@ -4601,7 +4623,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_steer_until_clos
         )
 
         assert supervisor._open_client_ids_by_thread_id == {
-            "/threads/implicit": {"client-1"}
+            "/threads/implicit": {(channel.channel_id, "client-1")}
         }
         assert len(supervisor.created_processes) == 1
         process = supervisor.created_processes[0]
@@ -4610,6 +4632,7 @@ async def test_agent_supervisor_implicitly_opens_thread_on_turn_steer_until_clos
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=CloseThread(
                     type=AGENT_MESSAGE_THREAD_CLOSE,
                     thread_id="/threads/implicit",
@@ -4756,7 +4779,7 @@ async def test_agent_supervisor_participant_isolation_blocks_open_from_other_par
             AGENT_MESSAGE_THREAD_OPEN
         ]
         assert supervisor._open_client_ids_by_thread_id == {
-            "/threads/private": {"client-1"}
+            "/threads/private": {(channel.channel_id, "client-1")}
         }
     finally:
         await supervisor.stop()
@@ -4767,6 +4790,8 @@ async def test_connection_lifecycle_disconnect_closes_all_implicitly_open_thread
     None
 ):
     supervisor = _ThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
     client = _ThreadParticipant(name="Client", participant_id="client-1")
 
     await supervisor.start()
@@ -4775,6 +4800,7 @@ async def test_connection_lifecycle_disconnect_closes_all_implicitly_open_thread
             await supervisor.route(
                 Message(
                     sender=client,
+                    source=channel,
                     data=TurnStart(
                         type=AGENT_MESSAGE_TURN_START,
                         thread_id=thread_id,
@@ -4784,17 +4810,18 @@ async def test_connection_lifecycle_disconnect_closes_all_implicitly_open_thread
             )
 
         assert supervisor._open_thread_ids_by_client_id == {
-            "client-1": {"/threads/one", "/threads/two"}
+            (channel.channel_id, "client-1"): {"/threads/one", "/threads/two"}
         }
         assert supervisor._open_client_ids_by_thread_id == {
-            "/threads/one": {"client-1"},
-            "/threads/two": {"client-1"},
+            "/threads/one": {(channel.channel_id, "client-1")},
+            "/threads/two": {(channel.channel_id, "client-1")},
         }
         assert len(supervisor.created_processes) == 2
 
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=ParticipantDisconnect(
                     type=AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
                     participant_id=client.id,
@@ -4819,6 +4846,8 @@ async def test_connection_lifecycle_expected_close_keeps_other_client_thread_ope
     None
 ):
     supervisor = _OpenCloseThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
     first_client = _ThreadParticipant(name="First", participant_id="client-1")
     second_client = _ThreadParticipant(name="Second", participant_id="client-2")
 
@@ -4828,6 +4857,7 @@ async def test_connection_lifecycle_expected_close_keeps_other_client_thread_ope
             await supervisor.route(
                 Message(
                     sender=client,
+                    source=channel,
                     data=OpenThread(
                         type=AGENT_MESSAGE_THREAD_OPEN,
                         thread_id="/threads/shared",
@@ -4841,6 +4871,7 @@ async def test_connection_lifecycle_expected_close_keeps_other_client_thread_ope
         await supervisor.route(
             Message(
                 sender=first_client,
+                source=channel,
                 data=CloseThread(
                     type=AGENT_MESSAGE_THREAD_CLOSE,
                     thread_id="/threads/shared",
@@ -4850,15 +4881,16 @@ async def test_connection_lifecycle_expected_close_keeps_other_client_thread_ope
 
         assert process.state == "started"
         assert supervisor._open_client_ids_by_thread_id == {
-            "/threads/shared": {"client-2"}
+            "/threads/shared": {(channel.channel_id, "client-2")}
         }
         assert supervisor._open_thread_ids_by_client_id == {
-            "client-2": {"/threads/shared"}
+            (channel.channel_id, "client-2"): {"/threads/shared"}
         }
 
         await supervisor.route(
             Message(
                 sender=second_client,
+                source=channel,
                 data=CloseThread(
                     type=AGENT_MESSAGE_THREAD_CLOSE,
                     thread_id="/threads/shared",
@@ -4876,6 +4908,8 @@ async def test_connection_lifecycle_expected_close_keeps_other_client_thread_ope
 @pytest.mark.asyncio
 async def test_connection_lifecycle_disconnect_uses_connection_ref_counts() -> None:
     supervisor = _OpenCloseThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
     client = _ThreadParticipant(name="Client", participant_id="client-1")
 
     await supervisor.start()
@@ -4884,6 +4918,7 @@ async def test_connection_lifecycle_disconnect_uses_connection_ref_counts() -> N
             await supervisor.route(
                 Message(
                     sender=client,
+                    source=channel,
                     data=ParticipantConnect(
                         type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
                         participant_id=client.id,
@@ -4893,6 +4928,7 @@ async def test_connection_lifecycle_disconnect_uses_connection_ref_counts() -> N
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=OpenThread(
                     type=AGENT_MESSAGE_THREAD_OPEN,
                     thread_id="/threads/shared",
@@ -4900,13 +4936,16 @@ async def test_connection_lifecycle_disconnect_uses_connection_ref_counts() -> N
             )
         )
 
-        assert supervisor._participant_connection_counts_by_client_id == {"client-1": 2}
+        assert supervisor._participant_connection_counts_by_client_id == {
+            (channel.channel_id, "client-1"): 2
+        }
         assert len(supervisor.created_processes) == 1
         process = supervisor.created_processes[0]
 
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=ParticipantDisconnect(
                     type=AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
                     participant_id=client.id,
@@ -4915,14 +4954,17 @@ async def test_connection_lifecycle_disconnect_uses_connection_ref_counts() -> N
         )
 
         assert process.state == "started"
-        assert supervisor._participant_connection_counts_by_client_id == {"client-1": 1}
+        assert supervisor._participant_connection_counts_by_client_id == {
+            (channel.channel_id, "client-1"): 1
+        }
         assert supervisor._open_thread_ids_by_client_id == {
-            "client-1": {"/threads/shared"}
+            (channel.channel_id, "client-1"): {"/threads/shared"}
         }
 
         await supervisor.route(
             Message(
                 sender=client,
+                source=channel,
                 data=ParticipantDisconnect(
                     type=AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
                     participant_id=client.id,
@@ -4934,6 +4976,125 @@ async def test_connection_lifecycle_disconnect_uses_connection_ref_counts() -> N
         assert supervisor._participant_connection_counts_by_client_id == {}
         assert supervisor._open_thread_ids_by_client_id == {}
         assert supervisor._open_client_ids_by_thread_id == {}
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_targeted_messages_keep_duplicate_participant_ids_channel_scoped() -> (
+    None
+):
+    supervisor = AgentSupervisor()
+    first_channel = _ParticipantRoutingChannel()
+    second_channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(first_channel)
+    supervisor.add_channel(second_channel)
+    first_participant = _ThreadParticipant(name="First", participant_id="shared-id")
+    second_participant = _ThreadParticipant(name="Second", participant_id="shared-id")
+
+    await supervisor.start()
+    try:
+        for channel, participant in [
+            (first_channel, first_participant),
+            (second_channel, second_participant),
+        ]:
+            await supervisor.route(
+                Message(
+                    data=ParticipantConnect(
+                        type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
+                        participant_id=participant.id,
+                    ),
+                    sender=participant,
+                    source=channel,
+                )
+            )
+
+        payload = ModelsRequest(type=AGENT_MESSAGE_MODELS_REQUEST)
+        supervisor._send_to_channels(
+            Message(
+                data=payload,
+                sender=first_participant,
+                source=first_channel,
+                to_participant_id="shared-id",
+            )
+        )
+        assert first_channel.direct_payloads_by_participant_id == {
+            "shared-id": [payload]
+        }
+        assert second_channel.direct_payloads_by_participant_id == {}
+
+        supervisor._send_to_channels(
+            Message(
+                data=payload,
+                sender=first_participant,
+                to_participant_id="shared-id",
+            )
+        )
+        assert first_channel.direct_payloads_by_participant_id == {
+            "shared-id": [payload]
+        }
+        assert second_channel.direct_payloads_by_participant_id == {}
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_channel_target_cannot_fall_through_to_another_channel() -> None:
+    supervisor = AgentSupervisor()
+    first_channel = _ParticipantRoutingChannel()
+    second_channel = _ParticipantRoutingChannel()
+    supervisor.add_channel(first_channel)
+    supervisor.add_channel(second_channel)
+    second_participant = _ThreadParticipant(
+        name="Second",
+        participant_id="second-only",
+    )
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                data=ParticipantConnect(
+                    type=AGENT_MESSAGE_PARTICIPANT_CONNECT,
+                    participant_id=second_participant.id,
+                ),
+                sender=second_participant,
+                source=second_channel,
+            )
+        )
+        payload = ModelsRequest(type=AGENT_MESSAGE_MODELS_REQUEST)
+        supervisor._send_to_channels(
+            Message(
+                data=payload,
+                sender=_ThreadParticipant(name="First", participant_id="first-user"),
+                source=first_channel,
+                to_participant_id=second_participant.id,
+            )
+        )
+
+        assert first_channel.direct_payloads_by_participant_id == {}
+        assert second_channel.direct_payloads_by_participant_id == {}
+
+        stale_message = Message(
+            data=payload,
+            sender=_ThreadParticipant(name="First", participant_id="first-user"),
+            source=first_channel,
+            to_participant_id=second_participant.id,
+        )
+        assert stale_message.source_channel_id == first_channel.channel_id
+        await first_channel.stop(supervisor)
+        supervisor.stop_channel(first_channel)
+        assert all(
+            channel_id != stale_message.source_channel_id
+            for channel_id, _ in supervisor._participants_by_client_id
+        )
+        assert all(
+            channel_id != stale_message.source_channel_id
+            for channel_id, _ in supervisor._participant_connection_counts_by_client_id
+        )
+        supervisor._send_to_channels(stale_message)
+
+        assert second_channel.direct_payloads_by_participant_id == {}
     finally:
         await supervisor.stop()
 
@@ -5164,6 +5325,7 @@ async def test_agent_supervisor_routes_process_emitted_events_to_channels() -> N
             "payload": "ok",
             "message_id": channel.received[0].data.message_id,
             "created_at": channel.received[0].data.created_at,
+            "metadata": {},
             "sender_name": None,
         }
     ]
@@ -5570,6 +5732,7 @@ async def _start_client_toolkit_process(
     supervisor = _RecordingSupervisor()
     channel = _ParticipantRoutingChannel()
     supervisor.channels.append(channel)
+    channel._channel_id = supervisor.register_channel(channel)
     process = _make_llm_agent_process(
         room=_DownloadRecordingRoom(),
         thread_id="thread-1",
@@ -8282,6 +8445,7 @@ async def test_llm_agent_process_realtime_audio_commit_then_turn_start_runs_one_
             "created_at": audio_transcriptions[0]["created_at"],
             "item_id": "user-audio-1",
             "message_id": audio_transcriptions[0]["message_id"],
+            "metadata": {},
             "model": "default-model",
             "provider": "test-provider",
             "response_id": None,
