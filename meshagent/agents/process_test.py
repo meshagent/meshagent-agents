@@ -891,6 +891,51 @@ async def test_chat_agent_process_records_accepted_turn_to_thread_storage() -> N
     assert accepted.sender_name == "caller"
 
 
+@pytest.mark.asyncio
+async def test_llm_agent_process_accepted_turn_preserves_input_content_and_sender() -> (
+    None
+):
+    adapter = _RecordingLLMAdapter()
+    supervisor = _RecordingSupervisor()
+    room = _DownloadRecordingRoom()
+    process = _make_llm_agent_process(
+        room=room,
+        thread_id="thread-1",
+        llm_adapter=adapter,
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    message_id="telegram-message",
+                    thread_id="thread-1",
+                    content=[AgentTextContent(type="text", text="Yo")],
+                ),
+                sender=_ThreadParticipant(
+                    name="telegram-chat-5875963210",
+                    participant_id="room-user-id",
+                ),
+            )
+        )
+
+        await _wait_for(
+            lambda: (
+                len(supervisor.payloads(message_type=AGENT_EVENT_TURN_START_ACCEPTED))
+                == 1
+            )
+        )
+    finally:
+        await process.stop(supervisor)
+
+    [accepted] = supervisor.payloads(message_type=AGENT_EVENT_TURN_START_ACCEPTED)
+    assert accepted["source_message_id"] == "telegram-message"
+    assert accepted["sender_name"] == "telegram-chat-5875963210"
+    assert accepted["content"] == [{"type": "text", "text": "Yo"}]
+
+
 class _RecordedSpan:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -6588,7 +6633,7 @@ async def test_llm_agent_process_adds_participant_name_to_agent_messages() -> No
     )[0]
     text_payload = supervisor.payloads(message_type=AGENT_EVENT_TEXT_CONTENT_DELTA)[0]
     tool_payload = supervisor.payloads(message_type=AGENT_EVENT_TOOL_CALL_PENDING)[0]
-    assert accepted_payload["sender_name"] == "chatbot"
+    assert accepted_payload["sender_name"] == "caller"
     assert text_payload["sender_name"] == "chatbot"
     assert tool_payload["sender_name"] == "chatbot"
     await process.stop(supervisor)

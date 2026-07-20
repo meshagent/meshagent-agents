@@ -87,6 +87,11 @@ async def _run_room_channel(channel_factory: Callable[[RoomClient], Channel]) ->
         await connection.close()
 
 
+def run_room_channel(channel_factory: Callable[[RoomClient], Channel]) -> None:
+    """Run a room-backed channel as an external channel child process."""
+    asyncio.run(_run_room_channel(channel_factory))
+
+
 def _common_parser(*, program: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=program)
     parser.add_argument("--thread-dir")
@@ -97,13 +102,11 @@ def _common_parser(*, program: str) -> argparse.ArgumentParser:
 def chat_main(argv: Sequence[str] | None = None) -> None:
     parser = _common_parser(program="meshagent-channel-chat")
     options = parser.parse_args(argv)
-    asyncio.run(
-        _run_room_channel(
-            lambda room: MessagingChatChannel(
-                room=room,
-                threading_mode=options.threading_mode,
-                thread_dir=options.thread_dir,
-            )
+    run_room_channel(
+        lambda room: MessagingChatChannel(
+            room=room,
+            threading_mode=options.threading_mode,
+            thread_dir=options.thread_dir,
         )
     )
 
@@ -114,16 +117,14 @@ def mail_main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--queue-name")
     parser.add_argument("--reply-all", action="store_true")
     options = parser.parse_args(argv)
-    asyncio.run(
-        _run_room_channel(
-            lambda room: MailChannel(
-                room=room,
-                queue_name=options.queue_name or options.email_address,
-                email_address=options.email_address,
-                reply_all=options.reply_all,
-                threading_mode=options.threading_mode,
-                thread_dir=options.thread_dir,
-            )
+    run_room_channel(
+        lambda room: MailChannel(
+            room=room,
+            queue_name=options.queue_name or options.email_address,
+            email_address=options.email_address,
+            reply_all=options.reply_all,
+            threading_mode=options.threading_mode,
+            thread_dir=options.thread_dir,
         )
     )
 
@@ -132,14 +133,12 @@ def queue_main(argv: Sequence[str] | None = None) -> None:
     parser = _common_parser(program="meshagent-channel-queue")
     parser.add_argument("queue_name")
     options = parser.parse_args(argv)
-    asyncio.run(
-        _run_room_channel(
-            lambda room: QueueChannel(
-                room=room,
-                queue_name=options.queue_name,
-                threading_mode=options.threading_mode,
-                thread_dir=options.thread_dir,
-            )
+    run_room_channel(
+        lambda room: QueueChannel(
+            room=room,
+            queue_name=options.queue_name,
+            threading_mode=options.threading_mode,
+            thread_dir=options.thread_dir,
         )
     )
 
@@ -149,13 +148,11 @@ def toolkit_main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("toolkit_name")
     parser.add_argument("--thread-dir")
     options = parser.parse_args(argv)
-    asyncio.run(
-        _run_room_channel(
-            lambda room: ToolkitChannel(
-                room=room,
-                toolkit_name=options.toolkit_name,
-                thread_dir=options.thread_dir,
-            )
+    run_room_channel(
+        lambda room: ToolkitChannel(
+            room=room,
+            toolkit_name=options.toolkit_name,
+            thread_dir=options.thread_dir,
         )
     )
 

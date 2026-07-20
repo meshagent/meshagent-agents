@@ -7329,6 +7329,8 @@ class LLMAgentProcess(AgentProcess):
                     thread_id=turn.thread_id,
                     turn_id=turn_id,
                     source_message_id=turn.message_id,
+                    content=turn.content,
+                    sender_name=turn.sender_name,
                 ),
             )
         if should_track_pending_status:
