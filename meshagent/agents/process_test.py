@@ -4435,6 +4435,11 @@ async def test_agent_supervisor_thread_open_with_load_replays_stored_messages_si
 async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_before_loaded() -> (
     None
 ):
+    class _FlushGatedThreadStorage(_LifecycleThreadStorage):
+        def agent_messages(self) -> list[AgentMessage]:
+            assert self.flushed > 0
+            return super().agent_messages()
+
     class _BlockingStartSessionAdapter(_RecordingLLMAdapter):
         def __init__(self) -> None:
             super().__init__(session=_LifecycleSession())
@@ -4452,7 +4457,7 @@ async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_befo
             )
             await self.release_start_session.wait()
 
-    thread_storage = _LifecycleThreadStorage(path="/threads/created")
+    thread_storage = _FlushGatedThreadStorage(path="/threads/created")
     replay_message = AgentTextContentDelta(
         type=AGENT_EVENT_TEXT_CONTENT_DELTA,
         thread_id="/threads/created",
@@ -4487,6 +4492,7 @@ async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_befo
         )
 
         await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+        assert thread_storage.flushed == 1
         assert len(channel.direct_payloads) == 1
         assert isinstance(channel.direct_payloads[0], AgentTextContentDelta)
         assert channel.direct_payloads[0].item_id == replay_message.item_id

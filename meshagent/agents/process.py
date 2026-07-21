@@ -7127,6 +7127,11 @@ class LLMAgentProcess(AgentProcess):
         thread_storage = self.thread_storage
         if thread_storage is not None:
             await thread_storage.wait_until_ready()
+            if request.load is True:
+                # Include every event accepted before this open request in the
+                # replay snapshot. In particular, a cold client must see the
+                # terminal event that clears pending input before ThreadLoaded.
+                await thread_storage.flush()
         self._restore_current_model_from_thread_storage()
         if request.load is True:
             if thread_storage is not None:
