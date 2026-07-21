@@ -1001,6 +1001,17 @@ class _OpenCloseThreadCreatingSupervisor(AgentSupervisor):
         return process
 
 
+class _LegacyBackendThreadCreatingSupervisor(AgentSupervisor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.created_processes: list[_BackendRecordingProcess] = []
+
+    def create_thread_process(self, thread_id: str) -> AgentProcess:
+        process = _BackendRecordingProcess(thread_id=thread_id, backend="llm")
+        self.created_processes.append(process)
+        return process
+
+
 class _FailingThreadCreatingSupervisor(AgentSupervisor):
     def create_thread_process(self, thread_id: str) -> AgentProcess:
         del thread_id
@@ -4611,6 +4622,54 @@ async def test_agent_supervisor_forwards_load_open_for_already_open_thread() -> 
         assert process.received[1].data.type == AGENT_MESSAGE_THREAD_OPEN
         assert isinstance(process.received[1].data, OpenThread)
         assert process.received[1].data.load is True
+    finally:
+        await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_supervisor_routes_advertised_backend_without_registry() -> None:
+    supervisor = _LegacyBackendThreadCreatingSupervisor()
+    channel = _RecordingChannel()
+    supervisor.add_channel(channel)
+    client = _ThreadParticipant(name="Client", participant_id="client-1")
+
+    await supervisor.start()
+    try:
+        await supervisor.route(
+            Message(
+                sender=client,
+                source=channel,
+                data=OpenThread(
+                    type=AGENT_MESSAGE_THREAD_OPEN,
+                    thread_id="/threads/shared",
+                    backend="llm",
+                    load=True,
+                ),
+            )
+        )
+
+        assert len(supervisor.created_processes) == 1
+        process = supervisor.created_processes[0]
+        await _wait_for(lambda: len(process.received) == 1)
+
+        await supervisor.route(
+            Message(
+                sender=client,
+                source=channel,
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="/threads/shared",
+                    backend="llm",
+                    content=[AgentTextContent(type="text", text="hello")],
+                ),
+            )
+        )
+
+        await _wait_for(lambda: len(process.received) == 2)
+        assert [message.data.type for message in process.received] == [
+            AGENT_MESSAGE_THREAD_OPEN,
+            AGENT_MESSAGE_TURN_START,
+        ]
     finally:
         await supervisor.stop()
 

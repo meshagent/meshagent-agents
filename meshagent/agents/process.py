@@ -2031,6 +2031,11 @@ class AgentSupervisor:
         self._send_to_channels(message)
 
     async def validate_turn_start(self, turn_start: TurnStart) -> AgentError | None:
+        # Supervisors that create processes directly delegate backend validation to
+        # those processes. This legacy mode has no backend registry to validate
+        # against, even though a process may advertise its backend to clients.
+        if len(self._agent_backends) == 0:
+            return None
         if self._requires_explicit_backend(turn_start.backend):
             return self._missing_backend_error()
         backend = self.agent_backend_for_name(backend_name=turn_start.backend)
@@ -3116,7 +3121,8 @@ class AgentSupervisor:
                 return
             backend = self.agent_backend_for_name(backend_name=start_thread.backend)
             if (
-                backend is None
+                len(self._agent_backends) > 0
+                and backend is None
                 and start_thread.backend is not None
                 and start_thread.backend.strip() != ""
             ):
@@ -3338,7 +3344,8 @@ class AgentSupervisor:
                 return
             backend = self.agent_backend_for_name(backend_name=change_model.backend)
             if (
-                backend is None
+                len(self._agent_backends) > 0
+                and backend is None
                 and change_model.backend is not None
                 and change_model.backend.strip() != ""
             ):
@@ -3668,7 +3675,8 @@ class AgentSupervisor:
                     backend_name=thread_message.backend
                 )
                 if (
-                    backend is None
+                    len(self._agent_backends) > 0
+                    and backend is None
                     and thread_message.backend is not None
                     and thread_message.backend.strip() != ""
                 ):
