@@ -1213,6 +1213,11 @@ class DatasetThreadStorage(ThreadStorage):
                 data = json.loads(raw_data)
             except json.JSONDecodeError:
                 return None
+        elif isinstance(raw_data, (bytes, bytearray, memoryview)):
+            try:
+                data = json.loads(bytes(raw_data))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
         else:
             return None
         if not isinstance(data, dict):

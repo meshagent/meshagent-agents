@@ -578,6 +578,28 @@ def _row_data(row: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"type":"message","text":"hello"}',
+        bytearray(b'{"type":"message","text":"hello"}'),
+        memoryview(b'{"type":"message","text":"hello"}'),
+    ],
+)
+def test_dataset_thread_storage_decodes_jsonb_binary_data(data: object) -> None:
+    row = DatasetThreadStorage._stored_row_from_record(
+        record={
+            "item_id": "item-1",
+            "sequence": 1,
+            "data": data,
+        }
+    )
+
+    assert row is not None
+    assert row.message_type == "message"
+    assert row.data == {"type": "message", "text": "hello"}
+
+
 def _find_conformance_corpus() -> Path:
     relative_path = Path("testdata/agents/dataset_thread_storage_conformance.json")
     search_roots = (Path.cwd(), *Path(__file__).resolve().parents)
@@ -993,6 +1015,10 @@ async def test_dataset_thread_storage_batches_queued_writes() -> None:
 
     assert len(room.datasets.insert_calls) == 1
     assert len(room.datasets.insert_calls[0]["records"]) == 2
+    assert all(
+        isinstance(record["data"], DatasetJson)
+        for record in room.datasets.insert_calls[0]["records"]
+    )
 
 
 @pytest.mark.asyncio
