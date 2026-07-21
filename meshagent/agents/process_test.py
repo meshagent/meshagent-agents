@@ -2983,17 +2983,21 @@ class _ReplayThreadCreatingSupervisor(AgentSupervisor):
         *,
         room: _DownloadRecordingRoom,
         thread_storage: _LifecycleThreadStorage,
+        llm_adapter: LLMAdapter[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
         self.room = room
         self.thread_storage = thread_storage
+        self.llm_adapter = llm_adapter or _RecordingLLMAdapter(
+            session=_LifecycleSession()
+        )
         self.created_processes: list[LLMAgentProcess] = []
 
     def create_thread_process(self, thread_id: str) -> AgentProcess:
         process = _make_llm_agent_process(
             room=self.room,
             thread_id=thread_id,
-            llm_adapter=_RecordingLLMAdapter(session=_LifecycleSession()),
+            llm_adapter=self.llm_adapter,
             thread_storage=self.thread_storage,
         )
         self.created_processes.append(process)
@@ -4420,6 +4424,23 @@ async def test_agent_supervisor_thread_open_with_load_replays_stored_messages_si
 async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_before_loaded() -> (
     None
 ):
+    class _BlockingStartSessionAdapter(_RecordingLLMAdapter):
+        def __init__(self) -> None:
+            super().__init__(session=_LifecycleSession())
+            self.release_start_session = asyncio.Event()
+
+        async def start_session(
+            self,
+            *,
+            context: AgentSessionContext,
+            event_handler=None,
+        ) -> None:
+            await super().start_session(
+                context=context,
+                event_handler=event_handler,
+            )
+            await self.release_start_session.wait()
+
     thread_storage = _LifecycleThreadStorage(path="/threads/created")
     replay_message = AgentTextContentDelta(
         type=AGENT_EVENT_TEXT_CONTENT_DELTA,
@@ -4430,9 +4451,11 @@ async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_befo
     )
     thread_storage.messages.append(replay_message)
     room = _DownloadRecordingRoom()
+    adapter = _BlockingStartSessionAdapter()
     supervisor = _ReplayThreadCreatingSupervisor(
         room=room,
         thread_storage=thread_storage,
+        llm_adapter=adapter,
     )
     channel = _ThreadOpenResponseChannel()
     supervisor.add_channel(channel)
@@ -4452,11 +4475,19 @@ async def test_agent_supervisor_thread_open_with_load_sends_replay_directly_befo
             )
         )
 
-        await _wait_for(lambda: len(channel.direct_payloads) >= 2)
+        await asyncio.wait_for(adapter.start_session_event.wait(), timeout=1)
+        assert len(channel.direct_payloads) == 1
         assert isinstance(channel.direct_payloads[0], AgentTextContentDelta)
         assert channel.direct_payloads[0].item_id == replay_message.item_id
         assert channel.direct_payloads[0].created_at == replay_message.created_at
-        assert isinstance(channel.direct_payloads[1], ThreadLoaded)
+
+        adapter.release_start_session.set()
+        await _wait_for(
+            lambda: any(
+                isinstance(payload, ThreadLoaded) for payload in channel.direct_payloads
+            )
+        )
+        assert isinstance(channel.direct_payloads[-1], ThreadLoaded)
         assert [
             message.data
             for message in channel.received

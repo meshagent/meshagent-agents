@@ -7132,6 +7132,44 @@ class LLMAgentProcess(AgentProcess):
                             stored_message
                         ),
                     )
+        super().emit(
+            sender=message.sender,
+            payload=self._agent_message_with_participant_name(
+                self._build_model_changed(
+                    thread_id=request.thread_id,
+                    source_message_id=request.message_id,
+                )
+            ),
+        )
+        if self._turn_task is None and self._turn_id is None:
+            session = await self.ensure_session_context(turn_id=None)
+            await self.llm_adapter.start_session(context=session)
+            if not self._emit_cached_usage_update(
+                turn_id=self._turn_id,
+                sender=message.sender,
+                source=message.source,
+            ):
+                try:
+                    usage_update = await self._build_usage_update(
+                        session=session,
+                        model=self._current_model,
+                        toolkits=self._toolkits,
+                        turn_id=self._turn_id,
+                        restore_context_from_storage=True,
+                    )
+                except Exception:
+                    logger.debug("failed to publish agent usage update", exc_info=True)
+                else:
+                    self._last_usage_update = usage_update
+                    self._send_thread_open_usage_update(
+                        usage_update=usage_update,
+                        sender=message.sender,
+                        source=message.source,
+                    )
+
+        if request.load is True:
+            # This is a readiness barrier, not just the end of replay delivery.
+            # A client may start its next turn as soon as it receives this event.
             await self._send_thread_open_response(
                 request_message=message,
                 payload=self._agent_message_with_participant_name(
@@ -7143,42 +7181,6 @@ class LLMAgentProcess(AgentProcess):
                     )
                 ),
             )
-        super().emit(
-            sender=message.sender,
-            payload=self._agent_message_with_participant_name(
-                self._build_model_changed(
-                    thread_id=request.thread_id,
-                    source_message_id=request.message_id,
-                )
-            ),
-        )
-        if self._turn_task is not None or self._turn_id is not None:
-            return
-        session = await self.ensure_session_context(turn_id=None)
-        await self.llm_adapter.start_session(context=session)
-        if self._emit_cached_usage_update(
-            turn_id=self._turn_id,
-            sender=message.sender,
-            source=message.source,
-        ):
-            return
-        try:
-            usage_update = await self._build_usage_update(
-                session=session,
-                model=self._current_model,
-                toolkits=self._toolkits,
-                turn_id=self._turn_id,
-                restore_context_from_storage=True,
-            )
-        except Exception:
-            logger.debug("failed to publish agent usage update", exc_info=True)
-            return
-        self._last_usage_update = usage_update
-        self._send_thread_open_usage_update(
-            usage_update=usage_update,
-            sender=message.sender,
-            source=message.source,
-        )
 
     async def _send_thread_open_response(
         self,
