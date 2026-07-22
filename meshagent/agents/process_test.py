@@ -7417,8 +7417,34 @@ async def test_llm_agent_process_can_publish_thread_status_as_agent_messages() -
                 )
             )
         )
+        assert not any(
+            payload["status"] is not None and payload["turn_id"] is None
+            for payload in supervisor.payloads(message_type=AGENT_EVENT_THREAD_STATUS)
+        )
     finally:
         await process.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_agent_message_status_never_publishes_without_a_turn_id() -> None:
+    published: list[AgentMessage] = []
+    publisher = AgentMessageThreadStatusPublisher(
+        thread_id="thread-1",
+        publish=published.append,
+    )
+
+    await publisher.set_thread_status(status="Writing")
+    assert published == []
+
+    await publisher.set_thread_turn_id(turn_id="turn-1")
+    await publisher.set_thread_status(status="Writing")
+    await publisher.set_thread_turn_id(turn_id=None)
+
+    assert all(
+        message.status is None or message.turn_id is not None for message in published
+    )
+    assert published[-1].status is None
+    assert published[-1].turn_id is None
 
 
 @pytest.mark.asyncio

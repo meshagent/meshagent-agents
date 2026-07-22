@@ -7086,8 +7086,8 @@ class LLMAgentProcess(AgentProcess):
                 )
                 thread_status_publisher = self.thread_status_publisher
                 if thread_status_publisher is not None:
-                    await thread_status_publisher.set_thread_turn_id(turn_id=None)
                     await thread_status_publisher.clear_thread_status()
+                    await thread_status_publisher.set_thread_turn_id(turn_id=None)
             finally:
                 turn_span.set_attribute("error", error is not None)
                 if error is not None:
@@ -7858,8 +7858,8 @@ class LLMAgentProcess(AgentProcess):
         await self._clear_pending_status_messages()
         thread_status_publisher = self.thread_status_publisher
         if thread_status_publisher is not None:
-            await thread_status_publisher.set_thread_turn_id(turn_id=None)
             await thread_status_publisher.clear_thread_status()
+            await thread_status_publisher.set_thread_turn_id(turn_id=None)
 
         if self._session_context is not None:
             await self.llm_adapter.stop_session(context=self._session_context)
