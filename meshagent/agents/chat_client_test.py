@@ -382,6 +382,40 @@ async def test_chat_thread_session_clears_pending_inputs_on_turn_end() -> None:
     assert session.pending_inputs == ()
 
 
+def test_chat_thread_session_does_not_restore_completed_replay_input() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+
+    session.add_agent_message(
+        TurnEnded(
+            type=AGENT_EVENT_TURN_ENDED,
+            thread_id="/threads/test.thread",
+            turn_id="turn-complete",
+            error=None,
+        )
+    )
+    session.add_agent_message(
+        TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="/threads/test.thread",
+            message_id="message-complete",
+            turn_id="turn-complete",
+        )
+    )
+    session.add_agent_message(
+        TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="/threads/test.thread",
+            message_id="message-pending",
+            turn_id="turn-pending",
+        )
+    )
+
+    assert [pending.message_id for pending in session.pending_inputs] == [
+        "message-pending"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_chat_thread_session_tracks_active_turn_from_accepted_event() -> None:
     client = _RecordingChatClient()

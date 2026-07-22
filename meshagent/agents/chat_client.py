@@ -509,6 +509,8 @@ class ChatThreadSession:
         self._pending_steer_callbacks: dict[str, PendingTurnSteerCallback] = {}
         self._local_agent_message_ids: set[str] = set()
         self._pending_local_input_message_ids: set[str] = set()
+        self._resolved_input_message_ids: set[str] = set()
+        self._completed_turn_ids: set[str] = set()
         self._local_turn_ids: set[str] = set()
         self._remote_source_message_ids: set[str] = set()
         self._remote_turn_output_parts: dict[str, list[str]] = {}
@@ -1243,6 +1245,18 @@ class ChatThreadSession:
             normalized_message_id = _normalized_string(message.message_id)
             if normalized_message_id is None:
                 return
+            was_pending = normalized_message_id in self._pending_inputs
+            turn_id = (
+                _normalized_string(message.turn_id)
+                if isinstance(message, (TurnStart, TurnSteer))
+                else None
+            )
+            was_already_resolved = not was_pending and (
+                normalized_message_id in self._resolved_input_message_ids
+                or (turn_id is not None and turn_id in self._completed_turn_ids)
+            )
+            if was_already_resolved:
+                return
             thread_path = self._thread_path or (
                 message.thread_id if isinstance(message, (TurnStart, TurnSteer)) else ""
             )
@@ -1266,13 +1280,22 @@ class ChatThreadSession:
             )
             return
         if isinstance(message, (TurnStarted, TurnSteered)):
-            self._clear_queued_agent_input(message.source_message_id)
+            source_message_id = _normalized_string(message.source_message_id)
+            if source_message_id is not None:
+                self._resolved_input_message_ids.add(source_message_id)
+            self._clear_queued_agent_input(source_message_id)
             return
         if isinstance(message, (TurnStartRejected, TurnSteerRejected)):
-            self._clear_queued_agent_input(message.source_message_id)
+            source_message_id = _normalized_string(message.source_message_id)
+            if source_message_id is not None:
+                self._resolved_input_message_ids.add(source_message_id)
+            self._clear_queued_agent_input(source_message_id)
             return
         if isinstance(message, TurnEnded):
             self._pending_inputs.clear()
+            turn_id = _normalized_string(message.turn_id)
+            if turn_id is not None:
+                self._completed_turn_ids.add(turn_id)
 
     def _append_message(
         self,
