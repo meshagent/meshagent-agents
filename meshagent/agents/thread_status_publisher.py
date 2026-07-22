@@ -245,10 +245,20 @@ class AgentMessageThreadStatusPublisher:
 
     async def set_thread_turn_id(self, *, turn_id: str | None) -> None:
         async with self._lock:
-            if self._turn_id_value == turn_id:
+            if self._turn_id_value == turn_id and not (
+                turn_id is None and self._status_value is not None
+            ):
                 return
 
             self._turn_id_value = turn_id
+            if turn_id is None:
+                self._status_value = None
+                self._mode_value = None
+                self._started_at_value = None
+                self._pending_item_id_value = None
+                self._total_bytes_value = None
+                self._lines_added_value = None
+                self._lines_removed_value = None
             self._publish_current_status()
 
     async def set_pending_messages(
@@ -292,6 +302,8 @@ class AgentMessageThreadStatusPublisher:
                 return
 
             normalized_status = status.strip()
+            if self._turn_id_value is None:
+                return
             normalized_mode = mode if mode is not None else self._mode
             normalized_pending_item_id = (
                 pending_item_id.strip()
