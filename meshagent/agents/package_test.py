@@ -27,6 +27,21 @@ def _write_runtime_module(tmp_path: Path, *, body: str = "print('hello')\n") -> 
     return module_path
 
 
+class _FakePackageTag(str):
+    @property
+    def value(self) -> str:
+        return str(self)
+
+
+async def _same_package_registry_target(*, project_id: str, parsed_tag):
+    assert project_id == "project-123"
+    assert parsed_tag == "parsed-tag"
+    return (
+        "registry.meshagent.com",
+        _FakePackageTag("registry.meshagent.com/project-key/package-assistant:latest"),
+    )
+
+
 def test_agent_package_skills_validation_is_lazy(tmp_path: Path) -> None:
     file_path = tmp_path / "skill.txt"
     file_path.write_text("not a directory", encoding="utf-8")
@@ -112,6 +127,128 @@ def test_package_meshagent_tool_methods_configure_runtime_flags() -> None:
         allow_goto_url=True,
     )
     assert package._mcp_enabled is True
+
+
+def test_package_manifest_preserves_all_typed_meshagent_configuration(
+    tmp_path: Path,
+) -> None:
+    rules_path = tmp_path / "rules.md"
+    rules_path.write_text("rules", encoding="utf-8")
+    skill_path = tmp_path / "skill"
+    skill_path.mkdir()
+    module_path = _write_runtime_module(tmp_path)
+
+    package = (
+        Package.meshagent(name="assistant")
+        .env({"CUSTOM": "value"})
+        .files(str(rules_path), dest="/workspace/rules.md", read_only=True)
+        .skills(str(skill_path))
+        .instructions(str(rules_path))
+        .mount(str(tmp_path), dest="/workspace")
+        .run("echo build")
+        .apt_get_install("curl")
+        .install("requests", "2.32.0")
+        .optimization(False)
+        .chat_channel()
+        .mail_channel("assistant@example.com")
+        .queue_channel("jobs")
+        .heartbeat("@hourly", "Check status")
+        .shell(image="ubuntu:latest")
+        .advanced_shell(image="meshagent/cli:latest")
+        .web_fetch()
+        .web_search()
+        .image_gen(model="gpt-image-1")
+        .apply_patch()
+        .storage(read_only=True)
+        .table_read(tables=["users"], namespace="prod::analytics")
+        .table_write(tables=["events"])
+        .time()
+        .uuid()
+        .memory(path="assistant/memories", model="gpt-5.4-mini")
+        .document_authoring()
+        .discovery()
+        .computer_use(starting_url="https://example.com", allow_goto_url=True)
+        .mcp()
+        .use_model("gpt-5.4-mini")
+    )
+    package._bind_module_path(module_path=module_path)
+    package._bind_module_export(export_name="build", export_is_factory=True)
+
+    manifest = package.to_manifest()
+
+    assert manifest.kind == "meshagent"
+    assert manifest.name == "assistant"
+    assert manifest.base_path is None
+    assert [asset.kind for asset in manifest.mounts] == ["mount"]
+    assert [asset.kind for asset in manifest.files] == ["file"]
+    assert [asset.kind for asset in manifest.skills] == ["skill"]
+    assert [asset.kind for asset in manifest.instructions] == ["instruction"]
+    assert manifest.files[0].source == rules_path
+    assert manifest.files[0].dest == "/workspace/rules.md"
+    assert manifest.files[0].read_only is True
+    assert manifest.env == {"CUSTOM": "value"}
+    assert [step.type for step in manifest.image_build_steps] == [
+        "run",
+        "apt_get_install",
+        "python_install",
+    ]
+    assert manifest.image_build_steps[0].command == "echo build"
+    assert manifest.image_build_steps[1].packages == ["curl"]
+    assert manifest.image_build_steps[2].requirements == ["requests==2.32.0"]
+    assert manifest.optimize_image is False
+    assert manifest.include_workspace is True
+    assert manifest.module_path == module_path.resolve()
+    assert manifest.module_export_name == "build"
+    assert manifest.module_export_is_factory is True
+    assert manifest.model == "gpt-5.4-mini"
+    assert manifest.channels == ["chat", "mail:assistant@example.com", "queue:jobs"]
+    assert manifest.heartbeat == package_module.PackageHeartbeatManifest(
+        cron="@hourly",
+        prompt="Check status",
+    )
+    assert manifest.shell_image == "ubuntu:latest"
+    assert manifest.shell_enabled is True
+    assert manifest.advanced_shell_image == "meshagent/cli:latest"
+    assert manifest.advanced_shell_enabled is True
+    assert manifest.web_fetch_enabled is True
+    assert manifest.web_search_enabled is True
+    assert manifest.image_gen_enabled is True
+    assert manifest.image_gen_model == "gpt-image-1"
+    assert manifest.apply_patch_enabled is True
+    assert manifest.storage_enabled is True
+    assert manifest.storage_read_only is True
+    assert manifest.table_read == ["users"]
+    assert manifest.table_write == ["events"]
+    assert manifest.dataset_namespace == ["prod", "analytics"]
+    assert manifest.time_enabled is True
+    assert manifest.uuid_enabled is True
+    assert manifest.memory_config == package_module.PackageMemoryToolManifest(
+        name="memories",
+        namespace=["assistant"],
+        model="gpt-5.4-mini",
+    )
+    assert manifest.document_authoring_enabled is True
+    assert manifest.discovery_enabled is True
+    assert manifest.computer_use_config == package_module.PackageComputerUseManifest(
+        starting_url="https://example.com",
+        allow_goto_url=True,
+    )
+    assert manifest.mcp_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("package", "kind"),
+    [
+        (Package(name="base"), "base"),
+        (Package.debian(name="debian"), "debian"),
+        (Package.python(name="python"), "python"),
+        (Package.meshagent(name="meshagent"), "meshagent"),
+    ],
+)
+def test_package_manifest_preserves_package_subclass(
+    package: Package, kind: str
+) -> None:
+    assert package.to_manifest().kind == kind
 
 
 def test_package_python_exposes_python_package() -> None:
@@ -568,9 +705,9 @@ async def test_build_package_image_uses_room_image_build_api(
     captured: dict[str, object] = {}
     monkeypatch.delenv("MESHAGENT_ARCH", raising=False)
 
-    def _fake_parse_build_tag(tag: str) -> str:
+    def _fake_parse_build_tag(tag: str) -> _FakePackageTag:
         captured["tag"] = tag
-        return "parsed-tag"
+        return _FakePackageTag("parsed-tag")
 
     async def _fake_run_image_build_stage(**kwargs) -> None:
         captured.update(kwargs)
@@ -579,6 +716,11 @@ async def test_build_package_image_uses_room_image_build_api(
         )
 
     monkeypatch.setattr(image_module, "_parse_build_tag", _fake_parse_build_tag)
+    monkeypatch.setattr(
+        image_module,
+        "_resolve_room_registry_target",
+        _same_package_registry_target,
+    )
     monkeypatch.setattr(
         image_module, "_run_image_build_stage", _fake_run_image_build_stage
     )
@@ -591,11 +733,12 @@ async def test_build_package_image_uses_room_image_build_api(
         resolved_room="demo-room",
     )
 
-    assert image_tag == "registry.meshagent.com/packages/assistant:latest"
-    assert captured["tag"] == image_tag
+    assert image_tag == "registry.meshagent.com/project-key/package-assistant:latest"
+    assert captured["tag"] == "package-assistant:latest"
     assert captured["resolved_project_id"] == "project-123"
     assert captured["resolved_room"] == "demo-room"
-    assert captured["parsed_tag"] == "parsed-tag"
+    assert captured["parsed_tag"] == image_tag
+    assert captured["project_registry"] == "registry.meshagent.com"
     assert captured["builder_name"] == "package-assistant"
     assert captured["arch"] == "amd64"
     assert captured["optimize"] is True
@@ -616,14 +759,19 @@ async def test_build_package_image_respects_package_optimization_override(
 
     captured: dict[str, object] = {}
 
-    def _fake_parse_build_tag(tag: str) -> str:
+    def _fake_parse_build_tag(tag: str) -> _FakePackageTag:
         captured["tag"] = tag
-        return "parsed-tag"
+        return _FakePackageTag("parsed-tag")
 
     async def _fake_run_image_build_stage(**kwargs) -> None:
         captured.update(kwargs)
 
     monkeypatch.setattr(image_module, "_parse_build_tag", _fake_parse_build_tag)
+    monkeypatch.setattr(
+        image_module,
+        "_resolve_room_registry_target",
+        _same_package_registry_target,
+    )
     monkeypatch.setattr(
         image_module, "_run_image_build_stage", _fake_run_image_build_stage
     )
@@ -647,9 +795,9 @@ async def test_build_meshagent_package_image_uses_python_sdk_base(
 
     captured: dict[str, object] = {}
 
-    def _fake_parse_build_tag(tag: str) -> str:
+    def _fake_parse_build_tag(tag: str) -> _FakePackageTag:
         captured["tag"] = tag
-        return "parsed-tag"
+        return _FakePackageTag("parsed-tag")
 
     async def _fake_run_image_build_stage(**kwargs) -> None:
         captured.update(kwargs)
@@ -658,6 +806,11 @@ async def test_build_meshagent_package_image_uses_python_sdk_base(
         )
 
     monkeypatch.setattr(image_module, "_parse_build_tag", _fake_parse_build_tag)
+    monkeypatch.setattr(
+        image_module,
+        "_resolve_room_registry_target",
+        _same_package_registry_target,
+    )
     monkeypatch.setattr(
         image_module, "_run_image_build_stage", _fake_run_image_build_stage
     )
@@ -687,15 +840,20 @@ async def test_build_package_image_uses_meshagent_arch_override(
 
     captured: dict[str, object] = {}
 
-    def _fake_parse_build_tag(tag: str) -> str:
+    def _fake_parse_build_tag(tag: str) -> _FakePackageTag:
         captured["tag"] = tag
-        return "parsed-tag"
+        return _FakePackageTag("parsed-tag")
 
     async def _fake_run_image_build_stage(**kwargs) -> None:
         captured.update(kwargs)
 
     monkeypatch.setenv("MESHAGENT_ARCH", "arm64")
     monkeypatch.setattr(image_module, "_parse_build_tag", _fake_parse_build_tag)
+    monkeypatch.setattr(
+        image_module,
+        "_resolve_room_registry_target",
+        _same_package_registry_target,
+    )
     monkeypatch.setattr(
         image_module, "_run_image_build_stage", _fake_run_image_build_stage
     )
@@ -720,14 +878,19 @@ async def test_build_package_image_allows_builder_name_override(
 
     captured: dict[str, object] = {}
 
-    def _fake_parse_build_tag(tag: str) -> str:
+    def _fake_parse_build_tag(tag: str) -> _FakePackageTag:
         captured["tag"] = tag
-        return "parsed-tag"
+        return _FakePackageTag("parsed-tag")
 
     async def _fake_run_image_build_stage(**kwargs) -> None:
         captured.update(kwargs)
 
     monkeypatch.setattr(image_module, "_parse_build_tag", _fake_parse_build_tag)
+    monkeypatch.setattr(
+        image_module,
+        "_resolve_room_registry_target",
+        _same_package_registry_target,
+    )
     monkeypatch.setattr(
         image_module, "_run_image_build_stage", _fake_run_image_build_stage
     )
@@ -1358,7 +1521,7 @@ async def test_run_package_uses_built_image_when_commands_configured(
 
     async def _fake_build_package_image(**kwargs) -> str:
         captured["build_kwargs"] = kwargs
-        return "registry.meshagent.com/packages/assistant:latest"
+        return "registry.meshagent.com/project-key/package-assistant:latest"
 
     monkeypatch.setattr(helper_module, "resolve_room", lambda room: room)
     monkeypatch.setattr(helper_module, "resolve_project_id", _fake_resolve_project_id)
@@ -1387,7 +1550,10 @@ async def test_run_package_uses_built_image_when_commands_configured(
         "builder_name": None,
         "status_callback": None,
     }
-    assert captured["image"] == "registry.meshagent.com/packages/assistant:latest"
+    assert (
+        captured["image"]
+        == "registry.meshagent.com/project-key/package-assistant:latest"
+    )
     assert captured["command"] == "python agent.py"
     assert captured["working_dir"] == "/package"
 
@@ -1553,7 +1719,7 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
 
     async def _fake_build_package_image(**kwargs) -> str:
         captured["build_kwargs"] = kwargs
-        return "registry.meshagent.com/packages/assistant:latest"
+        return "registry.meshagent.com/project-key/package-assistant:latest"
 
     monkeypatch.setattr(helper_module, "resolve_room", lambda room: room)
     monkeypatch.setattr(helper_module, "resolve_project_id", _fake_resolve_project_id)
@@ -1582,7 +1748,7 @@ async def test_deploy_package_uses_built_image_when_commands_configured(
     }
     assert (
         captured["service"].container.image
-        == "registry.meshagent.com/packages/assistant:latest"
+        == "registry.meshagent.com/project-key/package-assistant:latest"
     )
     assert captured["service"].container.command == "python agent.py"
     assert captured["service"].container.working_dir == "/package"

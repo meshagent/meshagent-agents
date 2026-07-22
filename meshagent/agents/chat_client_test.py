@@ -72,13 +72,18 @@ async def _receive_until(
 
 
 class _RecordingChatClient(BaseChatClient):
-    def __init__(self) -> None:
+    def __init__(self, *, participant_id: str | None = None) -> None:
         super().__init__(timeout=1)
         self.sent: list[dict[str, Any]] = []
+        self._participant_id = participant_id
 
     @property
     def remote_participant_name(self) -> str:
         return "assistant"
+
+    @property
+    def local_participant_id(self) -> str | None:
+        return self._participant_id
 
     async def _start_transport(self) -> None:
         return None
@@ -97,6 +102,41 @@ def test_agent_message_serializes_created_at_by_default() -> None:
 
     assert isinstance(dumped["created_at"], str)
     assert dumped["created_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_client_tool_requests_are_targeted_and_deduplicated() -> None:
+    client = _RecordingChatClient(participant_id="participant-current")
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    handled_request_ids: list[str] = []
+
+    async def respond(payload: dict[str, Any]) -> None:
+        handled_request_ids.append(payload["request_id"])
+
+    session._respond_to_client_tool_call = respond  # type: ignore[method-assign]
+    request = {
+        "type": "meshagent.agent.client_tool_call.requested",
+        "thread_id": session.thread_path,
+        "turn_id": "turn-1",
+        "request_id": "request-current",
+        "toolkit": "client",
+        "tool": "ask_user",
+        "arguments": {},
+        "target_participant_id": "participant-current",
+    }
+
+    client._handle_agent_payload(request)
+    client._handle_agent_payload(request)
+    client._handle_agent_payload(
+        {
+            **request,
+            "request_id": "request-stale",
+            "target_participant_id": "participant-stale",
+        }
+    )
+    await _wait_for(lambda: handled_request_ids == ["request-current"])
+
+    assert handled_request_ids == ["request-current"]
 
 
 def test_chat_thread_session_records_failed_turn_end_for_rendering() -> None:
@@ -524,6 +564,15 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
         await websocket.prepare(request)
         connection_index = len(sockets)
         sockets.append(websocket)
+        await websocket.send_bytes(
+            encoding.encode(
+                AgentConnectionStatus(
+                    type=AGENT_EVENT_CONNECTION_STATUS,
+                    status="connected",
+                    participant_id=f"websocket-participant-{connection_index + 1}",
+                )
+            )
+        )
         socket_connected.set()
         async for message in websocket:
             decoded = encoding.decode(message)
@@ -563,6 +612,9 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
 
         client_event_task = asyncio.create_task(collect_client_events())
         await client.start()
+        await _wait_for(
+            lambda: client.local_participant_id == "websocket-participant-1"
+        )
         await _wait_for(lambda: len(sockets) == 1)
         session = await client.open_thread("/threads/reconnect.thread")
         await asyncio.wait_for(first_open_received.wait(), timeout=1)
@@ -594,6 +646,9 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
         socket_connected.clear()
         await asyncio.wait_for(second_open_received.wait(), timeout=1)
         assert len(sockets) >= 2
+        await _wait_for(
+            lambda: client.local_participant_id == "websocket-participant-2"
+        )
         reopened = next(
             payload
             for payload in reversed(payloads)

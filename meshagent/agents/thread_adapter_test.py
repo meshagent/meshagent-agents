@@ -11,6 +11,17 @@ from meshagent.agents.thread_adapter import ThreadAdapter
 from meshagent.tools import ToolContext
 
 
+def test_default_format_message_uses_user_for_you_presentation_label() -> None:
+    assert (
+        thread_adapter_module.default_format_message(
+            user_name="you",
+            message="tell me a story",
+            iso_timestamp="2026-07-11T00:00:00Z",
+        )
+        == "user said at 2026-07-11T00:00:00Z: tell me a story"
+    )
+
+
 class _FakeThreadAdapter(ThreadAdapter):
     def __init__(self) -> None:
         super().__init__(room=object(), path="/threads/test")  # type: ignore[arg-type]

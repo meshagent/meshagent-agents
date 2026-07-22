@@ -29,6 +29,7 @@ from .messages import (
     AGENT_EVENT_IMAGE_GENERATION_FAILED,
     AGENT_EVENT_IMAGE_GENERATION_PARTIAL,
     AGENT_EVENT_IMAGE_GENERATION_STARTED,
+    AGENT_EVENT_CONNECTION_STATUS,
     AGENT_EVENT_THREAD_CLEARED,
     AGENT_EVENT_THREAD_STARTED,
     AGENT_EVENT_THREAD_STATUS,
@@ -61,6 +62,7 @@ from .messages import (
     AgentFileContentStarted,
     AgentAudioGenerationDelta,
     AgentMessage,
+    AgentConnectionStatus,
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
     AgentRealtimeConnectionInfo,
@@ -1605,6 +1607,17 @@ class WebSocketChatChannel(BaseChatChannel):
         await websocket.prepare(request)
 
         participant = self._participant_for_websocket_connection(auth_result)
+        handshake = AgentConnectionStatus(
+            type=AGENT_EVENT_CONNECTION_STATUS,
+            status="connected",
+            message="chat websocket connected",
+            participant_id=participant.id,
+        )
+        encoded_handshake = self._encoding.encode(handshake)
+        if isinstance(encoded_handshake, bytes):
+            await websocket.send_bytes(encoded_handshake)
+        else:
+            await websocket.send_str(encoded_handshake)
         connection = _WebSocketChatConnection(
             participant=participant,
             websocket=websocket,

@@ -34,6 +34,7 @@ from .messages import (
     AGENT_EVENT_FILE_CONTENT_DELTA,
     AGENT_EVENT_REASONING_CONTENT_DELTA,
     AGENT_EVENT_TEXT_CONTENT_DELTA,
+    AGENT_EVENT_TOOL_CALL_ENDED,
     AGENT_EVENT_TOOL_CALL_LOG_DELTA,
     AGENT_EVENT_TOOL_CALL_STARTED,
     AGENT_EVENT_THREAD_EVENT,
@@ -102,7 +103,7 @@ from .thread_storage import (
 
 if TYPE_CHECKING:
     from .adapter import LLMAdapter
-    from meshagent.api.room_server_client import DatasetsClient
+    from meshagent.api.room_server_client import DatasetTableStats, DatasetsClient
 
 logger = logging.getLogger("agent.dataset_thread_storage")
 
@@ -705,7 +706,16 @@ class DatasetThreadStorage(ThreadStorage):
         datasets = self._client
         thread_dir = self._thread_dir_or_raise()
         table_name, namespace = self._thread_list_table(thread_dir=thread_dir)
-        await self._ensure_thread_list_table(client=datasets, thread_dir=thread_dir)
+        table_existed = await self._ensure_thread_list_table(
+            client=datasets,
+            thread_dir=thread_dir,
+        )
+        if table_existed:
+            await self._optimize_if_fragmented(
+                client=datasets,
+                table_name=table_name,
+                namespace=namespace,
+            )
         previous: dict[str, ThreadListEntry] = {}
         async for event in datasets.watch_table(
             table=table_name,
@@ -752,7 +762,16 @@ class DatasetThreadStorage(ThreadStorage):
         thread_dir: str,
     ) -> list[ThreadListEntry]:
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
-        await cls._ensure_thread_list_table(client=client, thread_dir=thread_dir)
+        table_existed = await cls._ensure_thread_list_table(
+            client=client,
+            thread_dir=thread_dir,
+        )
+        if table_existed:
+            await cls._optimize_if_fragmented(
+                client=client,
+                table_name=table_name,
+                namespace=namespace,
+            )
         rows = await client.search(table=table_name, namespace=namespace)
         return cls._entries_from_records(records=rows.to_pylist())
 
@@ -762,7 +781,7 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         client: DatasetsClient,
         thread_dir: str,
-    ) -> None:
+    ) -> bool:
         table_name, namespace = cls._thread_list_table(thread_dir=thread_dir)
         schema = pa.schema(
             [
@@ -772,16 +791,57 @@ class DatasetThreadStorage(ThreadStorage):
                 pa.field("modified_at", pa.string()),
             ]
         )
-        if not await cls._table_exists(
+        table_existed = await cls._table_exists(
             client=client,
             table_name=table_name,
             namespace=namespace,
-        ):
+        )
+        if not table_existed:
             await client.create_table_with_schema(
                 name=table_name,
                 schema=schema,
                 mode="create_if_not_exists",
                 namespace=namespace,
+            )
+        return table_existed
+
+    @staticmethod
+    def _stats_show_fragmentation(*, stats: DatasetTableStats) -> bool:
+        num_fragments = stats.dataset.get("num_fragments")
+        return type(num_fragments) is int and num_fragments > 1
+
+    @classmethod
+    async def _optimize_if_fragmented(
+        cls,
+        *,
+        client: DatasetsClient,
+        table_name: str,
+        namespace: list[str] | None,
+    ) -> None:
+        try:
+            stats = await client.stats(table=table_name, namespace=namespace)
+        except Exception:
+            logger.exception(
+                "failed to load dataset thread table stats for %s",
+                table_name,
+            )
+            return
+        if not cls._stats_show_fragmentation(stats=stats):
+            return
+        try:
+            await client.optimize(
+                table=table_name,
+                namespace=namespace,
+                config=DatasetOptimizeConfig(
+                    compact_files=True,
+                    optimize_indices=False,
+                    cleanup_old_versions=False,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "failed to optimize fragmented dataset thread table %s",
+                table_name,
             )
 
     @staticmethod
@@ -902,6 +962,7 @@ class DatasetThreadStorage(ThreadStorage):
             str, _ActiveImageGeneration
         ] = {}
         self._pending_insert_rows: list[_StoredThreadRow] = []
+        self._write_blocked_error: ValueError | None = None
 
     def _thread_dir_or_raise(self) -> str:
         if self._thread_dir is None or self._thread_dir.strip() == "":
@@ -990,6 +1051,7 @@ class DatasetThreadStorage(ThreadStorage):
         processor_task = self._processor_task
         if processor_task is None:
             await self._flush_all_active(reason="cancelled")
+            self._discard_unaccepted_user_turn_rows()
             await self._flush_pending_insert_rows()
             await self._wait_for_optimize_task()
             return
@@ -1045,11 +1107,12 @@ class DatasetThreadStorage(ThreadStorage):
 
         schema = self._schema()
         existing_schema: pa.Schema | None = None
-        if await self._table_exists(
+        table_existed = await self._table_exists(
             client=self._client,
             table_name=self._table_name,
             namespace=self._namespace,
-        ):
+        )
+        if table_existed:
             existing_schema = await self._client.inspect(
                 table=self._table_name,
                 namespace=self._namespace,
@@ -1082,6 +1145,13 @@ class DatasetThreadStorage(ThreadStorage):
                         namespace=self._namespace,
                     )
 
+        if table_existed:
+            await self._optimize_if_fragmented(
+                client=self._client,
+                table_name=self._table_name,
+                namespace=self._namespace,
+            )
+
         rows = await self._search_ready_rows(schema=schema)
         self._rows = sorted(
             [
@@ -1094,6 +1164,12 @@ class DatasetThreadStorage(ThreadStorage):
             ],
             key=lambda row: row.sequence,
         )
+        for previous, current in zip(self._rows, self._rows[1:]):
+            if previous.sequence == current.sequence:
+                raise ValueError(
+                    f"duplicate dataset thread sequence {current.sequence} "
+                    f"in {self._path}"
+                )
         self._next_sequence = max((row.sequence for row in self._rows), default=-1) + 1
         self._ready = True
 
@@ -1136,6 +1212,11 @@ class DatasetThreadStorage(ThreadStorage):
             try:
                 data = json.loads(raw_data)
             except json.JSONDecodeError:
+                return None
+        elif isinstance(raw_data, (bytes, bytearray, memoryview)):
+            try:
+                data = json.loads(bytes(raw_data))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 return None
         else:
             return None
@@ -1228,6 +1309,7 @@ class DatasetThreadStorage(ThreadStorage):
         if isinstance(queued, _StopQueue):
             try:
                 await self._flush_all_active(reason="cancelled")
+                self._discard_unaccepted_user_turn_rows()
                 await self._flush_pending_insert_rows()
             except Exception as exc:
                 if not queued.future.done():
@@ -1247,6 +1329,12 @@ class DatasetThreadStorage(ThreadStorage):
         sender: Participant | None,
     ) -> None:
         if isinstance(message, ThreadCleared):
+            reserved_rows = [
+                *self._pending_user_turn_rows.values(),
+                *self._pending_audio_commit_rows_by_turn_id.values(),
+            ]
+            for row in reserved_rows:
+                self._discard_reserved_row(row=row)
             self._pending_user_turns.clear()
             self._pending_user_turn_rows.clear()
             self._pending_audio_commit_rows_by_turn_id.clear()
@@ -1262,10 +1350,12 @@ class DatasetThreadStorage(ThreadStorage):
                 message=message,
                 sender=sender,
             )
+            stored_message = self._turn_input_with_sender_name(queued=queued)
+            if message.turn_id is not None:
+                await self._append_message_row(message=stored_message)
+                return
             self._pending_user_turns[message.message_id] = queued
-            row = await self._append_message_row(
-                message=self._turn_input_with_sender_name(queued=queued)
-            )
+            row = await self._reserve_message_row(message=stored_message)
             self._pending_user_turn_rows[message.message_id] = row
             return
 
@@ -1278,11 +1368,9 @@ class DatasetThreadStorage(ThreadStorage):
                 message=message,
                 sender=sender,
             )
-            self._pending_user_turns[message.message_id] = queued
-            row = await self._append_message_row(
+            await self._append_message_row(
                 message=self._turn_input_with_sender_name(queued=queued)
             )
-            self._pending_user_turn_rows[message.message_id] = row
             return
 
         if isinstance(message, TurnStartAccepted):
@@ -1311,13 +1399,23 @@ class DatasetThreadStorage(ThreadStorage):
 
         if isinstance(message, TurnSteerRejected):
             self._pending_user_turns.pop(message.source_message_id, None)
-            self._pending_user_turn_rows.pop(message.source_message_id, None)
+            pending_row = self._pending_user_turn_rows.pop(
+                message.source_message_id,
+                None,
+            )
+            if pending_row is not None:
+                self._discard_reserved_row(row=pending_row)
             await self._append_message_row(message=message)
             return
 
         if isinstance(message, TurnStartRejected):
             self._pending_user_turns.pop(message.source_message_id, None)
-            self._pending_user_turn_rows.pop(message.source_message_id, None)
+            pending_row = self._pending_user_turn_rows.pop(
+                message.source_message_id,
+                None,
+            )
+            if pending_row is not None:
+                self._discard_reserved_row(row=pending_row)
             await self._append_message_row(message=message)
             return
 
@@ -1682,8 +1780,10 @@ class DatasetThreadStorage(ThreadStorage):
             await self._append_message_row(message=accepted_message, turn_id=turn_id)
             return
         del queued
-        if turn_id is not None and pending_row is not None:
-            await self._set_row_turn_id(row=pending_row, turn_id=turn_id)
+        if pending_row is not None:
+            if turn_id is not None:
+                self._set_reserved_row_turn_id(row=pending_row, turn_id=turn_id)
+            self._queue_reserved_row_for_insert(row=pending_row)
         await self._append_message_row(message=accepted_message, turn_id=turn_id)
 
     def _turn_input_with_sender_name(
@@ -1805,7 +1905,6 @@ class DatasetThreadStorage(ThreadStorage):
         ):
             return
 
-        del reason
         if active.toolkit is not None and active.tool is not None:
             await self._append_message_row(
                 message=AgentToolCallStarted(
@@ -1836,8 +1935,30 @@ class DatasetThreadStorage(ThreadStorage):
         if log_message is not None:
             await self._append_message_row(message=log_message)
 
-        if ended_message is not None:
-            await self._append_message_row(message=ended_message)
+        if ended_message is None:
+            code = reason if reason in {"cancelled", "failed"} else "incomplete"
+            ended_message = AgentToolCallEnded(
+                type=AGENT_EVENT_TOOL_CALL_ENDED,
+                message_id=f"{active.message_id}:terminal",
+                thread_id=self.path,
+                turn_id=active.turn_id,
+                item_id=active.item_id,
+                namespace=active.namespace,
+                call_id=active.call_id,
+                toolkit=active.toolkit,
+                tool=active.tool,
+                error=AgentError(
+                    message=(
+                        "Tool call was cancelled"
+                        if code == "cancelled"
+                        else "Tool call ended without a result"
+                    ),
+                    code=code,
+                ),
+                provider=active.provider,
+                model=active.model,
+            )
+        await self._append_message_row(message=ended_message)
 
     async def _persist_generated_image_result(
         self,
@@ -2397,59 +2518,140 @@ class DatasetThreadStorage(ThreadStorage):
 
     async def _flush_pending_insert_rows(self) -> None:
         await self._ensure_ready()
-        rows = self._pending_insert_rows
+        if self._write_blocked_error is not None:
+            raise self._write_blocked_error
+        reserved_sequences = [
+            row.sequence
+            for row in (
+                *self._pending_user_turn_rows.values(),
+                *self._pending_audio_commit_rows_by_turn_id.values(),
+            )
+        ]
+        first_reserved_sequence = min(reserved_sequences, default=None)
+        rows = [
+            row
+            for row in self._pending_insert_rows
+            if first_reserved_sequence is None or row.sequence < first_reserved_sequence
+        ]
         if len(rows) == 0:
             return
         rows = sorted(rows, key=lambda stored: stored.sequence)
-        await self._client.insert(
-            table=self._table_name,
-            namespace=self._namespace,
-            records=[
-                {
-                    "turn_id": row.turn_id,
-                    "item_id": row.item_id,
-                    "type": row.message_type,
-                    "sequence": row.sequence,
-                    "timestamp": row.timestamp,
-                    "data": DatasetJson(row.data),
-                    "attachment": row.attachment,
-                }
-                for row in rows
-            ],
-        )
-        del self._pending_insert_rows[: len(rows)]
+        try:
+            await self._client.insert(
+                table=self._table_name,
+                namespace=self._namespace,
+                records=[
+                    {
+                        "turn_id": row.turn_id,
+                        "item_id": row.item_id,
+                        "type": row.message_type,
+                        "sequence": row.sequence,
+                        "timestamp": row.timestamp,
+                        "data": DatasetJson(row.data),
+                        "attachment": row.attachment,
+                    }
+                    for row in rows
+                ],
+            )
+        except Exception:
+            await self._discard_rows_confirmed_after_insert_error(rows=rows)
+            raise
+        inserted_sequences = {row.sequence for row in rows}
+        self._pending_insert_rows = [
+            row
+            for row in self._pending_insert_rows
+            if row.sequence not in inserted_sequences
+        ]
         for _ in rows:
             self._note_appended_row()
 
-    async def _set_row_turn_id(self, *, row: _StoredThreadRow, turn_id: str) -> None:
-        if row.turn_id == turn_id and row.data.get("turn_id") == turn_id:
+    async def _discard_rows_confirmed_after_insert_error(
+        self,
+        *,
+        rows: list[_StoredThreadRow],
+    ) -> None:
+        try:
+            stored_table = await self._client.search(
+                table=self._table_name,
+                namespace=self._namespace,
+            )
+        except Exception:
             return
-        await self._flush_pending_insert_rows()
-        updated_data = {**row.data, "turn_id": turn_id}
-        await self._client.merge(
-            table=self._table_name,
-            namespace=self._namespace,
-            on="sequence",
-            records=[
-                {
-                    "turn_id": turn_id,
-                    "item_id": row.item_id,
-                    "type": row.message_type,
-                    "sequence": row.sequence,
-                    "timestamp": row.timestamp,
-                    "data": DatasetJson(updated_data),
-                    "attachment": row.attachment,
-                }
-            ],
+
+        stored_by_sequence: dict[int, _StoredThreadRow] = {}
+        for record in stored_table.to_pylist():
+            stored = self._stored_row_from_record(record=record)
+            if stored is None:
+                continue
+            previous = stored_by_sequence.setdefault(stored.sequence, stored)
+            if previous is not stored:
+                error = ValueError(
+                    f"duplicate dataset thread sequence {stored.sequence} "
+                    f"in {self._path} after insert failure"
+                )
+                self._write_blocked_error = error
+                raise error
+
+        confirmed_sequences: set[int] = set()
+        for row in rows:
+            stored = stored_by_sequence.get(row.sequence)
+            if stored is None:
+                continue
+            if not self._same_append_record(left=row, right=stored):
+                error = ValueError(
+                    f"conflicting dataset thread sequence {row.sequence} "
+                    f"in {self._path} after insert failure"
+                )
+                self._write_blocked_error = error
+                raise error
+            confirmed_sequences.add(row.sequence)
+
+        if not confirmed_sequences:
+            return
+        self._pending_insert_rows = [
+            row
+            for row in self._pending_insert_rows
+            if row.sequence not in confirmed_sequences
+        ]
+        for _ in confirmed_sequences:
+            self._note_appended_row()
+
+    @staticmethod
+    def _same_append_record(
+        *,
+        left: _StoredThreadRow,
+        right: _StoredThreadRow,
+    ) -> bool:
+        return (
+            left.sequence == right.sequence
+            and left.turn_id == right.turn_id
+            and left.item_id == right.item_id
+            and left.message_type == right.message_type
+            and left.data == right.data
+            and left.attachment == right.attachment
         )
-        row.turn_id = turn_id
-        row.data = updated_data
 
     def _set_reserved_row_turn_id(self, *, row: _StoredThreadRow, turn_id: str) -> None:
         if row.turn_id == turn_id and row.data.get("turn_id") == turn_id:
             return
         row.turn_id = turn_id
         row.data = {**row.data, "turn_id": turn_id}
+
+    def _queue_reserved_row_for_insert(self, *, row: _StoredThreadRow) -> None:
+        if row not in self._pending_insert_rows:
+            self._pending_insert_rows.append(row)
+
+    def _discard_reserved_row(self, *, row: _StoredThreadRow) -> None:
+        if row in self._pending_insert_rows:
+            return
+        with contextlib.suppress(ValueError):
+            self._rows.remove(row)
+
+    def _discard_unaccepted_user_turn_rows(self) -> None:
+        for row in self._pending_user_turn_rows.values():
+            self._discard_reserved_row(row=row)
+        self._pending_user_turns.clear()
+        self._pending_user_turn_rows.clear()
 
     def _finalize_audio_commit_row(
         self,
@@ -2465,8 +2667,7 @@ class DatasetThreadStorage(ThreadStorage):
             "status": status,
             "transcription_item_id": transcription_item_id,
         }
-        if row not in self._pending_insert_rows:
-            self._pending_insert_rows.append(row)
+        self._queue_reserved_row_for_insert(row=row)
 
     def _note_appended_row(self) -> None:
         if self._optimize_after_append_count <= 0:

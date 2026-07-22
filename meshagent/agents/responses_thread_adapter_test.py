@@ -441,6 +441,41 @@ def test_openai_event_publisher_emits_apply_patch_lifecycle_from_stream_events()
     )
 
 
+def test_openai_event_publisher_preserves_cancelled_handler_error_code() -> None:
+    messages: list[AgentMessage] = []
+    publisher = make_openai_agent_event_publisher(
+        turn_id="turn-1",
+        thread_id="thread-1",
+        callback=messages.append,
+    )
+    publisher(
+        {
+            "type": "meshagent.handler.added",
+            "item": {
+                "id": "tool-1",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "client.pick_color",
+                "arguments": "{}",
+            },
+        }
+    )
+    publisher(
+        {
+            "type": "meshagent.handler.done",
+            "item_id": "tool-1",
+            "error": "client toolkit call cancelled: participant_disconnected",
+            "error_code": "cancelled",
+        }
+    )
+
+    ended = next(
+        message for message in messages if isinstance(message, AgentToolCallEnded)
+    )
+    assert ended.error is not None
+    assert ended.error.code == "cancelled"
+
+
 def test_openai_event_publisher_emits_apply_patch_fallback_delta_from_handler() -> None:
     messages: list[AgentMessage] = []
     publisher = make_openai_agent_event_publisher(

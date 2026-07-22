@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import pyarrow as pa
@@ -76,8 +77,9 @@ from meshagent.agents.messages import (
     TurnStartAccepted,
     TurnSteer,
     TurnSteerAccepted,
+    parse_agent_message,
 )
-from meshagent.api import DatasetJson, Participant, RoomException
+from meshagent.api import DatasetJson, DatasetTableStats, Participant, RoomException
 from meshagent.api.messaging import BinaryContent, JsonContent, TextContent
 
 
@@ -88,7 +90,9 @@ class _FakeDatasets:
         self.create_calls: list[dict[str, Any]] = []
         self.insert_calls: list[dict[str, Any]] = []
         self.merge_calls: list[dict[str, Any]] = []
+        self.stats_calls: list[dict[str, Any]] = []
         self.optimize_calls: list[dict[str, Any]] = []
+        self.fragment_counts: dict[tuple[tuple[str, ...], str], int] = {}
         self.update_calls: list[dict[str, Any]] = []
         self.raise_on_existing_create = False
 
@@ -280,6 +284,24 @@ class _FakeDatasets:
             }
         )
 
+    async def stats(
+        self,
+        *,
+        table: str,
+        namespace: list[str] | None = None,
+    ) -> DatasetTableStats:
+        self.stats_calls.append(
+            {
+                "table": table,
+                "namespace": namespace,
+            }
+        )
+        key = self._key(table=table, namespace=namespace)
+        return DatasetTableStats(
+            dataset={"num_fragments": self.fragment_counts.get(key, 1)},
+            data={},
+        )
+
 
 class _BlockingInspectDatasets(_FakeDatasets):
     def __init__(self) -> None:
@@ -330,6 +352,56 @@ class _BlockingInsertDatasets(_FakeDatasets):
         self.insert_started.set()
         await self.insert_release.wait()
         await super().insert(table=table, records=records, namespace=namespace)
+
+
+class _PartialInsertFailureDatasets(_FakeDatasets):
+    def __init__(self, *, committed_records: int) -> None:
+        super().__init__()
+        self._committed_records = committed_records
+        self._failed = False
+
+    async def insert(
+        self,
+        *,
+        table: str,
+        records: list[dict[str, Any]],
+        namespace: list[str] | None = None,
+    ) -> None:
+        if self._failed:
+            await super().insert(
+                table=table,
+                records=records,
+                namespace=namespace,
+            )
+            return
+        self._failed = True
+        committed = records[: self._committed_records]
+        if committed:
+            await super().insert(
+                table=table,
+                records=committed,
+                namespace=namespace,
+            )
+        raise RoomException("injected dataset insert failure", status_code=503)
+
+
+class _ConflictingInsertFailureDatasets(_FakeDatasets):
+    async def insert(
+        self,
+        *,
+        table: str,
+        records: list[dict[str, Any]],
+        namespace: list[str] | None = None,
+    ) -> None:
+        conflicting = dict(records[0])
+        data = conflicting["data"].to_json()
+        conflicting["data"] = DatasetJson({**data, "message_id": "conflict"})
+        await super().insert(
+            table=table,
+            records=[conflicting],
+            namespace=namespace,
+        )
+        raise RoomException("injected conflicting insert", status_code=503)
 
 
 class _EventuallyVisibleSearchDatasets(_FakeDatasets):
@@ -506,6 +578,350 @@ def _row_data(row: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"type":"message","text":"hello"}',
+        bytearray(b'{"type":"message","text":"hello"}'),
+        memoryview(b'{"type":"message","text":"hello"}'),
+    ],
+)
+def test_dataset_thread_storage_decodes_jsonb_binary_data(data: object) -> None:
+    row = DatasetThreadStorage._stored_row_from_record(
+        record={
+            "item_id": "item-1",
+            "sequence": 1,
+            "data": data,
+        }
+    )
+
+    assert row is not None
+    assert row.message_type == "message"
+    assert row.data == {"type": "message", "text": "hello"}
+
+
+def _find_conformance_corpus() -> Path:
+    relative_path = Path("testdata/agents/dataset_thread_storage_conformance.json")
+    search_roots = (Path.cwd(), *Path(__file__).resolve().parents)
+    for root in search_roots:
+        candidate = root / relative_path
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find {relative_path} from the working directory or test module"
+    )
+
+
+_CONFORMANCE_CORPUS_PATH = _find_conformance_corpus()
+_CONFORMANCE_CORPUS = json.loads(_CONFORMANCE_CORPUS_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    _CONFORMANCE_CORPUS["restore_cases"],
+    ids=lambda case: case["name"],
+)
+async def test_dataset_thread_storage_shared_restore_conformance(
+    case: dict[str, Any],
+) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/conformance",
+    )
+    key = (("threads",), "conformance")
+    room.datasets.schemas[key] = storage._schema()
+    room.datasets.fragment_counts[key] = case["fragment_count"]
+    room.datasets.rows[key] = [
+        {
+            "turn_id": row["data"].get("turn_id"),
+            "item_id": row["data"].get("item_id", row["data"]["message_id"]),
+            "sequence": row["sequence"],
+            "timestamp": datetime.fromisoformat(
+                row["timestamp"].replace("Z", "+00:00")
+            ),
+            "data": json.dumps(row["data"]),
+        }
+        for row in case["rows"]
+    ]
+    original_rows = list(room.datasets.rows[key])
+
+    await storage.start()
+    await storage.wait_until_ready()
+    try:
+        restored = storage.agent_messages()
+        assert [message.message_id for message in restored] == case[
+            "expected_message_ids"
+        ]
+        assert (
+            sorted(row["sequence"] for row in room.datasets.rows[key])
+            == case["expected_sequences"]
+        )
+        assert len({row["sequence"] for row in room.datasets.rows[key]}) == len(
+            room.datasets.rows[key]
+        )
+
+        restored_contexts: list[list[dict[str, Any]]] = []
+        for _ in range(2):
+            context = AgentSessionContext(system_role=None)
+            storage.restore_session_context(
+                context=context,
+                llm_adapter=_test_llm_adapter(),
+            )
+            restored_contexts.append(context.messages)
+        assert restored_contexts == [
+            case["expected_context"],
+            case["expected_context"],
+        ]
+    finally:
+        await storage.stop()
+
+    assert len(room.datasets.optimize_calls) == case["expected_optimize_calls"]
+    assert all(
+        call["table"] == "conformance" and call["namespace"] == ["threads"]
+        for call in room.datasets.optimize_calls
+    )
+    assert room.datasets.rows[key] == original_rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    _CONFORMANCE_CORPUS["invalid_restore_cases"],
+    ids=lambda case: case["name"],
+)
+async def test_dataset_thread_storage_shared_invalid_restore_conformance(
+    case: dict[str, Any],
+) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/conformance",
+    )
+    key = (("threads",), "conformance")
+    room.datasets.schemas[key] = storage._schema()
+    room.datasets.rows[key] = [
+        {
+            "turn_id": row["data"].get("turn_id"),
+            "item_id": row["data"].get("item_id", row["data"]["message_id"]),
+            "sequence": row["sequence"],
+            "timestamp": datetime.fromisoformat(
+                row["timestamp"].replace("Z", "+00:00")
+            ),
+            "data": json.dumps(row["data"]),
+        }
+        for row in case["rows"]
+    ]
+
+    with pytest.raises(ValueError, match=case["expected_error"]):
+        await storage.wait_until_ready()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    _CONFORMANCE_CORPUS["append_cases"],
+    ids=lambda case: case["name"],
+)
+async def test_dataset_thread_storage_shared_append_conformance(
+    case: dict[str, Any],
+) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        path="dataset://threads/conformance",
+    )
+    await storage.start()
+    await storage.wait_until_ready()
+    for entry in case["messages"]:
+        sender_name = entry.get("sender_name")
+        storage.push_message(
+            message=parse_agent_message(entry["message"]),
+            sender=_participant(sender_name) if sender_name else None,
+        )
+    await storage.flush()
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "conformance")]
+    assert [row["sequence"] for row in rows] == case["expected_sequences"]
+    assert [_row_data(row)["type"] for row in rows] == case["expected_types"]
+    assert [_row_data(row)["message_id"] for row in rows] == case[
+        "expected_message_ids"
+    ]
+    assert len({row["sequence"] for row in rows}) == len(rows)
+    assert room.datasets.merge_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed_records", [0, 1, 3])
+async def test_dataset_thread_storage_recovers_after_partial_batch_insert_failure(
+    committed_records: int,
+) -> None:
+    datasets = _PartialInsertFailureDatasets(
+        committed_records=committed_records,
+    )
+    room = _FakeRoom(datasets=datasets)
+    path = "dataset://threads/partial-insert"
+    storage = DatasetThreadStorage(room=room, path=path)
+    await storage.start()
+    await storage.wait_until_ready()
+    for index in range(3):
+        storage.push_message(
+            message=AgentThreadEvent(
+                type=AGENT_EVENT_THREAD_EVENT,
+                message_id=f"before-crash-{index}",
+                thread_id=path,
+                turn_id="turn-before-crash",
+                event={"index": index},
+            )
+        )
+
+    with pytest.raises(RoomException, match="injected dataset insert failure"):
+        await storage.flush()
+
+    key = (("threads",), "partial-insert")
+    assert [row["sequence"] for row in datasets.rows[key]] == [0, 1, 2]
+    await storage.stop()
+
+    replacement = DatasetThreadStorage(room=room, path=path)
+    await replacement.start()
+    await replacement.wait_until_ready()
+    replacement.push_message(
+        message=AgentThreadEvent(
+            type=AGENT_EVENT_THREAD_EVENT,
+            message_id="after-restart",
+            thread_id=path,
+            turn_id="turn-after-restart",
+            event={"kind": "recovered"},
+        )
+    )
+    await replacement.flush()
+    await replacement.stop()
+
+    rows = datasets.rows[key]
+    assert [row["sequence"] for row in rows] == [0, 1, 2, 3]
+    assert [_row_data(row)["message_id"] for row in rows] == [
+        *(f"before-crash-{index}" for index in range(3)),
+        "after-restart",
+    ]
+    assert len({row["sequence"] for row in rows}) == len(rows)
+    assert datasets.merge_calls == []
+    assert datasets.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_blocks_retries_after_sequence_conflict() -> None:
+    datasets = _ConflictingInsertFailureDatasets()
+    room = _FakeRoom(datasets=datasets)
+    path = "dataset://threads/conflicting-insert"
+    storage = DatasetThreadStorage(room=room, path=path)
+    await storage.start()
+    await storage.wait_until_ready()
+    storage.push_message(
+        message=AgentThreadEvent(
+            type=AGENT_EVENT_THREAD_EVENT,
+            message_id="intended",
+            thread_id=path,
+            event={"kind": "intended"},
+        )
+    )
+
+    with pytest.raises(ValueError, match="conflicting dataset thread sequence 0"):
+        await storage.flush()
+    await asyncio.sleep(0)
+    with pytest.raises(ValueError, match="conflicting dataset thread sequence 0"):
+        await storage.stop()
+
+    assert len(datasets.insert_calls) == 1
+    assert (
+        _row_data(datasets.rows[(("threads",), "conflicting-insert")][0])["message_id"]
+        == "conflict"
+    )
+    assert datasets.merge_calls == []
+    assert datasets.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_serializes_concurrent_producers_and_flushes() -> (
+    None
+):
+    room = _FakeRoom()
+    path = "dataset://threads/concurrent"
+    storage = DatasetThreadStorage(room=room, path=path)
+    await storage.start()
+    await storage.wait_until_ready()
+    producer_count = 16
+    condition = asyncio.Condition()
+    started_count = 0
+
+    async def produce(index: int) -> None:
+        nonlocal started_count
+        start_id = f"concurrent-start-{index}"
+        storage.push_message(
+            message=TurnStart(
+                type=AGENT_MESSAGE_TURN_START,
+                message_id=start_id,
+                thread_id=path,
+                content=[AgentTextContent(type="text", text=f"turn {index}")],
+            ),
+            sender=_participant(f"user-{index}"),
+        )
+        async with condition:
+            started_count += 1
+            if started_count == producer_count:
+                condition.notify_all()
+            else:
+                await condition.wait_for(lambda: started_count == producer_count)
+        storage.push_message(
+            message=AgentThreadEvent(
+                type=AGENT_EVENT_THREAD_EVENT,
+                message_id=f"concurrent-event-{index}",
+                thread_id=path,
+                event={"producer": index},
+            )
+        )
+        storage.push_message(
+            message=TurnStartAccepted(
+                type=AGENT_EVENT_TURN_START_ACCEPTED,
+                message_id=f"concurrent-accepted-{index}",
+                thread_id=path,
+                turn_id=f"turn-{index}",
+                source_message_id=start_id,
+            )
+        )
+
+    await asyncio.gather(*(produce(index) for index in range(producer_count)))
+    await asyncio.gather(*(storage.flush() for _ in range(4)))
+    await storage.stop()
+
+    rows = room.datasets.rows[(("threads",), "concurrent")]
+    sequences = [row["sequence"] for row in rows]
+    assert sequences == list(range(producer_count * 3))
+    assert len(sequences) == len(set(sequences))
+    sequence_by_message_id = {
+        _row_data(row)["message_id"]: row["sequence"] for row in rows
+    }
+    for index in range(producer_count):
+        assert (
+            sequence_by_message_id[f"concurrent-start-{index}"]
+            < sequence_by_message_id[f"concurrent-event-{index}"]
+            < sequence_by_message_id[f"concurrent-accepted-{index}"]
+        )
+    assert room.datasets.merge_calls == []
+    assert room.datasets.update_calls == []
+
+    replacement = DatasetThreadStorage(room=room, path=path)
+    await replacement.start()
+    await replacement.wait_until_ready()
+    try:
+        assert [message.message_id for message in replacement.agent_messages()] == [
+            _row_data(row)["message_id"] for row in rows
+        ]
+    finally:
+        await replacement.stop()
+
+
 @pytest.mark.asyncio
 async def test_dataset_thread_storage_start_does_not_wait_for_dataset_setup() -> None:
     datasets = _BlockingListTablesDatasets()
@@ -599,6 +1015,10 @@ async def test_dataset_thread_storage_batches_queued_writes() -> None:
 
     assert len(room.datasets.insert_calls) == 1
     assert len(room.datasets.insert_calls[0]["records"]) == 2
+    assert all(
+        isinstance(record["data"], DatasetJson)
+        for record in room.datasets.insert_calls[0]["records"]
+    )
 
 
 @pytest.mark.asyncio
@@ -910,6 +1330,51 @@ async def test_dataset_thread_storage_opens_existing_table_without_recreating() 
     assert room.datasets.create_calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("num_fragments", "expected_optimize_calls"), [(1, 0), (2, 1)])
+async def test_dataset_thread_storage_optimizes_fragmented_existing_table_on_load(
+    num_fragments: int,
+    expected_optimize_calls: int,
+) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    key = (("threads",), "demo")
+    room.datasets.schemas[key] = storage._schema()
+    room.datasets.rows[key] = []
+    room.datasets.fragment_counts[key] = num_fragments
+
+    await storage.wait_until_ready()
+
+    assert room.datasets.stats_calls == [{"table": "demo", "namespace": ["threads"]}]
+    assert len(room.datasets.optimize_calls) == expected_optimize_calls
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_optimizes_fragmented_thread_list_on_load() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(
+        room=room,
+        thread_dir="dataset://agents/demo/threads",
+    )
+    await storage._ensure_thread_list_table(
+        client=room.datasets,
+        thread_dir="dataset://agents/demo/threads",
+    )
+    key = (("agents", "demo", "threads"), "index")
+    room.datasets.fragment_counts[key] = 3
+
+    page = await storage.list_threads()
+
+    assert page.threads == []
+    assert room.datasets.stats_calls == [
+        {"table": "index", "namespace": ["agents", "demo", "threads"]}
+    ]
+    assert len(room.datasets.optimize_calls) == 1
+    assert room.datasets.optimize_calls[0]["table"] == "index"
+
+
 def test_dataset_thread_storage_rejects_non_dataset_paths() -> None:
     room = _FakeRoom()
 
@@ -964,30 +1429,72 @@ async def test_dataset_thread_storage_persists_only_accepted_user_turns() -> Non
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 3
-    unaccepted_data = _row_data(rows[0])
-    accepted_input_data = _row_data(rows[1])
-    accepted_data = _row_data(rows[2])
-    assert unaccepted_data["type"] == AGENT_MESSAGE_TURN_START
-    assert unaccepted_data["content"] == [{"type": "text", "text": "do not save"}]
-    assert unaccepted_data["sender_name"] == "caller"
-    assert rows[0]["item_id"] == "unaccepted"
-    assert rows[0]["type"] == AGENT_MESSAGE_TURN_START
+    assert len(rows) == 2
+    accepted_input_data = _row_data(rows[0])
+    accepted_data = _row_data(rows[1])
     assert accepted_input_data["type"] == AGENT_MESSAGE_TURN_START
     assert accepted_input_data["turn_id"] == "turn-accepted"
     assert accepted_input_data["content"] == [{"type": "text", "text": "save this"}]
     assert accepted_input_data["sender_name"] == "caller"
-    assert rows[1]["item_id"] == "accepted"
-    assert rows[1]["turn_id"] == "turn-accepted"
-    assert rows[1]["type"] == AGENT_MESSAGE_TURN_START
-    assert room.datasets.merge_calls[0]["on"] == "sequence"
-    assert room.datasets.merge_calls[0]["records"][0]["sequence"] == rows[1]["sequence"]
+    assert rows[0]["item_id"] == "accepted"
+    assert rows[0]["turn_id"] == "turn-accepted"
+    assert rows[0]["type"] == AGENT_MESSAGE_TURN_START
     assert accepted_data["type"] == AGENT_EVENT_TURN_START_ACCEPTED
     assert accepted_data["turn_id"] == "turn-accepted"
     assert accepted_data["source_message_id"] == "accepted"
     assert accepted_data["content"] == []
-    assert rows[2]["type"] == AGENT_EVENT_TURN_START_ACCEPTED
+    assert rows[1]["type"] == AGENT_EVENT_TURN_START_ACCEPTED
     assert "sender_name" not in accepted_data or accepted_data["sender_name"] is None
+    assert [row["sequence"] for row in rows] == sorted(row["sequence"] for row in rows)
+    assert room.datasets.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_thread_storage_holds_later_writes_until_reserved_row_resolves() -> (
+    None
+):
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+
+    storage.push_message(
+        message=TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="dataset://threads/demo",
+            message_id="delayed",
+            content=[{"type": "text", "text": "wait for acceptance"}],
+        )
+    )
+    storage.push_message(
+        message=AgentThreadEvent(
+            type=AGENT_EVENT_THREAD_EVENT,
+            thread_id="dataset://threads/demo",
+            event={"kind": "intervening"},
+        )
+    )
+    await storage.flush()
+
+    key = (("threads",), "demo")
+    assert room.datasets.rows[key] == []
+
+    storage.push_message(
+        message=TurnStartAccepted(
+            type=AGENT_EVENT_TURN_START_ACCEPTED,
+            thread_id="dataset://threads/demo",
+            turn_id="turn-delayed",
+            source_message_id="delayed",
+        )
+    )
+    await storage.flush()
+    await storage.stop()
+
+    rows = room.datasets.rows[key]
+    assert [row["sequence"] for row in rows] == [0, 1, 2]
+    assert [_row_data(row)["type"] for row in rows] == [
+        AGENT_MESSAGE_TURN_START,
+        AGENT_EVENT_THREAD_EVENT,
+        AGENT_EVENT_TURN_START_ACCEPTED,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1601,7 +2108,7 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 3
+    assert len(rows) == 4
     data = _row_data(rows[0])
     assert rows[0]["item_id"] == "started-tool"
     assert data["type"] == AGENT_EVENT_TOOL_CALL_STARTED
@@ -1609,9 +2116,13 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     assert data["call_id"] == "call-started"
     assert data["toolkit"] == "shell"
     assert data["tool"] == "exec"
-    error_event = _row_data(rows[1])
+    tool_ended = _row_data(rows[1])
+    assert tool_ended["type"] == AGENT_EVENT_TOOL_CALL_ENDED
+    assert tool_ended["item_id"] == "started-tool"
+    assert tool_ended["error"]["code"] == "failed"
+    error_event = _row_data(rows[2])
     assert error_event["type"] == AGENT_EVENT_THREAD_EVENT
-    assert rows[1]["turn_id"] == "turn-1"
+    assert rows[2]["turn_id"] == "turn-1"
     assert error_event["event"] == {
         "type": "turn.error",
         "kind": "collab",
@@ -1621,7 +2132,7 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
         "details": ["cancelled"],
         "error": {"message": "cancelled", "code": None},
     }
-    ended = _row_data(rows[2])
+    ended = _row_data(rows[3])
     assert ended["type"] == AGENT_EVENT_TURN_ENDED
 
 
@@ -1664,10 +2175,18 @@ async def test_dataset_thread_storage_does_not_write_tool_argument_deltas() -> N
     await storage.stop()
 
     rows = room.datasets.rows[(("threads",), "demo")]
-    assert [row["type"] for row in rows] == [
+    row_types = [row["type"] for row in rows]
+    assert row_types == [
         AGENT_EVENT_TOOL_CALL_STARTED,
+        AGENT_EVENT_TOOL_CALL_ENDED,
+        AGENT_EVENT_THREAD_EVENT,
         AGENT_EVENT_TURN_ENDED,
     ]
+    assert AGENT_EVENT_TOOL_CALL_ARGUMENTS_DELTA not in row_types
+    assert _row_data(rows[1])["error"] == {
+        "message": "Tool call ended without a result",
+        "code": "failed",
+    }
 
 
 @pytest.mark.asyncio

@@ -356,7 +356,14 @@ class AccumulatingAgentEventReader(ABC):
             self._flush_file_item(item_id=item_id)
         for item_id in list(self._tool_calls_by_item_id):
             item = self._tool_calls_by_item_id.pop(item_id)
-            self._append_tool_call(tool_call=item, result=None, error=None)
+            self._append_tool_call(
+                tool_call=item,
+                result=None,
+                error={
+                    "message": "tool call was cancelled before completion",
+                    "code": "cancelled",
+                },
+            )
 
     def _record_event(self, *, message: AgentMessage) -> None:
         self._callbacks.record_event(message)
@@ -461,6 +468,8 @@ class AccumulatingAgentEventReader(ABC):
                 text = result.get("text")
                 if isinstance(text, str):
                     return text
+            if result_type == "empty":
+                return "ok"
             return json.dumps(result, separators=(",", ":"), ensure_ascii=False)
         if logs:
             return "\n".join(
