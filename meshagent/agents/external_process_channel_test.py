@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 import pytest
@@ -129,3 +130,30 @@ async def test_external_process_channel_round_trips_existing_msgpack_message_env
         await channel.stop(supervisor)  # type: ignore[arg-type]
 
     assert supervisor.unregistered_channel_ids == [42]
+
+
+@pytest.mark.asyncio
+async def test_external_process_channel_forwards_complete_parent_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MESHAGENT_INHERITED_TEST_NAME", "Inherited Environment User")
+    echo_channel = _ECHO_CHANNEL.replace(
+        'os.environ.get("MESHAGENT_TEST_NAME", "Child User")',
+        'os.environ["MESHAGENT_INHERITED_TEST_NAME"]',
+    )
+    channel = ExternalProcessChannel(
+        command=[sys.executable, "-c", echo_channel],
+        environment={},
+    )
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)  # type: ignore[arg-type]
+    try:
+        await _wait_for_messages(supervisor, 1)
+        assert supervisor.messages[0].sender is not None
+        assert (
+            supervisor.messages[0].sender.attributes["name"]
+            == os.environ["MESHAGENT_INHERITED_TEST_NAME"]
+        )
+    finally:
+        await channel.stop(supervisor)  # type: ignore[arg-type]

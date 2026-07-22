@@ -20,9 +20,9 @@ dependencies = [
   "pytest~=8.4",
   "pytest-asyncio~=0.26",
   "aiosmtplib~=4.0.1",
-  "meshagent-api==0.46.3",
-  "meshagent-tools==0.46.3",
-  "meshagent-openai==0.46.3",
+  "meshagent-api==0.47.0",
+  "meshagent-tools==0.47.0",
+  "meshagent-openai==0.47.0",
   "pydantic~=2.11",
   "msgpack~=1.1",
   "opentelemetry-distro~=0.59b0",
@@ -42,14 +42,14 @@ test = [
 ]
 
 all = [
-    "meshagent-api[all]==0.46.3",
+    "meshagent-api[all]==0.47.0",
     "chonkie~=0.5.1",
     "chonkie[semantic]~=0.5.1",
     "chonkie[openai]~=0.5.1"
 ]
 
 sync = [
-    "meshagent-api[sync]==0.46.3",
+    "meshagent-api[sync]==0.47.0",
 ]
 
 mail = []
