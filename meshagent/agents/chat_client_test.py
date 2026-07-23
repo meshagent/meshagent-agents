@@ -8,6 +8,7 @@ from meshagent.agents.chat_channel import MsgpackWebSocketChatEncoding
 from meshagent.agents.chat_client import (
     BaseChatClient,
     ChatThreadSession,
+    LegacyMessagingChatClient,
     MessagingChatClient,
     WebSocketChatClient,
 )
@@ -22,8 +23,11 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STARTED,
     AGENT_MESSAGE_THREAD_LIST,
+    AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_OPEN,
     AGENT_MESSAGE_THREAD_START,
+    AGENT_MESSAGE_THREAD_UNWATCH,
+    AGENT_MESSAGE_THREAD_WATCH,
     AGENT_MESSAGE_TURN_START,
     AgentError,
     AgentThreadListEntry,
@@ -34,6 +38,8 @@ from meshagent.agents.messages import (
     AgentTextContent,
     AgentThreadStatus,
     AgentTextContentDelta,
+    CloseThread,
+    OpenThread,
     ThreadCreated,
     ThreadStarted,
     ThreadLoaded,
@@ -42,6 +48,8 @@ from meshagent.agents.messages import (
     TurnStart,
     TurnStartAccepted,
     TurnStarted,
+    UnwatchThreads,
+    WatchThreads,
     parse_agent_message,
 )
 
@@ -719,9 +727,13 @@ async def test_websocket_chat_client_reconnect_reopens_thread_with_load() -> Non
 
 
 @pytest.mark.asyncio
-async def test_messaging_chat_client_reconnect_tracks_participant_and_reopens_thread() -> (
-    None
-):
+@pytest.mark.parametrize(
+    "client_type",
+    [LegacyMessagingChatClient, MessagingChatClient],
+)
+async def test_messaging_chat_client_reconnect_tracks_participant_and_reopens_thread(
+    client_type,
+) -> None:
     class _Participant:
         id = "agent-1"
 
@@ -787,7 +799,7 @@ async def test_messaging_chat_client_reconnect_tracks_participant_and_reopens_th
             self.handlers.get(event, []).remove(handler)
 
     room = _Room()
-    client = MessagingChatClient(room=room, participant_name="assistant", timeout=0.1)
+    client = client_type(room=room, participant_name="assistant", timeout=0.1)
     await client.start()
     session = await client.open_thread("/threads/reconnect.thread", load=False)
     assert session.thread_path == "/threads/reconnect.thread"
@@ -811,3 +823,115 @@ async def test_messaging_chat_client_reconnect_tracks_participant_and_reopens_th
     assert client.connection_status is not None
     assert client.connection_status.status == "reconnected"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_messaging_chat_client_uses_stream_when_channel_advertises_support() -> (
+    None
+):
+    class _Participant:
+        id = "agent-1"
+
+        def get_attribute(self, name: str):
+            return {
+                "name": "assistant",
+                "supports_agent_messages": True,
+                "supports_messaging_streams": True,
+            }.get(name)
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stream_id = "stream-1"
+            self._events: asyncio.Queue[None] = asyncio.Queue()
+
+        async def close(self) -> None:
+            if not self.closed:
+                self.closed = True
+                self._events.put_nowait(None)
+
+        def __aiter__(self):
+            async def events():
+                while True:
+                    event = await self._events.get()
+                    if event is None:
+                        return
+                    yield event
+
+            return events()
+
+    class _Messaging:
+        def __init__(self) -> None:
+            self.is_enabled = True
+            self.participant = _Participant()
+            self.handlers: dict[str, list[Any]] = {}
+            self.stream_calls: list[dict[str, Any]] = []
+            self.unary_calls: list[dict[str, Any]] = []
+            self.stream_instance = _Stream()
+
+        def on(self, event: str, handler) -> None:
+            self.handlers.setdefault(event, []).append(handler)
+
+        def off(self, event: str, handler) -> None:
+            self.handlers[event].remove(handler)
+
+        def get_participants(self) -> list[_Participant]:
+            return [self.participant]
+
+        async def enable(self) -> None:
+            self.is_enabled = True
+
+        async def stream(self, **kwargs):
+            self.stream_calls.append(kwargs)
+            return self.stream_instance
+
+        async def send_message(self, **kwargs) -> None:
+            self.unary_calls.append(kwargs)
+
+    class _Room:
+        def __init__(self) -> None:
+            self.messaging = _Messaging()
+            self.handlers: dict[str, list[Any]] = {}
+
+        def on(self, event: str, handler) -> None:
+            self.handlers.setdefault(event, []).append(handler)
+
+        def off(self, event: str, handler) -> None:
+            self.handlers[event].remove(handler)
+
+    room = _Room()
+    client = MessagingChatClient(room=room, participant_name="assistant", timeout=0.1)
+    await client.start()
+    try:
+        await client._send_agent_message(
+            OpenThread(
+                type=AGENT_MESSAGE_THREAD_OPEN,
+                thread_id="/threads/stream.thread",
+            )
+        )
+        assert len(room.messaging.stream_calls) == 1
+        assert room.messaging.stream_calls[0]["message"]["thread_id"] == (
+            "/threads/stream.thread"
+        )
+        assert room.messaging.unary_calls == []
+        assert len(room.messaging.handlers["message"]) == 1
+
+        await client._send_agent_message(
+            CloseThread(
+                type=AGENT_MESSAGE_THREAD_CLOSE,
+                thread_id="/threads/stream.thread",
+            )
+        )
+        assert room.messaging.stream_instance.closed is True
+
+        room.messaging.stream_instance = _Stream()
+        await client._send_agent_message(WatchThreads(type=AGENT_MESSAGE_THREAD_WATCH))
+        assert room.messaging.stream_calls[-1]["type"] == (
+            "meshagent.chat.thread_list.subscribe"
+        )
+        await client._send_agent_message(
+            UnwatchThreads(type=AGENT_MESSAGE_THREAD_UNWATCH)
+        )
+        assert room.messaging.stream_instance.closed is True
+    finally:
+        await client.close()

@@ -9,6 +9,8 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from meshagent.agents.adapter import LLMAdapter
 from meshagent.agents import chat_channel as chat_channel_module
 from meshagent.agents.chat_channel import (
+    LegacyMessagingChatChannel,
+    MESSAGING_CHAT_THREAD_SUBSCRIBE_TYPE,
     MessagingChatChannel,
     MsgpackWebSocketChatEncoding,
     WebSocketChatChannel,
@@ -230,6 +232,73 @@ class _HangingStorage(_FakeStorage):
         return False
 
 
+class _FakeMessagingStream:
+    def __init__(self, *, stream_id: str, remote_participant_id: str) -> None:
+        self.stream_id = stream_id
+        self.remote_participant_id = remote_participant_id
+        self.closed = False
+        self.sent_messages: list[dict] = []
+        self._events: asyncio.Queue[RoomMessage | None] = asyncio.Queue()
+
+    def send_message_nowait(
+        self,
+        *,
+        type: str,
+        message: dict,
+        attachment=None,
+    ) -> None:
+        sent = {"type": type, "message": message}
+        if attachment is not None:
+            sent["attachment"] = attachment
+        self.sent_messages.append(sent)
+
+    def push(self, message: RoomMessage) -> None:
+        self._events.put_nowait(message)
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self._events.put_nowait(None)
+
+    def __aiter__(self):
+        async def events():
+            while True:
+                event = await self._events.get()
+                if event is None:
+                    return
+                yield event
+
+        return events()
+
+
+class _FakeIncomingMessagingStreamRequest:
+    def __init__(
+        self,
+        *,
+        stream_id: str,
+        from_participant_id: str,
+        message: dict,
+        type: str = "agent-message",
+    ) -> None:
+        self.stream_id = stream_id
+        self.from_participant_id = from_participant_id
+        self.type = type
+        self.message = message
+        self.attachment = None
+        self.rejection: str | None = None
+        self.stream = _FakeMessagingStream(
+            stream_id=stream_id,
+            remote_participant_id=from_participant_id,
+        )
+
+    async def accept(self) -> _FakeMessagingStream:
+        return self.stream
+
+    async def reject(self, *, message: str | None = None) -> None:
+        self.rejection = message
+
+
 class _FakeMessaging:
     def __init__(
         self,
@@ -292,6 +361,10 @@ class _FakeMessaging:
     def emit_message(self, message: RoomMessage) -> None:
         for handler in self._handlers.get("message", []):
             handler(message=message)
+
+    def emit_stream_request(self, request: _FakeIncomingMessagingStreamRequest) -> None:
+        for handler in self._handlers.get("stream_requested", []):
+            handler(request=request)
 
     def add_participant(self, participant: Participant) -> None:
         self._participants[participant.id] = participant
@@ -540,6 +613,9 @@ async def test_chat_channel_provides_attach_file_turn_tool_without_thread_tools(
 
     await channel.start(supervisor)
     try:
+        assert (
+            room.local_participant.get_attribute("supports_messaging_streams") is True
+        )
         agent_toolkits = channel.get_turn_toolkits(
             thread_id="/threads/test.thread",
             turn_id="turn-1",
@@ -3320,6 +3396,7 @@ async def test_chat_channel_sets_threading_attributes_and_tracks_thread_list() -
     await pending_started.wait()
     try:
         assert room.local_participant.set_attribute_calls == [
+            ("supports_messaging_streams", True),
             ("meshagent.chatbot.threading", "default-new"),
             ("meshagent.chatbot.thread-dir", "/threads/chat"),
             ("meshagent.chatbot.thread-list", "/threads/chat/index.threadl"),
@@ -3853,6 +3930,7 @@ async def test_messaging_chat_channel_sends_participant_lifecycle_messages() -> 
             "participant_added": 1,
             "participant_removed": 1,
             "messaging_enabled": 1,
+            "stream_requested": 1,
         }
         channel._handle_agent_control_payload(
             sender=caller,
@@ -3872,7 +3950,9 @@ async def test_messaging_chat_channel_sends_participant_lifecycle_messages() -> 
         "participant_added": 0,
         "participant_removed": 0,
         "messaging_enabled": 0,
+        "stream_requested": 0,
     }
+    assert room.local_participant.get_attribute("supports_messaging_streams") is None
     assert [message.data.participant_id for message in supervisor.lifecycle] == [
         "caller-id",
         "viewer-id",
@@ -3886,6 +3966,156 @@ async def test_messaging_chat_channel_sends_participant_lifecycle_messages() -> 
         ParticipantDisconnect,
     ]
     assert channel._open_participant_ids_by_thread == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "channel_type",
+    [LegacyMessagingChatChannel, MessagingChatChannel],
+)
+async def test_messaging_chat_channels_match_for_legacy_thread_messages(
+    channel_type,
+) -> None:
+    caller = _FakeParticipant(name="Caller", participant_id="caller-id")
+    room = _FakeRoom(participants=[caller], messaging_enabled=True)
+    channel = channel_type(room=room)
+    supervisor = _RecordingSupervisor()
+
+    await channel.start(supervisor)
+    try:
+        expected_stream_support = True if channel_type is MessagingChatChannel else None
+        assert (
+            room.local_participant.get_attribute("supports_messaging_streams")
+            is expected_stream_support
+        )
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=caller.id,
+                type="agent-message",
+                message={
+                    "type": AGENT_MESSAGE_THREAD_OPEN,
+                    "thread_id": "thread-1",
+                    "load": False,
+                },
+            )
+        )
+        assert len(supervisor.sent) == 1
+        assert isinstance(supervisor.sent[0].data, OpenThread)
+        assert supervisor.sent[0].sender is caller
+        assert channel._open_participant_ids_by_thread == {"thread-1": {"caller-id"}}
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_current_messaging_chat_channel_handles_stream_and_legacy_clients_together() -> (
+    None
+):
+    legacy = _FakeParticipant(name="Legacy", participant_id="legacy-id")
+    streaming = _FakeParticipant(name="Streaming", participant_id="streaming-id")
+    room = _FakeRoom(
+        participants=[legacy, streaming],
+        messaging_enabled=True,
+    )
+    channel = MessagingChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+    request = _FakeIncomingMessagingStreamRequest(
+        stream_id="stream-1",
+        from_participant_id=streaming.id,
+        message={
+            "type": AGENT_MESSAGE_THREAD_OPEN,
+            "thread_id": "stream-thread",
+            "load": False,
+        },
+        type=MESSAGING_CHAT_THREAD_SUBSCRIBE_TYPE,
+    )
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_message(
+            RoomMessage(
+                from_participant_id=legacy.id,
+                type="agent-message",
+                message={
+                    "type": AGENT_MESSAGE_THREAD_OPEN,
+                    "thread_id": "legacy-thread",
+                    "load": False,
+                },
+            )
+        )
+        room.messaging.emit_stream_request(request)
+        await _wait_until(
+            lambda: (streaming.id, "stream-thread") in channel._thread_streams
+        )
+
+        channel._send_agent_payload_nowait(
+            participant=streaming,
+            payload={
+                "type": AGENT_EVENT_TEXT_CONTENT_DELTA,
+                "thread_id": "stream-thread",
+                "turn_id": "turn-1",
+                "item_id": "item-1",
+                "delta": "hello",
+            },
+        )
+        assert [
+            message["message"]["delta"] for message in request.stream.sent_messages
+        ] == ["hello"]
+        assert [message.data.thread_id for message in supervisor.sent] == [
+            "legacy-thread",
+            "stream-thread",
+        ]
+
+        await request.stream.close()
+        await _wait_until(
+            lambda: (streaming.id, "stream-thread") not in channel._thread_streams
+        )
+        assert isinstance(supervisor.sent[-1].data, CloseThread)
+        assert supervisor.sent[-1].data.thread_id == "stream-thread"
+    finally:
+        await channel.stop(supervisor)
+
+
+@pytest.mark.asyncio
+async def test_thread_subscription_processes_open_before_immediate_live_message() -> (
+    None
+):
+    streaming = _FakeParticipant(name="Streaming", participant_id="streaming-id")
+    room = _FakeRoom(participants=[streaming], messaging_enabled=True)
+    channel = MessagingChatChannel(room=room)
+    supervisor = _RecordingSupervisor()
+    request = _FakeIncomingMessagingStreamRequest(
+        stream_id="stream-ordering",
+        from_participant_id=streaming.id,
+        type=MESSAGING_CHAT_THREAD_SUBSCRIBE_TYPE,
+        message={
+            "type": AGENT_MESSAGE_THREAD_OPEN,
+            "thread_id": "ordered-thread",
+            "load": False,
+        },
+    )
+
+    await channel.start(supervisor)
+    try:
+        room.messaging.emit_stream_request(request)
+        request.stream.push(
+            RoomMessage(
+                from_participant_id=streaming.id,
+                type="agent-message",
+                message={
+                    "type": AGENT_MESSAGE_TURN_START,
+                    "thread_id": "ordered-thread",
+                    "content": [],
+                },
+            )
+        )
+        await _wait_until(lambda: len(supervisor.sent) >= 2)
+
+        assert isinstance(supervisor.sent[0].data, OpenThread)
+        assert isinstance(supervisor.sent[1].data, TurnStart)
+    finally:
+        await request.stream.close()
+        await channel.stop(supervisor)
 
 
 @pytest.mark.asyncio
