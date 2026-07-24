@@ -24,6 +24,7 @@ class _FakeDatasets:
         self.index_calls = 0
         self.search_calls: list[dict] = []
         self.search_rows: list[dict] = []
+        self.delete_calls: list[dict] = []
 
     async def inspect(self, *, table: str) -> pa.Schema:
         assert table == "images"
@@ -76,6 +77,9 @@ class _FakeDatasets:
             }
         )
         return pa.Table.from_pylist(self.search_rows)
+
+    async def delete(self, *, table: str, where: str) -> None:
+        self.delete_calls.append({"table": table, "where": where})
 
 
 class _FakeRoom:
@@ -133,4 +137,24 @@ async def test_image_dataset_client_reads_dataset_uri_record() -> None:
             "limit": 1,
             "select": ["data", "mime_type"],
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_images_dataset_delete_checks_existence_and_escapes_id() -> None:
+    room = _FakeRoom()
+    room.datasets.search_rows = [
+        {
+            "id": "image-'1",
+            "mime_type": "image/png",
+            "created_at": "2026-01-01T00:00:00Z",
+            "created_by": "agent",
+            "annotations": [],
+        }
+    ]
+    dataset = ImagesDataset(room.datasets)
+
+    assert await dataset.delete(image_id="image-'1")
+    assert room.datasets.delete_calls == [
+        {"table": "images", "where": "id = 'image-''1'"}
     ]

@@ -378,6 +378,20 @@ class ImagesDataset(ImageDatasetClient):
             return data
         return None
 
+    async def delete(self, *, image_id: str) -> bool:
+        await self._ensure_ready()
+        if await self.read(image_id=image_id) is None:
+            return False
+        await self.client.delete(
+            table=self.TABLE_NAME,
+            where=f"id = {self._sql_string(image_id)}",
+        )
+        return True
+
+    @staticmethod
+    def _sql_string(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
     async def optimize(self) -> None:
         await self._ensure_ready()
         await self.client.optimize(table=self.TABLE_NAME)
