@@ -13,8 +13,13 @@ from meshagent.tools import Content, ToolContext, Toolkit
 
 from .agent import AgentSessionContext
 from .context import SessionUsageCallback
-from .agent_event_reader import AgentEventReader, AgentEventReaderCallbacks
-from .messages import AgentMessage, ToolChoice
+from .agent_event_reader import (
+    AccumulatingAgentEventReader,
+    AgentEventReader,
+    AgentEventReaderCallbacks,
+    AgentFileReader,
+)
+from .messages import AgentContextCompacted, AgentMessage, AgentUsageUpdated, ToolChoice
 
 TEvent = TypeVar("TEvent")
 
@@ -377,10 +382,48 @@ class LLMAdapter(Generic[TEvent]):
         emit_message: Callable[[dict[str, Any]], None],
         callbacks: AgentEventReaderCallbacks | None = None,
     ) -> AgentEventReader:
-        del emit_message, callbacks
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement make_agent_event_reader()"
+        return AccumulatingAgentEventReader(
+            emit_message=emit_message,
+            callbacks=callbacks,
         )
+
+    async def project_agent_messages(
+        self,
+        *,
+        messages: list[AgentMessage],
+        file_reader: AgentFileReader | None = None,
+        callbacks: AgentEventReaderCallbacks | None = None,
+    ) -> list[dict[str, Any]]:
+        projected_messages: list[dict[str, Any]] = []
+
+        def ignore_event(_message: AgentMessage) -> None:
+            pass
+
+        def ignore_usage(_message: AgentUsageUpdated) -> None:
+            pass
+
+        record_event = callbacks.record_event if callbacks is not None else ignore_event
+        update_usage = callbacks.update_usage if callbacks is not None else ignore_usage
+
+        def restore_compacted_context(message: AgentContextCompacted) -> None:
+            if message.messages is not None:
+                projected_messages.clear()
+            if callbacks is not None:
+                callbacks.restore_compacted_context(message)
+
+        reader_callbacks = AgentEventReaderCallbacks(
+            record_event=record_event,
+            update_usage=update_usage,
+            restore_compacted_context=restore_compacted_context,
+        )
+        reader = self.make_agent_event_reader(
+            emit_message=projected_messages.append,
+            callbacks=reader_callbacks,
+        )
+        for message in messages:
+            reader.consume(message)
+        await reader.finalize(file_reader=file_reader)
+        return projected_messages
 
     def restore_context_messages(
         self,

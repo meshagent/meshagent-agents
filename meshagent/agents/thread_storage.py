@@ -21,6 +21,7 @@ from .messages import AgentThreadMessage
 
 if TYPE_CHECKING:
     from .adapter import LLMAdapter
+    from .agent_event_reader import AgentFileReader
 
 THREAD_PATH_EXISTS_TIMEOUT_SECONDS = 2.0
 
@@ -438,18 +439,12 @@ class ThreadStorage(Protocol):
         sender: Participant | None = None,
     ) -> None: ...
 
-    def restore_session_context(
+    async def restore_session_context(
         self,
         *,
         context: AgentSessionContext,
         llm_adapter: "LLMAdapter[Any] | None" = None,
-    ) -> None: ...
-
-    async def restore_session_context_async(
-        self,
-        *,
-        context: AgentSessionContext,
-        llm_adapter: "LLMAdapter[Any] | None" = None,
+        file_reader: "AgentFileReader | None" = None,
     ) -> None: ...
 
     def make_toolkit(self) -> Toolkit: ...

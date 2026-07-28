@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import json
 import logging
 import math
-import mimetypes
 import os
 import re
 import shlex
@@ -4212,6 +4210,8 @@ class _QueuedTurn:
     request: TurnStart
     queued_messages: list[_QueuedTurnMessage] = field(default_factory=list)
     restore_session_from_storage: bool = True
+    initial_message_projected: bool = False
+    prepared_model_change: bool = False
 
 
 @dataclass(slots=True)
@@ -4219,6 +4219,7 @@ class _QueuedTurnMessage:
     sender: Participant | None
     request: TurnStart | TurnSteer
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    projected: bool = False
 
 
 @dataclass(slots=True)
@@ -4751,12 +4752,10 @@ class LLMAgentProcess(AgentProcess):
 
         thread_storage = self.thread_storage
         if thread_storage is not None and restore_session_from_storage:
-            await thread_storage.restore_session_context_async(
+            await thread_storage.restore_session_context(
                 context=self._session_context,
                 llm_adapter=self.llm_adapter,
-            )
-            await self._resolve_restored_session_content_urls(
-                context=self._session_context
+                file_reader=self._read_agent_file,
             )
 
         with tracer.start_as_current_span("agent.turn.context.restore_hooks"):
@@ -4769,111 +4768,11 @@ class LLMAgentProcess(AgentProcess):
 
         return self._session_context
 
-    @staticmethod
-    def _file_name_from_url(*, url: str) -> str:
-        parsed = urlparse(url)
-        filename = parsed.path.rsplit("/", 1)[-1].strip()
-        if filename != "":
-            return filename
-        return "attachment"
-
-    @staticmethod
-    def _encoded_file_data_url(*, mime_type: str, data: bytes) -> str:
-        return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
-
-    async def _download_restored_file_url(self, *, url: str) -> FileContent | None:
+    async def _read_agent_file(self, url: str) -> FileContent | None:
         content_scheme = self._resolve_content_scheme(url=url)
         if content_scheme is None:
             return None
         return await content_scheme.download(url)
-
-    async def _resolve_openai_restored_file_part(
-        self,
-        *,
-        part: dict[str, Any],
-    ) -> None:
-        url = part.get("file_url")
-        if not isinstance(url, str):
-            return
-        file_content = await self._download_restored_file_url(url=url)
-        if file_content is None:
-            return
-
-        mime_type = file_content.mime_type or "application/octet-stream"
-        if mime_type.startswith("image/"):
-            part.clear()
-            part.update(
-                {
-                    "type": "input_image",
-                    "image_url": self._encoded_file_data_url(
-                        mime_type=mime_type,
-                        data=file_content.data,
-                    ),
-                }
-            )
-            return
-
-        filename_value = part.get("filename")
-        filename = (
-            filename_value.strip()
-            if isinstance(filename_value, str) and filename_value.strip() != ""
-            else file_content.name or self._file_name_from_url(url=url)
-        )
-        part.clear()
-        part.update(
-            {
-                "type": "input_file",
-                "filename": filename,
-                "file_data": self._encoded_file_data_url(
-                    mime_type=mime_type,
-                    data=file_content.data,
-                ),
-            }
-        )
-
-    async def _resolve_anthropic_restored_file_block(
-        self,
-        *,
-        block: dict[str, Any],
-    ) -> None:
-        source = block.get("source")
-        if not isinstance(source, dict):
-            return
-        url = source.get("url")
-        if not isinstance(url, str):
-            return
-        file_content = await self._download_restored_file_url(url=url)
-        if file_content is None:
-            return
-
-        mime_type = file_content.mime_type or "application/octet-stream"
-        source.clear()
-        source.update(
-            {
-                "type": "base64",
-                "media_type": mime_type,
-                "data": base64.b64encode(file_content.data).decode("utf-8"),
-            }
-        )
-        if block.get("type") == "document" and not isinstance(block.get("title"), str):
-            block["title"] = file_content.name or self._file_name_from_url(url=url)
-
-    async def _resolve_restored_session_content_urls(
-        self,
-        *,
-        context: AgentSessionContext,
-    ) -> None:
-        for message in context.messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "input_file":
-                    await self._resolve_openai_restored_file_part(part=part)
-                elif part.get("type") in {"document", "image"}:
-                    await self._resolve_anthropic_restored_file_block(block=part)
 
     async def _switch_llm_provider_if_needed(
         self,
@@ -5095,9 +4994,10 @@ class LLMAgentProcess(AgentProcess):
                 context = self.llm_adapter.create_session()
                 context.instructions = session.instructions
                 context.metadata.update(session.metadata)
-                await thread_storage.restore_session_context_async(
+                await thread_storage.restore_session_context(
                     context=context,
                     llm_adapter=self.llm_adapter,
+                    file_reader=self._read_agent_file,
                 )
                 restored_context_from_storage = True
 
@@ -5289,35 +5189,6 @@ class LLMAgentProcess(AgentProcess):
             return None
 
         return name
-
-    def _format_live_turn_message(
-        self,
-        *,
-        sender: Participant | None,
-        message: str,
-    ) -> str:
-        sender_name = self._sender_name(sender)
-        if sender_name is None or message == "":
-            return message
-
-        iso_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        return self._format_message(
-            user_name=sender_name,
-            message=message,
-            iso_timestamp=iso_timestamp,
-        )
-
-    def _file_attachment_message(
-        self,
-        *,
-        sender: Participant | None,
-        url: str,
-    ) -> str:
-        sender_name = self._sender_name(sender)
-        if sender_name is None:
-            return f"the user attached a file available at {url}"
-
-        return f"{sender_name} attached a file available at {url}"
 
     @classmethod
     def _pending_status_message_payload(
@@ -5925,11 +5796,6 @@ class LLMAgentProcess(AgentProcess):
             span.set_attribute("toolkit_count", len(resolved_toolkits))
             return resolved_toolkits
 
-    @staticmethod
-    def _guess_url_mime_type(*, url: str) -> str | None:
-        guessed_mime_type, _ = mimetypes.guess_type(urlparse(url).path)
-        return guessed_mime_type
-
     def _resolve_content_scheme(self, *, url: str) -> ContentScheme | None:
         matched_scheme: ContentScheme | None = None
         matched_prefix_length = -1
@@ -5943,121 +5809,56 @@ class LLMAgentProcess(AgentProcess):
             matched_prefix_length = prefix_length
         return matched_scheme
 
-    def _append_downloaded_file_content(
-        self,
-        *,
-        session: AgentSessionContext,
-        file_content: FileContent,
-        url: str,
-        sender: Participant | None,
-    ) -> None:
-        mime_type = file_content.mime_type or "application/octet-stream"
-        if mime_type.startswith("image/") and session.supports_images:
-            session.append_image_message(
-                mime_type=mime_type,
-                data=file_content.data,
-            )
-            return
-
-        if session.supports_files:
-            session.append_file_message(
-                filename=file_content.name,
-                mime_type=mime_type,
-                data=file_content.data,
-            )
-            return
-
-        session.append_user_message(
-            self._file_attachment_message(sender=sender, url=url)
-        )
-
-    def _append_remote_file_content(
-        self,
-        *,
-        session: AgentSessionContext,
-        url: str,
-        filename: str | None = None,
-        sender: Participant | None,
-    ) -> None:
-        guessed_mime_type = self._guess_url_mime_type(url=url)
-        if (
-            guessed_mime_type is not None
-            and guessed_mime_type.startswith("image/")
-            and session.supports_images
-        ):
-            session.append_image_url(url=url)
-            return
-
-        if session.supports_files:
-            session.append_file_url(url=url, filename=filename)
-            return
-
-        session.append_user_message(
-            self._file_attachment_message(sender=sender, url=url)
-        )
-
-    async def _append_file_content(
-        self,
-        *,
-        session: AgentSessionContext,
-        url: str,
-        filename: str | None = None,
-        sender: Participant | None,
-    ) -> None:
-        content_scheme = self._resolve_content_scheme(url=url)
-        if content_scheme is not None:
-            file_content = await content_scheme.download(url)
-            self._append_downloaded_file_content(
-                session=session,
-                file_content=file_content,
-                url=url,
-                sender=sender,
-            )
-            return
-
-        self._append_remote_file_content(
-            session=session,
-            url=url,
-            filename=filename,
-            sender=sender,
-        )
-
-    async def _append_turn_content(
-        self,
-        *,
-        session: AgentSessionContext,
-        sender: Participant | None,
-        turns: list[TurnStart | TurnSteer],
-    ) -> None:
-        for turn in turns:
-            for item in turn.content:
-                if isinstance(item, AgentTextContent):
-                    session.append_user_message(
-                        self._format_live_turn_message(
-                            sender=sender,
-                            message=item.text,
-                        )
-                    )
-                elif isinstance(item, AgentFileContent):
-                    await self._append_file_content(
-                        session=session,
-                        url=item.url,
-                        filename=item.name,
-                        sender=sender,
-                    )
-
     async def _append_queued_turn_messages(
         self,
         *,
         session: AgentSessionContext,
         queued_messages: list[_QueuedTurnMessage],
     ) -> None:
-        for queued_message in queued_messages:
-            await self._append_turn_content(
-                session=session,
-                sender=queued_message.sender,
-                turns=[queued_message.request],
+        pending_messages = [
+            queued_message
+            for queued_message in queued_messages
+            if not queued_message.projected
+        ]
+        if len(pending_messages) == 0:
+            return
+        messages: list[AgentMessage] = []
+        for queued_message in pending_messages:
+            request = queued_message.request
+            sender_name = self._sender_name(queued_message.sender)
+            if sender_name is not None:
+                formatted_content: list[AgentTextContent | AgentFileContent] = []
+                for item in request.content:
+                    if isinstance(item, AgentTextContent) and item.text != "":
+                        formatted_content.append(
+                            item.model_copy(
+                                update={
+                                    "text": self._format_message(
+                                        user_name=sender_name,
+                                        message=item.text,
+                                        iso_timestamp=queued_message.created_at.isoformat().replace(
+                                            "+00:00", "Z"
+                                        ),
+                                    )
+                                }
+                            )
+                        )
+                    else:
+                        formatted_content.append(item)
+                request = request.model_copy(update={"content": formatted_content})
+            if sender_name is not None and (
+                request.sender_name is None or request.sender_name.strip() == ""
+            ):
+                request = request.model_copy(update={"sender_name": sender_name})
+            messages.append(request)
+        session.messages.extend(
+            await self.llm_adapter.project_agent_messages(
+                messages=messages,
+                file_reader=self._read_agent_file,
             )
+        )
+        for queued_message in pending_messages:
+            queued_message.projected = True
 
     def _turn_error(self, *, message: str, code: str | None = None) -> AgentError:
         return AgentError(message=message, code=code)
@@ -6824,6 +6625,7 @@ class LLMAgentProcess(AgentProcess):
             _QueuedTurnMessage(
                 sender=queued_turn.sender,
                 request=queued_turn.request,
+                projected=queued_turn.initial_message_projected,
             ),
             *queued_turn.queued_messages,
         ]
@@ -6893,11 +6695,13 @@ class LLMAgentProcess(AgentProcess):
                 normalized_voice = requested_voice.strip() or None
                 voice_changed = normalized_voice != self._current_voice
                 self._current_voice = normalized_voice
-            changed_model = await self._switch_llm_provider_if_needed(
-                provider=provider,
-                model=model,
-                turn_id=turn_id,
-            )
+            changed_model = queued_turn.prepared_model_change
+            if not changed_model:
+                changed_model = await self._switch_llm_provider_if_needed(
+                    provider=provider,
+                    model=model,
+                    turn_id=turn_id,
+                )
             if changed_model or output_modalities_changed or voice_changed:
                 self.emit(
                     sender=queued_turn.sender,
@@ -7314,6 +7118,11 @@ class LLMAgentProcess(AgentProcess):
 
         turn_id = turn.turn_id or str(uuid.uuid4())
         turn = turn.model_copy(update={"turn_id": turn_id})
+        sender_name = self._sender_name(message.sender)
+        if sender_name is not None and (
+            turn.sender_name is None or turn.sender_name.strip() == ""
+        ):
+            turn = turn.model_copy(update={"sender_name": sender_name})
         queued_message = _QueuedTurnMessage(
             sender=message.sender,
             request=turn,
@@ -7324,6 +7133,25 @@ class LLMAgentProcess(AgentProcess):
             and len(thread_storage.agent_messages()) > 0
             and self._session_context is None
         )
+        prepared_model_change = False
+        if (
+            self._session_context is None
+            and self._turn_task is None
+            and not self._has_pending_turns()
+        ):
+            prepared_model_change = await self._switch_llm_provider_if_needed(
+                provider=provider,
+                model=resolved_model,
+                turn_id=turn_id,
+            )
+            session = await self.ensure_session_context(
+                turn_id=turn_id,
+                restore_session_from_storage=restore_session_from_storage,
+            )
+            await self._append_queued_turn_messages(
+                session=session,
+                queued_messages=[queued_message],
+            )
         self._record_accepted_turns(queued_messages=[queued_message])
         should_track_pending_status = (
             self._turn_task is not None or self._has_pending_turns()
@@ -7334,6 +7162,8 @@ class LLMAgentProcess(AgentProcess):
                     sender=message.sender,
                     request=turn,
                     restore_session_from_storage=restore_session_from_storage,
+                    initial_message_projected=queued_message.projected,
+                    prepared_model_change=prepared_model_change,
                 )
             )
         with tracer.start_as_current_span("agent.turn.accepted.emit"):
