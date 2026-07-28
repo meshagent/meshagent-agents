@@ -10,13 +10,22 @@ from typing import Any
 
 import aiohttp
 
-from meshagent.api import Participant, RemoteParticipant, RoomClient, RoomException
+from meshagent.api import (
+    MessagingStream,
+    Participant,
+    RemoteParticipant,
+    RoomClient,
+    RoomException,
+    RoomMessage,
+)
 from meshagent.api.http import new_client_session
 from meshagent.api.messaging import ErrorContent, JsonContent, ensure_content
 from meshagent.tools import FunctionTool, ToolContext, Toolkit
 
 from .chat_channel import (
     DEFAULT_WEBSOCKET_MAX_MSG_SIZE,
+    MESSAGING_CHAT_THREAD_LIST_SUBSCRIBE_TYPE,
+    MESSAGING_CHAT_THREAD_SUBSCRIBE_TYPE,
     MsgpackWebSocketChatEncoding,
     WebSocketChatEncoding,
 )
@@ -73,6 +82,7 @@ from .messages import (
     AgentReasoningContentDelta,
     AgentTextContent,
     AgentTextContentDelta,
+    AgentThreadMessage,
     AgentToolCallArgumentsDelta,
     AgentToolCallLogDelta,
     AgentUsageUpdated,
@@ -98,6 +108,8 @@ from .messages import (
     TurnSteered,
     TurnSteerRejected,
     TurnStartRejected,
+    UnwatchThreads,
+    WatchThreads,
     parse_agent_message,
 )
 from .process import Message
@@ -159,6 +171,41 @@ class AcceptedAgentInput:
     message_id: str
     role: str
     text: str
+
+
+class ThreadSubscribe:
+    """A thread subscription whose lifetime is bound to a messaging stream."""
+
+    def __init__(self, *, thread_id: str, stream: MessagingStream) -> None:
+        self.thread_id = thread_id
+        self.stream = stream
+
+    @property
+    def closed(self) -> bool:
+        return self.stream.closed
+
+    async def send(self, payload: AgentMessage) -> None:
+        await self.stream.send_message(
+            type="agent-message",
+            message=payload.model_dump(mode="json"),
+        )
+
+    async def close(self) -> None:
+        await self.stream.close()
+
+
+class ThreadListSubscribe:
+    """A thread-list subscription whose lifetime is bound to a messaging stream."""
+
+    def __init__(self, *, stream: MessagingStream) -> None:
+        self.stream = stream
+
+    @property
+    def closed(self) -> bool:
+        return self.stream.closed
+
+    async def close(self) -> None:
+        await self.stream.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1914,7 +1961,9 @@ class ChatThreadSession:
         return
 
 
-class MessagingChatClient(BaseChatClient):
+class BaseMessagingChatClient(BaseChatClient):
+    """Shared unary messaging transport used by messaging chat clients."""
+
     def __init__(
         self,
         *,
@@ -2162,6 +2211,165 @@ class MessagingChatClient(BaseChatClient):
             message=payload.model_dump(mode="json"),
             attachment=None,
         )
+
+
+class LegacyMessagingChatClient(BaseMessagingChatClient):
+    """Compatibility client that sends ThreadOpen/ThreadClose messages."""
+
+
+class MessagingChatClient(BaseMessagingChatClient):
+    """Messaging chat client that uses lifetime-bound thread subscriptions."""
+
+    def __init__(
+        self,
+        *,
+        room: RoomClient,
+        participant_name: str,
+        timeout: float = 30,
+    ) -> None:
+        super().__init__(
+            room=room,
+            participant_name=participant_name,
+            timeout=timeout,
+        )
+        self._thread_subscriptions: dict[str, ThreadSubscribe] = {}
+        self._thread_list_subscription: ThreadListSubscribe | None = None
+        self._stream_tasks: set[asyncio.Task[None]] = set()
+
+    async def _stop_transport(self) -> None:
+        subscriptions: list[ThreadSubscribe | ThreadListSubscribe] = list(
+            self._thread_subscriptions.values()
+        )
+        if self._thread_list_subscription is not None:
+            subscriptions.append(self._thread_list_subscription)
+        self._thread_subscriptions.clear()
+        self._thread_list_subscription = None
+        for subscription in subscriptions:
+            await subscription.close()
+        stream_tasks = list(self._stream_tasks)
+        for task in stream_tasks:
+            task.cancel()
+        if stream_tasks:
+            await asyncio.gather(*stream_tasks, return_exceptions=True)
+        await super()._stop_transport()
+
+    def _supports_thread_subscriptions(self) -> bool:
+        return (
+            self._participant is not None
+            and self._participant.get_attribute("supports_messaging_streams") is True
+        )
+
+    async def _send_agent_message(self, payload: AgentMessage) -> None:
+        if self._participant is None:
+            raise RoomException("chat client not started")
+        if self._supports_thread_subscriptions() and isinstance(payload, OpenThread):
+            previous = self._thread_subscriptions.pop(payload.thread_id, None)
+            if previous is not None:
+                await previous.close()
+            stream = await self._room.messaging.stream(
+                to=self._participant,
+                type=MESSAGING_CHAT_THREAD_SUBSCRIBE_TYPE,
+                message=payload.model_dump(mode="json"),
+            )
+            subscription = ThreadSubscribe(thread_id=payload.thread_id, stream=stream)
+            self._thread_subscriptions[payload.thread_id] = subscription
+            self._track_stream(
+                stream=subscription.stream,
+                thread_id=payload.thread_id,
+                is_thread_list=False,
+            )
+            return
+        if self._supports_thread_subscriptions() and isinstance(payload, CloseThread):
+            subscription = self._thread_subscriptions.pop(payload.thread_id, None)
+            if subscription is not None:
+                await subscription.close()
+                return
+        if self._supports_thread_subscriptions() and isinstance(payload, WatchThreads):
+            previous = self._thread_list_subscription
+            if previous is not None:
+                await previous.close()
+            stream = await self._room.messaging.stream(
+                to=self._participant,
+                type=MESSAGING_CHAT_THREAD_LIST_SUBSCRIBE_TYPE,
+                message=payload.model_dump(mode="json"),
+            )
+            subscription = ThreadListSubscribe(stream=stream)
+            self._thread_list_subscription = subscription
+            self._track_stream(
+                stream=subscription.stream,
+                thread_id=None,
+                is_thread_list=True,
+            )
+            return
+        if self._supports_thread_subscriptions() and isinstance(
+            payload, UnwatchThreads
+        ):
+            subscription = self._thread_list_subscription
+            self._thread_list_subscription = None
+            if subscription is not None:
+                await subscription.close()
+                return
+        if self._supports_thread_subscriptions() and isinstance(
+            payload, AgentThreadMessage
+        ):
+            subscription = self._thread_subscriptions.get(payload.thread_id)
+            if subscription is not None:
+                await subscription.send(payload)
+                return
+        await super()._send_agent_message(payload)
+
+    def _track_stream(
+        self,
+        *,
+        stream: MessagingStream,
+        thread_id: str | None,
+        is_thread_list: bool,
+    ) -> None:
+        task = asyncio.create_task(
+            self._consume_stream(
+                stream=stream,
+                thread_id=thread_id,
+                is_thread_list=is_thread_list,
+            )
+        )
+        self._stream_tasks.add(task)
+
+        def done(completed: asyncio.Task[None]) -> None:
+            self._stream_tasks.discard(completed)
+            _consume_task_exception(completed)
+
+        task.add_done_callback(done)
+
+    async def _consume_stream(
+        self,
+        *,
+        stream: MessagingStream,
+        thread_id: str | None,
+        is_thread_list: bool,
+    ) -> None:
+        try:
+            async for event in stream:
+                if not isinstance(event, RoomMessage):
+                    continue
+                if event.type != "agent-message":
+                    continue
+                raw_message = event.message
+                if not isinstance(raw_message, dict):
+                    continue
+                if not isinstance(raw_message.get("type"), str):
+                    continue
+                self._handle_agent_payload(raw_message)
+        finally:
+            if is_thread_list:
+                if (
+                    self._thread_list_subscription is not None
+                    and self._thread_list_subscription.stream is stream
+                ):
+                    self._thread_list_subscription = None
+            elif thread_id is not None:
+                current = self._thread_subscriptions.get(thread_id)
+                if current is not None and current.stream is stream:
+                    self._thread_subscriptions.pop(thread_id, None)
 
 
 class WebSocketChatClient(BaseChatClient):

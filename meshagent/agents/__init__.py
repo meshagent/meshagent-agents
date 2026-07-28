@@ -25,6 +25,8 @@ from .thread_status_publisher import (
 )
 from .chat_channel import (
     BaseChatChannel,
+    BaseMessagingChatChannel,
+    LegacyMessagingChatChannel,
     MessagingChatChannel,
     MsgpackWebSocketChatEncoding,
     WebSocketChatChannel,
@@ -34,10 +36,14 @@ from .web_participant import WebParticipant
 from .chat_client import (
     AcceptedAgentInput,
     BaseChatClient,
+    BaseMessagingChatClient,
     ChatThreadSession,
+    LegacyMessagingChatClient,
     LocalChatClient,
     MessagingChatClient,
     PendingAgentInput,
+    ThreadListSubscribe,
+    ThreadSubscribe,
     WebSocketChatClient,
 )
 from .mail_channel import MailChannel
@@ -82,6 +88,8 @@ __all__ = [
     "ThreadStatusPublisher",
     "ThreadedChannel",
     "BaseChatChannel",
+    "BaseMessagingChatChannel",
+    "LegacyMessagingChatChannel",
     "MessagingChatChannel",
     "MsgpackWebSocketChatEncoding",
     "WebSocketChatChannel",
@@ -89,10 +97,14 @@ __all__ = [
     "WebParticipant",
     "AcceptedAgentInput",
     "BaseChatClient",
+    "BaseMessagingChatClient",
     "ChatThreadSession",
+    "LegacyMessagingChatClient",
     "LocalChatClient",
     "MessagingChatClient",
     "PendingAgentInput",
+    "ThreadListSubscribe",
+    "ThreadSubscribe",
     "WebSocketChatClient",
     "MailChannel",
     "QueueChannel",
