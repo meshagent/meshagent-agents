@@ -1,8 +1,7 @@
 from .agent import SingleRoomAgent
 from meshagent.api.chan import Chan
 from meshagent.api import RoomMessage, RoomClient
-from meshagent.agents import AgentSessionContext
-from meshagent.agents.context import TaskContext
+from meshagent.agents.context import AgentSessionContext, TaskContext
 from meshagent.tools import (
     LocalRoomTool,
     RoomToolContext,

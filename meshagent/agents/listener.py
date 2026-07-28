@@ -2,10 +2,9 @@ import logging
 import asyncio
 from typing import Optional
 
-from meshagent.agents import TaskRunner
 from meshagent.api.schema_document import Element, Text
 from meshagent.api.room_server_client import RoomClient, MeshDocument
-from meshagent.agents.task_runner import TaskContext
+from meshagent.agents.task_runner import TaskContext, TaskRunner
 
 logger = logging.getLogger(__name__)
 
