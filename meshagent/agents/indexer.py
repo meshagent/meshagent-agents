@@ -1,7 +1,12 @@
-from meshagent.agents import TaskRunner, RequiredToolkit, SingleRoomAgent
+from meshagent.agents.agent import SingleRoomAgent
+from meshagent.agents.task_runner import TaskRunner
 from meshagent.tools import Toolkit, LocalRoomTool, ToolContext
 from meshagent.openai.proxy import get_client
-from meshagent.api.room_server_client import DatasetIndexConfig, RoomClient
+from meshagent.api.room_server_client import (
+    DatasetIndexConfig,
+    RequiredToolkit,
+    RoomClient,
+)
 import pyarrow as pa
 from openai import AsyncOpenAI
 from typing import Optional

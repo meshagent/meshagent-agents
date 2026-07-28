@@ -15,7 +15,7 @@ from email.message import EmailMessage
 from meshagent.api import RoomClient
 from meshagent.api import RequiredTable
 from email.policy import default
-from meshagent.agents import AgentSessionContext
+from meshagent.agents.context import AgentSessionContext
 from datetime import datetime, timezone
 import base64
 import secrets
