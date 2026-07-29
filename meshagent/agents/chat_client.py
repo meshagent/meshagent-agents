@@ -57,6 +57,7 @@ from .messages import (
     AGENT_MESSAGE_MODEL_CHANGE,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_MODELS_RESPONSE,
+    AGENT_MESSAGE_MESSAGES_INJECT,
     AGENT_MESSAGE_THREAD_START,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_DELETE,
@@ -90,6 +91,7 @@ from .messages import (
     ClientToolkitDescription,
     CloseThread,
     DeleteThread,
+    InjectMessages,
     ListThreads,
     ModelsRequest,
     ModelsResponse,
@@ -779,6 +781,15 @@ class ChatThreadSession:
         if isinstance(payload, (StartThread, TurnStart, TurnSteer)):
             self.add_agent_message(payload)
         await self._client.send(payload)
+
+    async def inject_messages(self, messages: Iterable[AgentMessage]) -> None:
+        await self.send(
+            InjectMessages(
+                type=AGENT_MESSAGE_MESSAGES_INJECT,
+                thread_id=self.thread_path,
+                messages=list(messages),
+            )
+        )
 
     async def start_thread(
         self,

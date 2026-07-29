@@ -18,6 +18,7 @@ from .image_captioner import ImageCaptioner, LLMImageCaptioner
 from .images_dataset import ImageDatasetClient, ImageDatasetRecord, ImagesDataset
 from .dataset_thread_storage import DatasetThreadStorage
 from .threaded_channel import ThreadedChannel
+from .threaded_proxy_channel import ThreadChannelFactory, ThreadedProxyChannel
 from .thread_status_publisher import (
     AgentMessageThreadStatusPublisher,
     ParticipantAttributeThreadStatusPublisher,
@@ -87,6 +88,8 @@ __all__ = [
     "ParticipantAttributeThreadStatusPublisher",
     "ThreadStatusPublisher",
     "ThreadedChannel",
+    "ThreadChannelFactory",
+    "ThreadedProxyChannel",
     "BaseChatChannel",
     "BaseMessagingChatChannel",
     "LegacyMessagingChatChannel",

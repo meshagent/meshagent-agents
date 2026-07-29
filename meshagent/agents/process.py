@@ -58,6 +58,7 @@ from .messages import (
     AGENT_MESSAGE_MODEL_CHANGE,
     AGENT_MESSAGE_MODELS_REQUEST,
     AGENT_MESSAGE_MODELS_RESPONSE,
+    AGENT_MESSAGE_MESSAGES_INJECT,
     AGENT_MESSAGE_PARTICIPANT_CONNECT,
     AGENT_MESSAGE_PARTICIPANT_DISCONNECT,
     AGENT_MESSAGE_REALTIME_AUDIO_CHUNK,
@@ -149,6 +150,7 @@ from .messages import (
     ClearThread,
     CloseThread,
     DeleteThread,
+    InjectMessages,
     ListThreads,
     ModelsRequest,
     ModelsResponse,
@@ -1301,6 +1303,12 @@ class ChatBackend:
         return None
 
 
+@dataclass(slots=True)
+class _ChannelQueueItem:
+    message: Message
+    delivered: asyncio.Future[None] | None = None
+
+
 class Channel:
     def __init__(self) -> None:
         self._channel_id: int | None = None
@@ -1308,7 +1316,7 @@ class Channel:
         self._state: ChannelState = "stopped"
         self._run_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
-        self._queue: asyncio.Queue[Message] = asyncio.Queue()
+        self._queue: asyncio.Queue[_ChannelQueueItem] = asyncio.Queue()
         self._lifecycle_lock = asyncio.Lock()
 
     @property
@@ -1327,20 +1335,60 @@ class Channel:
         del message
         return True
 
-    def send(self, message: Message) -> None:
+    def _enqueue(
+        self,
+        *,
+        message: Message,
+        delivered: asyncio.Future[None] | None = None,
+    ) -> bool:
         if self._state != "started" or self._supervisor is None:
             logger.debug("dropping channel message while channel is not started")
-            return
+            return False
 
         if self._stop.is_set():
             logger.debug("dropping channel message during shutdown")
-            return
+            return False
 
-        if self.handles(message):
+        if isinstance(message.data, InjectMessages) or self.handles(message):
             try:
-                self._queue.put_nowait(message)
+                self._queue.put_nowait(
+                    _ChannelQueueItem(message=message, delivered=delivered)
+                )
             except asyncio.QueueShutDown:
                 logger.debug("dropping channel message after queue shutdown")
+                return False
+            return True
+        return False
+
+    def send(self, message: Message) -> None:
+        self._enqueue(message=message)
+
+    async def send_and_wait(self, message: Message) -> bool:
+        delivered = asyncio.get_running_loop().create_future()
+        if not self._enqueue(message=message, delivered=delivered):
+            return False
+        await delivered
+        return True
+
+    async def inject_messages(
+        self,
+        *,
+        thread_id: str,
+        messages: list[AgentMessage],
+        sender: Participant | None = None,
+        to_participant_id: str | None = None,
+    ) -> bool:
+        return await self.send_and_wait(
+            Message(
+                data=InjectMessages(
+                    type=AGENT_MESSAGE_MESSAGES_INJECT,
+                    thread_id=thread_id,
+                    messages=messages,
+                ),
+                sender=sender,
+                to_participant_id=to_participant_id,
+            )
+        )
 
     def emit(
         self,
@@ -1409,8 +1457,61 @@ class Channel:
     async def run(self) -> None:
         while not self._stop.is_set():
             with contextlib.suppress(asyncio.QueueShutDown):
-                message = await self._queue.get()
-                await self.on_message(message)
+                item = await self._queue.get()
+                try:
+                    pending = [
+                        (
+                            item.message,
+                            not isinstance(item.message.data, InjectMessages),
+                        )
+                    ]
+                    while len(pending) > 0:
+                        message, already_handled = pending.pop(0)
+                        if isinstance(message.data, InjectMessages):
+                            injected: list[tuple[Message, bool]] = []
+                            for payload in message.data.messages:
+                                if (
+                                    isinstance(payload, AgentThreadMessage)
+                                    and payload.thread_id != message.data.thread_id
+                                ):
+                                    raise ValueError(
+                                        "injected message thread_id does not match "
+                                        "the injection thread_id"
+                                    )
+                                injected.append(
+                                    (
+                                        Message(
+                                            data=payload,
+                                            sender=message.sender,
+                                            source=message.source,
+                                            to_participant_id=message.to_participant_id,
+                                            source_channel_id=message.source_channel_id,
+                                        ),
+                                        False,
+                                    )
+                                )
+                            pending[0:0] = injected
+                            continue
+                        if already_handled or self.handles(message):
+                            await self.on_message(message)
+                except BaseException as exc:
+                    if item.delivered is not None and not item.delivered.done():
+                        item.delivered.set_exception(exc)
+                    raise
+                else:
+                    if item.delivered is not None and not item.delivered.done():
+                        item.delivered.set_result(None)
+
+    def _fail_pending_deliveries(self) -> None:
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except (asyncio.QueueEmpty, asyncio.QueueShutDown):
+                return
+            if item.delivered is not None and not item.delivered.done():
+                item.delivered.set_exception(
+                    RuntimeError("channel stopped before message delivery")
+                )
 
     async def start(self, supervisor: AgentSupervisor) -> None:
         async with self._lifecycle_lock:
@@ -1452,6 +1553,7 @@ class Channel:
                 self._queue.shutdown()
                 if self._run_task is not None:
                     await self._run_task
+                self._fail_pending_deliveries()
                 await self.on_stop()
             except Exception:
                 logger.exception("channel failed during stop")
