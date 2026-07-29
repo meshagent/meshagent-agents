@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 
+from meshagent.api import RoomException
 from meshagent.agents.chat_channel import MsgpackWebSocketChatEncoding
 from meshagent.agents.chat_client import (
     BaseChatClient,
@@ -22,6 +23,7 @@ from meshagent.agents.messages import (
     AGENT_EVENT_TURN_START_ACCEPTED,
     AGENT_EVENT_TURN_ENDED,
     AGENT_EVENT_TURN_STARTED,
+    AGENT_MESSAGE_MESSAGES_INJECT,
     AGENT_MESSAGE_THREAD_LIST,
     AGENT_MESSAGE_THREAD_CLOSE,
     AGENT_MESSAGE_THREAD_OPEN,
@@ -39,6 +41,7 @@ from meshagent.agents.messages import (
     AgentThreadStatus,
     AgentTextContentDelta,
     CloseThread,
+    InjectMessages,
     OpenThread,
     ThreadCreated,
     ThreadStarted,
@@ -101,6 +104,45 @@ class _RecordingChatClient(BaseChatClient):
 
     async def _send_agent_message(self, payload: AgentMessage) -> None:
         self.sent.append(payload.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_inject_messages_sends_typed_thread_envelope() -> (
+    None
+):
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path="/threads/test.thread")
+    replay = [
+        TurnStart(
+            type=AGENT_MESSAGE_TURN_START,
+            thread_id="/threads/test.thread",
+            content=[AgentTextContent(type="text", text="stored")],
+        ),
+        ThreadLoaded(
+            type=AGENT_EVENT_THREAD_LOADED,
+            thread_id="/threads/test.thread",
+            source_message_id="open-1",
+        ),
+    ]
+
+    await session.inject_messages(replay)
+
+    injected = parse_agent_message(client.sent[-1])
+    assert isinstance(injected, InjectMessages)
+    assert injected.type == AGENT_MESSAGE_MESSAGES_INJECT
+    assert injected.thread_id == "/threads/test.thread"
+    assert injected.messages == replay
+    assert session.messages == ()
+    assert session.pending_inputs == ()
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_session_inject_messages_requires_started_thread() -> None:
+    client = _RecordingChatClient()
+    session = client._create_thread_session(thread_path=None)
+
+    with pytest.raises(RoomException, match="chat thread session not started"):
+        await session.inject_messages([])
 
 
 def test_agent_message_serializes_created_at_by_default() -> None:
