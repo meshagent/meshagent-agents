@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC
+import base64
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from meshagent.api.agent_content import AgentFileContent, AgentTextContent
-from meshagent.api.messaging import Content
+from meshagent.api.messaging import Content, FileContent
 
 from .messages import (
     AgentAudioGenerationCompleted,
@@ -49,12 +50,15 @@ from .messages import (
 from .stream_content_accumulator import FileContentAccumulator, TextContentAccumulator
 
 
+AgentFileReader = Callable[[str], Awaitable[FileContent | None]]
+
+
 class AgentEventReader(Protocol):
     def __call__(self, message: AgentMessage) -> None: ...
 
     def consume(self, message: AgentMessage) -> None: ...
 
-    def finalize(self) -> None: ...
+    async def finalize(self, *, file_reader: AgentFileReader | None = None) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +136,22 @@ class AccumulatingAgentEventReader(ABC):
         self._files = FileContentAccumulator()
         self._tool_calls_by_item_id: dict[str, _BufferedToolCall] = {}
         self._reasoning_metadata_by_item_id: dict[str, dict[str, Any]] = {}
+        self._pending_file_resolutions: list[
+            tuple[str, Callable[[FileContent], None]]
+        ] = []
 
-    def _emit_context_message(self, message: dict[str, Any]) -> None:
-        self._emit_message(deepcopy(message))
+    def _emit_context_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        emitted_message = deepcopy(message)
+        self._emit_message(emitted_message)
+        return emitted_message
+
+    def _defer_file_resolution(
+        self,
+        *,
+        url: str,
+        resolve: Callable[[FileContent], None],
+    ) -> None:
+        self._pending_file_resolutions.append((url, resolve))
 
     def __call__(self, message: AgentMessage) -> None:
         self.consume(message)
@@ -331,13 +348,14 @@ class AccumulatingAgentEventReader(ABC):
             return
 
         if isinstance(message, AgentContextCompacted):
-            self.finalize()
+            self._flush_pending()
             if message.messages is not None:
                 self._text.clear()
                 self._reasoning.clear()
                 self._reasoning_metadata_by_item_id.clear()
                 self._files.clear()
                 self._tool_calls_by_item_id.clear()
+                self._pending_file_resolutions.clear()
             self._callbacks.restore_compacted_context(message)
             if message.messages is not None:
                 self._restore_compacted_messages(messages=message.messages)
@@ -347,7 +365,7 @@ class AccumulatingAgentEventReader(ABC):
             self._callbacks.update_usage(message)
             return
 
-    def finalize(self) -> None:
+    def _flush_pending(self) -> None:
         for item_id in list(self._text.item_ids()):
             self._flush_text_item(item_id=item_id)
         for item_id in list(self._reasoning.item_ids()):
@@ -365,6 +383,17 @@ class AccumulatingAgentEventReader(ABC):
                 },
             )
 
+    async def finalize(self, *, file_reader: AgentFileReader | None = None) -> None:
+        self._flush_pending()
+        pending_file_resolutions = self._pending_file_resolutions
+        self._pending_file_resolutions = []
+        if file_reader is None:
+            return
+        for url, resolve in pending_file_resolutions:
+            content = await file_reader(url)
+            if content is not None:
+                resolve(content)
+
     def _record_event(self, *, message: AgentMessage) -> None:
         self._callbacks.record_event(message)
 
@@ -375,13 +404,17 @@ class AccumulatingAgentEventReader(ABC):
         text_parts: list[str] = []
         for item in message.content:
             item_json = item.model_dump(mode="json")
-            content.append(item_json)
             if isinstance(item, AgentTextContent):
                 text_parts.append(item.text)
             elif isinstance(item, AgentFileContent):
                 text_parts.append(f"attached file: {item.url}")
+            content.append(item_json)
 
-        if len(content) == 1 and len(text_parts) == 1:
+        if (
+            len(content) == 1
+            and len(text_parts) == 1
+            and isinstance(message.content[0], AgentTextContent)
+        ):
             self._append_user_text(text_parts[0])
             return
 
@@ -477,36 +510,57 @@ class AccumulatingAgentEventReader(ABC):
             )
         return ""
 
-    @abstractmethod
     def _append_user_text(self, text: str) -> None:
-        raise NotImplementedError
+        self._emit_context_message({"role": "user", "content": text})
 
-    @abstractmethod
     def _append_user_content(self, content: list[dict[str, Any]]) -> None:
-        raise NotImplementedError
+        emitted_message = self._emit_context_message(
+            {"role": "user", "content": content}
+        )
+        emitted_content = emitted_message["content"]
+        for item in emitted_content:
+            if not isinstance(item, dict) or item.get("type") != "file":
+                continue
+            url = item.get("url")
+            if not isinstance(url, str) or url.startswith("data:"):
+                continue
 
-    @abstractmethod
+            def resolve_file(
+                file_content: FileContent,
+                *,
+                item: dict[str, Any] = item,
+            ) -> None:
+                mime_type = file_content.mime_type or "application/octet-stream"
+                item["url"] = (
+                    f"data:{mime_type};base64,"
+                    f"{base64.b64encode(file_content.data).decode('ascii')}"
+                )
+                item["name"] = file_content.name
+                item["mime_type"] = mime_type
+
+            self._defer_file_resolution(url=url, resolve=resolve_file)
+
     def _append_assistant_text(self, *, text: str, phase: str | None) -> None:
-        raise NotImplementedError
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        if phase is not None:
+            message["phase"] = phase
+        self._emit_context_message(message)
 
-    @abstractmethod
     def _append_assistant_reasoning(
         self,
         *,
         text: str,
         metadata: dict[str, Any],
     ) -> None:
-        raise NotImplementedError
+        del metadata
+        self._emit_context_message({"role": "assistant", "reasoning": text})
 
-    @abstractmethod
     def _append_assistant_file(self, *, url: str) -> None:
-        raise NotImplementedError
+        self._emit_context_message({"role": "assistant", "file": url})
 
-    @abstractmethod
     def _append_thread_event(self, *, event: dict[str, Any]) -> None:
-        raise NotImplementedError
+        self._emit_context_message({"role": "assistant", "event": event})
 
-    @abstractmethod
     def _append_tool_call(
         self,
         *,
@@ -514,9 +568,24 @@ class AccumulatingAgentEventReader(ABC):
         result: dict[str, Any] | None,
         error: dict[str, Any] | None,
     ) -> None:
-        raise NotImplementedError
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "tool_call": {
+                    "item_id": tool_call.item_id,
+                    "namespace": tool_call.namespace,
+                    "call_id": tool_call.call_id,
+                    "toolkit": tool_call.toolkit,
+                    "tool": tool_call.tool,
+                    "arguments_json": tool_call.arguments_json(),
+                    "arguments": tool_call.arguments_dict(),
+                    "result": result,
+                    "error": error,
+                    "logs": tool_call.logs,
+                },
+            }
+        )
 
-    @abstractmethod
     def _append_image_generation_event(
         self,
         *,
@@ -530,9 +599,23 @@ class AccumulatingAgentEventReader(ABC):
         images: list[dict[str, Any]],
         status: str,
     ) -> None:
-        raise NotImplementedError
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "image_generation": {
+                    "event_type": event_type,
+                    "turn_id": turn_id,
+                    "item_id": item_id,
+                    "call_id": call_id,
+                    "toolkit": toolkit,
+                    "tool": tool,
+                    "arguments": arguments,
+                    "images": images,
+                    "status": status,
+                },
+            }
+        )
 
-    @abstractmethod
     def _append_audio_generation_event(
         self,
         *,
@@ -541,9 +624,10 @@ class AccumulatingAgentEventReader(ABC):
         | AgentAudioGenerationCompleted
         | AgentAudioGenerationFailed,
     ) -> None:
-        raise NotImplementedError
+        self._emit_context_message(
+            {"role": "assistant", "audio_generation": message.model_dump(mode="json")}
+        )
 
-    @abstractmethod
     def _append_audio_transcription_event(
         self,
         *,
@@ -552,8 +636,13 @@ class AccumulatingAgentEventReader(ABC):
         | AgentAudioTranscriptionCompleted
         | AgentAudioTranscriptionFailed,
     ) -> None:
-        raise NotImplementedError
+        self._emit_context_message(
+            {
+                "role": "assistant",
+                "audio_transcription": message.model_dump(mode="json"),
+            }
+        )
 
-    @abstractmethod
     def _restore_compacted_messages(self, *, messages: list[dict[str, Any]]) -> None:
-        raise NotImplementedError
+        for message in messages:
+            self._emit_context_message(message)

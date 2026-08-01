@@ -236,7 +236,7 @@ async def _run_append_log_scenario(turns: list[dict[str, Any]]) -> None:
         contexts: list[list[dict[str, Any]]] = []
         for _ in range(2):
             context = AgentSessionContext(system_role=None)
-            restored.restore_session_context(
+            await restored.restore_session_context(
                 context=context,
                 llm_adapter=_test_llm_adapter(),
             )

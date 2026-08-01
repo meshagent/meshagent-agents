@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from meshagent.agents.agent_event_reader import (
@@ -312,7 +313,7 @@ def test_accumulating_agent_event_reader_roundtrips_core_agent_messages() -> Non
             created_at="2026-05-05T00:00:00Z",
         )
     )
-    reader.finalize()
+    asyncio.run(reader.finalize())
 
     assert context.messages[0] == {"role": "user", "content": "hello"}
     assert context.messages[1] == {"role": "assistant", "content": "hello"}
@@ -400,7 +401,7 @@ def test_accumulating_agent_event_reader_cancels_incomplete_tool_call() -> None:
             arguments={"marker": "cancel-me"},
         )
     )
-    reader.finalize()
+    asyncio.run(reader.finalize())
 
     assert messages[0]["tool_call"]["error"] == {
         "message": "tool call was cancelled before completion",

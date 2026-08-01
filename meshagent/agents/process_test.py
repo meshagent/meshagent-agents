@@ -716,35 +716,31 @@ class _LifecycleThreadStorage:
     def agent_messages(self) -> list[AgentMessage]:
         return [*self.messages]
 
-    def restore_session_context(
+    async def restore_session_context(
         self,
         *,
         context: AgentSessionContext,
         llm_adapter=None,
+        file_reader=None,
     ) -> None:
         del context
         del llm_adapter
-
-    async def restore_session_context_async(
-        self,
-        *,
-        context: AgentSessionContext,
-        llm_adapter=None,
-    ) -> None:
-        self.restore_session_context(context=context, llm_adapter=llm_adapter)
+        del file_reader
 
     def make_toolkit(self) -> Toolkit:
         return Toolkit(name="thread-storage", tools=[])
 
 
 class _RestoringLifecycleThreadStorage(_LifecycleThreadStorage):
-    def restore_session_context(
+    async def restore_session_context(
         self,
         *,
         context: AgentSessionContext,
         llm_adapter=None,
+        file_reader=None,
     ) -> None:
         del llm_adapter
+        del file_reader
         assistant_text_by_item_id: dict[str, list[str]] = {}
         for message in self.messages:
             if isinstance(message, TurnStart):
@@ -769,12 +765,14 @@ class _ProviderRestoreRecordingThreadStorage(_LifecycleThreadStorage):
         super().__init__(path=path)
         self.restore_calls: list[dict[str, Any]] = []
 
-    def restore_session_context(
+    async def restore_session_context(
         self,
         *,
         context: AgentSessionContext,
         llm_adapter=None,
+        file_reader=None,
     ) -> None:
+        del file_reader
         self.restore_calls.append(
             {
                 "context": context,
@@ -785,27 +783,34 @@ class _ProviderRestoreRecordingThreadStorage(_LifecycleThreadStorage):
 
 
 class _OpenAIRoomFileRestoreThreadStorage(_LifecycleThreadStorage):
-    def restore_session_context(
+    async def restore_session_context(
         self,
         *,
         context: AgentSessionContext,
         llm_adapter=None,
+        file_reader=None,
     ) -> None:
-        del llm_adapter
-        context.messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": "what is in the file?",
-                    },
-                    {
-                        "type": "input_file",
-                        "file_url": "room:///docs/report.pdf",
-                    },
-                ],
-            }
+        assert llm_adapter is not None
+        restored_messages = await llm_adapter.project_agent_messages(
+            messages=[
+                TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id=self.path,
+                    content=[
+                        {"type": "text", "text": "what is in the file?"},
+                        {
+                            "type": "file",
+                            "url": "room:///docs/report.pdf",
+                            "name": "report.pdf",
+                        },
+                    ],
+                )
+            ],
+            file_reader=file_reader,
+        )
+        llm_adapter.restore_context_messages(
+            context=context,
+            messages=restored_messages,
         )
 
 
@@ -6119,15 +6124,16 @@ async def test_llm_agent_process_traces_turn_lifecycle(
 
     span_names = [span.name for span in recorded_tracer.spans]
     assert span_names == [
+        "agent.turn.context.load",
+        "agent.turn.context.initialize",
+        "agent.turn.context.restore_hooks",
+        "agent.turn.context.start",
         "agent.turn.queue",
         "agent.turn.accepted.emit",
         "agent.turn",
         "agent.turn.pending_status.remove",
         "agent.turn.started.emit",
         "agent.turn.context.load",
-        "agent.turn.context.initialize",
-        "agent.turn.context.restore_hooks",
-        "agent.turn.context.start",
         "agent.turn.rules.load",
         "agent.turn.toolkits.build",
         "agent.turn.llm",
@@ -8179,20 +8185,17 @@ async def test_llm_agent_process_appends_remote_file_urls_as_image_and_file_inpu
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
 
-    assert session.image_url_calls == ["https://example.com/image.png"]
-    assert session.file_url_calls == [
-        {"url": "https://example.com/report.pdf", "filename": None}
-    ]
+    assert session.image_url_calls == []
+    assert session.file_url_calls == []
     assert session.image_message_calls == []
     assert session.file_message_calls == []
     assert adapter.calls[0]["messages"] == [
         {
             "role": "user",
-            "content": [{"type": "image-url", "url": "https://example.com/image.png"}],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "file-url", "url": "https://example.com/report.pdf"}],
+            "content": [
+                {"type": "file", "url": "https://example.com/image.png", "name": None},
+                {"type": "file", "url": "https://example.com/report.pdf", "name": None},
+            ],
         },
     ]
 
@@ -8257,21 +8260,8 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
         "docs/report.pdf",
         "audio/prompt.wav",
     ]
-    assert session.image_message_calls == [
-        {"mime_type": "image/png", "data": b"png-bytes"}
-    ]
-    assert session.file_message_calls == [
-        {
-            "filename": "report.pdf",
-            "mime_type": "application/pdf",
-            "data": b"%PDF-1.7",
-        },
-        {
-            "filename": "prompt.wav",
-            "mime_type": "audio/wav",
-            "data": b"wav-bytes",
-        },
-    ]
+    assert session.image_message_calls == []
+    assert session.file_message_calls == []
     assert session.image_url_calls == []
     assert session.file_url_calls == []
     assert adapter.calls[0]["messages"] == [
@@ -8279,32 +8269,23 @@ async def test_llm_agent_process_resolves_room_file_urls_before_appending_inputs
             "role": "user",
             "content": [
                 {
-                    "type": "image-bytes",
+                    "type": "file",
+                    "url": "data:image/png;base64,cG5nLWJ5dGVz",
+                    "name": "cat.png",
                     "mime_type": "image/png",
-                    "size": len(b"png-bytes"),
-                }
-            ],
-        },
-        {
-            "role": "user",
-            "content": [
+                },
                 {
-                    "type": "file-bytes",
-                    "filename": "report.pdf",
+                    "type": "file",
+                    "url": "data:application/pdf;base64,JVBERi0xLjc=",
+                    "name": "report.pdf",
                     "mime_type": "application/pdf",
-                    "size": len(b"%PDF-1.7"),
-                }
-            ],
-        },
-        {
-            "role": "user",
-            "content": [
+                },
                 {
-                    "type": "file-bytes",
-                    "filename": "prompt.wav",
+                    "type": "file",
+                    "url": "data:audio/wav;base64,d2F2LWJ5dGVz",
+                    "name": "prompt.wav",
                     "mime_type": "audio/wav",
-                    "size": len(b"wav-bytes"),
-                }
+                },
             ],
         },
     ]
@@ -8351,11 +8332,18 @@ async def test_llm_agent_process_handles_audio_file_attachments_as_files() -> No
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
 
-    assert session.file_message_calls == [
+    assert session.file_message_calls == []
+    assert adapter.calls[0]["messages"] == [
         {
-            "filename": "prompt.wav",
-            "mime_type": "audio/wav",
-            "data": b"wav-bytes",
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "url": "data:audio/wav;base64,d2F2LWJ5dGVz",
+                    "name": "prompt.wav",
+                    "mime_type": "audio/wav",
+                }
+            ],
         }
     ]
 
@@ -8451,9 +8439,10 @@ async def test_llm_agent_process_resolves_restored_openai_room_file_urls() -> No
     restored_part = adapter.calls[0]["messages"][0]["content"][1]
     assert room.storage.download_calls == ["docs/report.pdf"]
     assert restored_part == {
-        "type": "input_file",
-        "filename": "report.pdf",
-        "file_data": "data:application/pdf;base64,JVBERi0xLjc=",
+        "type": "file",
+        "url": "data:application/pdf;base64,JVBERi0xLjc=",
+        "name": "report.pdf",
+        "mime_type": "application/pdf",
     }
 
     await process.stop(supervisor)
@@ -8490,12 +8479,12 @@ async def test_llm_agent_process_preserves_data_url_file_attachments() -> None:
         lambda: len(supervisor.payloads(message_type=AGENT_EVENT_TURN_ENDED)) == 1
     )
 
-    assert session.file_url_calls == [{"url": data_url, "filename": "note.txt"}]
+    assert session.file_url_calls == []
     assert session.file_message_calls == []
     assert adapter.calls[0]["messages"] == [
         {
             "role": "user",
-            "content": [{"type": "file-url", "url": data_url, "filename": "note.txt"}],
+            "content": [{"type": "file", "url": data_url, "name": "note.txt"}],
         }
     ]
 

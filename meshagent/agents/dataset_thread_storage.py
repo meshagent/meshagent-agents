@@ -10,7 +10,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Literal, cast
 from urllib.parse import parse_qs, urlparse
 
 import pyarrow as pa
@@ -27,7 +27,7 @@ from meshagent.api import (
 from meshagent.api.messaging import TextContent
 from meshagent.tools import Toolkit, tool
 
-from .agent_event_reader import AgentEventReaderCallbacks
+from .agent_event_reader import AgentEventReaderCallbacks, AgentFileReader
 from .context import AgentSessionContext, SessionUsage
 from .images_dataset import ImagesDataset
 from .messages import (
@@ -57,6 +57,7 @@ from .messages import (
     AgentImageGenerationFailed,
     AgentImageGenerationPartial,
     AgentImageGenerationStarted,
+    AgentMessage,
     AgentRealtimeAudioChunk,
     AgentRealtimeAudioCommit,
     AgentThreadMessage,
@@ -2728,64 +2729,29 @@ class DatasetThreadStorage(ThreadStorage):
         normalized = raw_name.strip()
         return normalized if normalized != "" else None
 
-    def restore_session_context(
+    async def restore_session_context(
         self,
         *,
         context: AgentSessionContext,
         llm_adapter: "LLMAdapter[Any] | None" = None,
-    ) -> None:
-        if llm_adapter is not None:
-            restored_messages: list[dict[str, Any]] = []
-            reader = llm_adapter.make_agent_event_reader(
-                emit_message=restored_messages.append,
-                callbacks=self._agent_event_reader_callbacks(
-                    context=context,
-                    restored_messages=restored_messages,
-                ),
-            )
-            for row in self._rows:
-                for message in self._messages_from_row(row=row):
-                    if isinstance(message, AgentThreadEvent):
-                        continue
-                    reader(message)
-            reader.finalize()
-            llm_adapter.restore_context_messages(
-                context=context,
-                messages=restored_messages,
-            )
-            return
-
-        rows = self._rows
-        if len(rows) > self._max_append_message_count:
-            first_message = len(rows) - self._max_append_message_count
-            rows = rows[first_message:]
-            context.append_assistant_message(
-                "there are more messages outside the current context window, "
-                f"the index of the first message loaded is {first_message}"
-            )
-
-        for row in rows:
-            self._restore_row(context=context, row=row)
-
-    async def restore_session_context_async(
-        self,
-        *,
-        context: AgentSessionContext,
-        llm_adapter: "LLMAdapter[Any] | None" = None,
+        file_reader: AgentFileReader | None = None,
     ) -> None:
         await self._ensure_ready()
         if llm_adapter is None:
-            self.restore_session_context(context=context)
+            rows = self._rows
+            if len(rows) > self._max_append_message_count:
+                first_message = len(rows) - self._max_append_message_count
+                rows = rows[first_message:]
+                context.append_assistant_message(
+                    "there are more messages outside the current context window, "
+                    f"the index of the first message loaded is {first_message}"
+                )
+
+            for row in rows:
+                self._restore_row(context=context, row=row)
             return
 
-        restored_messages: list[dict[str, Any]] = []
-        reader = llm_adapter.make_agent_event_reader(
-            emit_message=restored_messages.append,
-            callbacks=self._agent_event_reader_callbacks(
-                context=context,
-                restored_messages=restored_messages,
-            ),
-        )
+        agent_messages: list[AgentMessage] = []
         images_dataset = ImagesDataset(self._client)
         for row in self._rows:
             for message in await self._messages_from_row_async(
@@ -2794,8 +2760,15 @@ class DatasetThreadStorage(ThreadStorage):
             ):
                 if isinstance(message, AgentThreadEvent):
                     continue
-                reader(message)
-        reader.finalize()
+                agent_messages.append(message)
+        callbacks = self._agent_event_reader_callbacks(
+            context=context,
+        )
+        restored_messages = await llm_adapter.project_agent_messages(
+            messages=agent_messages,
+            file_reader=file_reader,
+            callbacks=callbacks,
+        )
         llm_adapter.restore_context_messages(
             context=context,
             messages=restored_messages,
@@ -2805,7 +2778,7 @@ class DatasetThreadStorage(ThreadStorage):
     def _agent_event_reader_callbacks(
         *,
         context: AgentSessionContext,
-        restored_messages: list[dict[str, Any]],
+        clear_projected_messages: Callable[[], None] | None = None,
     ) -> AgentEventReaderCallbacks:
         def update_usage(message: AgentUsageUpdated) -> None:
             context.last_usage = SessionUsage(
@@ -2824,7 +2797,8 @@ class DatasetThreadStorage(ThreadStorage):
             }
             if message.messages is None:
                 return
-            restored_messages.clear()
+            if clear_projected_messages is not None:
+                clear_projected_messages()
             context.messages.clear()
 
         return AgentEventReaderCallbacks(

@@ -665,7 +665,7 @@ async def test_dataset_thread_storage_shared_restore_conformance(
         restored_contexts: list[list[dict[str, Any]]] = []
         for _ in range(2):
             context = AgentSessionContext(system_role=None)
-            storage.restore_session_context(
+            await storage.restore_session_context(
                 context=context,
                 llm_adapter=_test_llm_adapter(),
             )
@@ -1229,7 +1229,9 @@ async def test_dataset_thread_storage_restores_realtime_audio_chunk_with_llm_rea
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
     assert "agent_events" not in context.metadata
 
 
@@ -1600,7 +1602,9 @@ async def test_dataset_thread_storage_restores_usage_updates() -> None:
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
 
     assert context.last_usage == SessionUsage(
         model="gpt-test",
@@ -1652,7 +1656,9 @@ async def test_dataset_thread_storage_restores_compacted_context_messages() -> N
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
 
     assert context.messages == compacted_messages
 
@@ -1696,7 +1702,9 @@ async def test_dataset_thread_storage_restore_skips_thread_events_after_compacti
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
 
     assert context.messages == compacted_messages
 
@@ -1851,7 +1859,7 @@ async def test_dataset_thread_storage_restores_text_phase() -> None:
     try:
         await restored.wait_until_ready()
         context = AgentSessionContext(system_role=None)
-        restored.restore_session_context(
+        await restored.restore_session_context(
             context=context,
             llm_adapter=_test_llm_adapter(),
         )
@@ -1918,7 +1926,9 @@ async def test_dataset_thread_storage_restores_streamed_text_as_single_message()
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
 
     assert context.messages == [{"role": "assistant", "content": "Hi there"}]
     assert "agent_events" not in context.metadata
@@ -2355,7 +2365,9 @@ async def test_dataset_thread_storage_does_not_persist_binary_image_generation_r
     assert ended["type"] == "meshagent.agent.tool_call.ended"
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
     assert context.messages[0]["role"] == "assistant"
     content = context.messages[0]["content"][0]
     assert content["type"] == "tool_call"
@@ -2504,7 +2516,7 @@ async def test_dataset_thread_storage_async_restore_hydrates_image_dataset_uris(
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    await storage.restore_session_context_async(
+    await storage.restore_session_context(
         context=context,
         llm_adapter=_test_llm_adapter(),
     )
@@ -2859,7 +2871,9 @@ async def test_dataset_thread_storage_loads_rows_sorted_by_sequence_for_restore(
     assert restored_messages[0].created_at == "2026-03-10T00:00:00Z"
     assert restored_messages[1].created_at == "2026-03-11T00:00:00Z"
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
     await storage.stop()
 
     assert context.messages == [
@@ -3034,7 +3048,9 @@ async def test_dataset_thread_storage_restores_context_with_llm_reader() -> None
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
 
     assert context.messages[0] == {"role": "user", "content": "question"}
     assert context.messages[1] == {"role": "assistant", "content": "answer"}
@@ -3095,7 +3111,9 @@ async def test_dataset_thread_storage_preserves_encrypted_reasoning_metadata_for
     await storage.stop()
 
     context = AgentSessionContext(system_role=None)
-    storage.restore_session_context(context=context, llm_adapter=_test_llm_adapter())
+    await storage.restore_session_context(
+        context=context, llm_adapter=_test_llm_adapter()
+    )
 
     assert context.messages == [
         {

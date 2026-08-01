@@ -13,7 +13,14 @@ from meshagent.api.agent_content import (
 )
 from meshagent.api.messaging import Content
 from meshagent.api.messaging import unpack_content_parts
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    field_serializer,
+    field_validator,
+)
 
 __all__ = [
     "AgentContent",
@@ -48,6 +55,7 @@ AGENT_MESSAGE_THREAD_RENAME = "meshagent.agent.thread.rename"
 AGENT_MESSAGE_THREAD_LIST = "meshagent.agent.thread.list"
 AGENT_MESSAGE_THREAD_WATCH = "meshagent.agent.thread.watch"
 AGENT_MESSAGE_THREAD_UNWATCH = "meshagent.agent.thread.unwatch"
+AGENT_MESSAGE_MESSAGES_INJECT = "meshagent.agent.messages.inject"
 AGENT_EVENT_THREAD_LISTED = "meshagent.agent.thread.listed"
 AGENT_EVENT_THREAD_CREATED = "meshagent.agent.thread.created"
 AGENT_EVENT_THREAD_UPDATED = "meshagent.agent.thread.updated"
@@ -314,6 +322,21 @@ class OpenThread(AgentThreadMessage):
 
 class CloseThread(AgentThreadMessage):
     type: Literal[AGENT_MESSAGE_THREAD_CLOSE]
+
+
+class InjectMessages(AgentThreadMessage):
+    type: Literal[AGENT_MESSAGE_MESSAGES_INJECT]
+    messages: list[SerializeAsAny[AgentMessage]] = Field(default_factory=list)
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def _parse_messages(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [
+            parse_agent_message(message) if isinstance(message, dict) else message
+            for message in value
+        ]
 
 
 class ParticipantConnect(AgentMessage):
@@ -1017,6 +1040,7 @@ _AGENT_MESSAGE_MODELS: dict[str, type[AgentMessage]] = {
     AGENT_MESSAGE_THREAD_CLEAR: ClearThread,
     AGENT_MESSAGE_THREAD_OPEN: OpenThread,
     AGENT_MESSAGE_THREAD_CLOSE: CloseThread,
+    AGENT_MESSAGE_MESSAGES_INJECT: InjectMessages,
     AGENT_MESSAGE_PARTICIPANT_CONNECT: ParticipantConnect,
     AGENT_MESSAGE_PARTICIPANT_DISCONNECT: ParticipantDisconnect,
     AGENT_MESSAGE_THREAD_DELETE: DeleteThread,
