@@ -1844,9 +1844,6 @@ class _OpenAIAgentEventPublisher:
         phase = self._message_phase_for_event(event=event)
         if content_kind == "text":
             self.emitter.emit_text_started(item_id=item_id, phase=phase)
-            self.emitter.emit_text_delta(
-                item_id=item_id, text=_part_text(part), phase=phase
-            )
             return
 
         if content_kind == "reasoning":
