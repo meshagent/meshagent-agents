@@ -148,6 +148,26 @@ class AgentLLMMessage(AgentThreadMessage):
     model: str | None = None
 
 
+class LLMAuthorization(BaseModel):
+    token: str
+    expires_at: datetime
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        token = value.strip()
+        if token == "":
+            raise ValueError("LLM authorization token must not be empty")
+        return token
+
+    def is_expired(self, *, now: datetime | None = None) -> bool:
+        current = now or datetime.now(timezone.utc)
+        expiration = self.expires_at
+        if expiration.tzinfo is None:
+            expiration = expiration.replace(tzinfo=timezone.utc)
+        return expiration <= current
+
+
 class ToolChoice(BaseModel):
     toolkit_name: str
     tool_name: str
@@ -191,6 +211,7 @@ class StartThread(AgentMessage):
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
     storage: str | None = None
+    llm_authorization: LLMAuthorization | None = None
 
 
 class TurnStart(AgentThreadMessage):
@@ -215,6 +236,7 @@ class TurnStart(AgentThreadMessage):
     toolkits: dict[str, TurnToolkitConfig] | None = None
     tool_choice: ToolChoice | None = None
     storage: str | None = None
+    llm_authorization: LLMAuthorization | None = None
 
 
 def scrub_agent_message_for_storage(message: AgentMessage) -> AgentMessage:
@@ -223,7 +245,7 @@ def scrub_agent_message_for_storage(message: AgentMessage) -> AgentMessage:
 
     updated_mcp = message.mcp
     updated_toolkits = message.toolkits
-    changed = False
+    changed = message.llm_authorization is not None
 
     if message.mcp is not None:
         servers = []
@@ -268,7 +290,11 @@ def scrub_agent_message_for_storage(message: AgentMessage) -> AgentMessage:
     return cast(
         AgentMessage,
         message.model_copy(
-            update={"mcp": updated_mcp, "toolkits": updated_toolkits},
+            update={
+                "mcp": updated_mcp,
+                "toolkits": updated_toolkits,
+                "llm_authorization": None,
+            },
             deep=True,
         ),
     )

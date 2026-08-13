@@ -45,6 +45,7 @@ class AgentSessionContext:
         self.turn_count = turn_count or 0
         self.last_usage = last_usage
         self._usage_callback = usage_callback
+        self._llm_authorization_token: str | None = None
 
     async def start(self) -> None:
         return None
@@ -60,6 +61,13 @@ class AgentSessionContext:
         callback = self._usage_callback
         if callback is not None:
             callback(usage)
+
+    @property
+    def llm_authorization_token(self) -> str | None:
+        return self._llm_authorization_token
+
+    def set_llm_authorization_token(self, token: str | None) -> None:
+        self._llm_authorization_token = token
 
     async def __aenter__(self) -> "AgentSessionContext":
         await self.start()

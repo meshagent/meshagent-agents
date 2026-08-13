@@ -9034,6 +9034,60 @@ async def test_llm_agent_process_rejects_unknown_turn_provider() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_process_required_delegation_rejection_targets_sender_only() -> (
+    None
+):
+    adapter = _RecordingLLMAdapter(session=_LifecycleSession())
+    supervisor = _RecordingSupervisor()
+    channel = _ParticipantRoutingChannel()
+    supervisor.channels.append(channel)
+    channel._channel_id = supervisor.register_channel(channel)
+    sender = _ThreadParticipant(name="User", participant_id="client-1")
+    other = _ThreadParticipant(name="Other", participant_id="client-2")
+    supervisor._track_participant_connected(participant_id=sender.id, sender=sender)
+    supervisor._track_participant_connected(participant_id=other.id, sender=other)
+    process = _make_llm_agent_process(
+        room=_DownloadRecordingRoom(),
+        thread_id="thread-1",
+        llm_adapter=adapter,
+        llm_delegation="required",
+    )
+
+    await process.start(supervisor)
+    try:
+        process.send(
+            Message(
+                data=TurnStart(
+                    type=AGENT_MESSAGE_TURN_START,
+                    thread_id="thread-1",
+                    content=[{"type": "text", "text": "hello"}],
+                ),
+                sender=sender,
+            )
+        )
+
+        await _wait_for(
+            lambda: (
+                len(channel.direct_payloads_by_participant_id.get(sender.id, [])) == 1
+            )
+        )
+        assert channel.direct_payloads_by_participant_id.get(other.id, []) == []
+        rejection = channel.direct_payloads_by_participant_id[sender.id][0]
+        assert isinstance(rejection, TurnStartRejected)
+        assert rejection.error.code == "llm_authorization_required"
+        assert "refresh authorization" in rejection.error.message
+        assert adapter.calls == []
+    finally:
+        await process.stop(supervisor)
+
+
+def test_llm_agent_process_recognizes_proxy_budget_exhaustion() -> None:
+    assert LLMAgentProcess._is_llm_quota_error(
+        RuntimeError("LLM delegation budget is exhausted.")
+    )
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_process_uses_optional_thread_status_publisher() -> None:
     adapter = _QueuedSteerLLMAdapter()
     publisher = _RecordingThreadStatusPublisher()

@@ -3324,6 +3324,7 @@ class AgentSupervisor:
                 client_toolkits=start_thread.client_toolkits,
                 tool_choice=start_thread.tool_choice,
                 storage=start_thread.storage,
+                llm_authorization=start_thread.llm_authorization,
             )
             turn_start = await self.on_turn_start_message(
                 turn_start,
@@ -4378,6 +4379,7 @@ class LLMAgentProcess(AgentProcess):
         session_initializer: SessionInitializer | None = None,
         turn_instructions_provider: TurnInstructionsProvider | None = None,
         turn_toolkits_builder: TurnToolkitsBuilder | None = None,
+        llm_delegation: Literal["required", "optional"] = "optional",
     ) -> None:
         super().__init__(
             thread_id=thread_id,
@@ -4479,6 +4481,10 @@ class LLMAgentProcess(AgentProcess):
         self._session_initializer = session_initializer
         self._turn_instructions_provider = turn_instructions_provider
         self._turn_toolkits_builder = turn_toolkits_builder
+        if llm_delegation not in ("required", "optional"):
+            raise ValueError("llm_delegation must be 'required' or 'optional'")
+        self._llm_delegation = llm_delegation
+        self._active_llm_authorization_token: str | None = None
         for provider in providers:
             provider.adapter.set_tool_call_approval_handler(
                 self._request_tool_call_approval
@@ -5965,6 +5971,21 @@ class LLMAgentProcess(AgentProcess):
     def _turn_error(self, *, message: str, code: str | None = None) -> AgentError:
         return AgentError(message=message, code=code)
 
+    @staticmethod
+    def _is_llm_quota_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in (
+                "insufficient_quota",
+                "quota exhausted",
+                "quota exceeded",
+                "delegation budget exhausted",
+                "delegation budget is exhausted",
+                "llm budget exhausted",
+            )
+        )
+
     def _sender_for_turn_batch(
         self,
         *,
@@ -6515,6 +6536,8 @@ class LLMAgentProcess(AgentProcess):
         previous_voice = session.metadata.get("voice")
         session.metadata["thread_id"] = thread_id
         session.metadata["turn_id"] = turn_id
+        previous_llm_authorization_token = session.llm_authorization_token
+        session.set_llm_authorization_token(self._active_llm_authorization_token)
         if self._current_voice is not None:
             session.metadata["voice"] = self._current_voice
         else:
@@ -6614,6 +6637,7 @@ class LLMAgentProcess(AgentProcess):
                 session.metadata["voice"] = previous_voice
             else:
                 session.metadata.pop("voice", None)
+            session.set_llm_authorization_token(previous_llm_authorization_token)
             self._active_next_task = None
             self._active_turn_sender = None
             self._active_turn_toolkits = None
@@ -6747,6 +6771,10 @@ class LLMAgentProcess(AgentProcess):
             turn_span_context.__exit__(type(exc), exc, exc.__traceback__)
             raise
         self._turn_id = turn_id
+        authorization = queued_turn.request.llm_authorization
+        self._active_llm_authorization_token = (
+            authorization.token if authorization is not None else None
+        )
         self._status_tool_call_accumulator.clear()
         self._status_text_by_item_id.clear()
         self._status_text_phase_by_item_id.clear()
@@ -6955,6 +6983,26 @@ class LLMAgentProcess(AgentProcess):
                 message=error_message,
                 code=exc.__class__.__name__,
             )
+            if (
+                queued_turn.request.llm_authorization is not None
+                and queued_turn.sender is not None
+                and self._is_llm_quota_error(exc)
+            ):
+                await self._send_agent_message_to_participant(
+                    participant=queued_turn.sender,
+                    payload=TurnStartRejected(
+                        type=AGENT_EVENT_TURN_START_REJECTED,
+                        thread_id=queued_turn.request.thread_id,
+                        source_message_id=queued_turn.request.message_id,
+                        error=self._turn_error(
+                            message=(
+                                "LLM authorization budget is exhausted; refresh "
+                                "authorization and retry the turn."
+                            ),
+                            code="llm_authorization_refresh_required",
+                        ),
+                    ),
+                )
         finally:
             try:
                 self._interrupt_requested_turn_id = None
@@ -6963,6 +7011,7 @@ class LLMAgentProcess(AgentProcess):
                 self._active_turn_queue_updated = None
                 self._active_turn_toolkit_client_options = {}
                 self._active_turn_tool_choice = None
+                self._active_llm_authorization_token = None
                 self._status_tool_call_accumulator.clear()
                 self._status_text_by_item_id.clear()
                 self._status_text_phase_by_item_id.clear()
@@ -7152,6 +7201,34 @@ class LLMAgentProcess(AgentProcess):
 
     async def on_turn_start(self, message: Message) -> None:
         turn = _coerce_message_data(message.data, TurnStart)
+        authorization = turn.llm_authorization
+        authorization_error: tuple[str, str] | None = None
+        if authorization is None and self._llm_delegation == "required":
+            authorization_error = (
+                "LLM authorization is required; refresh authorization and retry the turn.",
+                "llm_authorization_required",
+            )
+        elif authorization is not None and authorization.is_expired():
+            authorization_error = (
+                "LLM authorization expired; refresh authorization and retry the turn.",
+                "llm_authorization_expired",
+            )
+        if authorization_error is not None:
+            rejection = TurnStartRejected(
+                type=AGENT_EVENT_TURN_START_REJECTED,
+                thread_id=turn.thread_id,
+                source_message_id=turn.message_id,
+                error=self._turn_error(
+                    message=authorization_error[0],
+                    code=authorization_error[1],
+                ),
+            )
+            if message.sender is not None:
+                await self._send_agent_message_to_participant(
+                    participant=message.sender,
+                    payload=rejection,
+                )
+            return
         try:
             provider = self._resolve_llm_provider(turn.provider)
         except ValueError as exc:

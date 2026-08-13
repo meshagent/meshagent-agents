@@ -308,10 +308,12 @@ class LLMAdapter(Generic[TEvent]):
         protocol: Literal["websocket", "webrtc"],
         model: str | None = None,
         options: dict[str, Any] | None = None,
+        llm_authorization_token: str | None = None,
     ) -> LLMRealtimeConnectionInfo:
         del protocol
         del model
         del options
+        del llm_authorization_token
         raise RoomException(
             f"{self.provider_friendly_name()} does not support client realtime connections"
         )
