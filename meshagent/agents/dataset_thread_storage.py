@@ -90,6 +90,7 @@ from .messages import (
     TurnSteerAccepted,
     TurnSteered,
     TurnSteerRejected,
+    AGENT_MESSAGE_TURN_STEER,
     parse_agent_message,
     scrub_agent_message_for_storage,
 )
@@ -415,6 +416,7 @@ class _ActiveToolCall:
     stage: Literal["pending", "in_progress", "started"] | None = None
     argument_delta_text: str = ""
     logs: list[dict[str, str]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1361,16 +1363,10 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         if isinstance(message, TurnSteer):
-            await self._flush_turn_active_items(
-                turn_id=message.turn_id,
-                reason="completed",
-            )
-            queued = _QueuedThreadMessage(
+            # Receipt only queues steering. Assign its history position when applied.
+            self._pending_user_turns[message.message_id] = _QueuedThreadMessage(
                 message=message,
                 sender=sender,
-            )
-            await self._append_message_row(
-                message=self._turn_input_with_sender_name(queued=queued)
             )
             return
 
@@ -1387,15 +1383,38 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         if isinstance(message, TurnSteerAccepted):
-            await self._flush_turn_active_items(
-                turn_id=message.turn_id,
-                reason="completed",
+            if (
+                message.content
+                and message.source_message_id not in self._pending_user_turns
+            ):
+                self._pending_user_turns[message.source_message_id] = (
+                    _QueuedThreadMessage(
+                        message=TurnSteer(
+                            type=AGENT_MESSAGE_TURN_STEER,
+                            message_id=message.source_message_id,
+                            created_at=message.created_at,
+                            thread_id=message.thread_id,
+                            turn_id=message.turn_id,
+                            content=message.content,
+                            sender_name=message.sender_name,
+                        ),
+                        sender=sender,
+                    )
+                )
+            # An acknowledgment may carry content, but it is not model input yet.
+            await self._append_message_row(
+                message=message.model_copy(update={"content": []})
             )
-            await self._commit_pending_user_turn(
-                source_message_id=message.source_message_id,
-                turn_id=message.turn_id,
-                accepted_message=message,
-            )
+            return
+
+        if isinstance(message, TurnSteered):
+            queued = self._pending_user_turns.pop(message.source_message_id, None)
+            if queued is not None and isinstance(queued.message, TurnSteer):
+                await self._flush_turn_content_items(turn_id=message.turn_id)
+                await self._append_message_row(
+                    message=self._turn_input_with_sender_name(queued=queued)
+                )
+            await self._append_message_row(message=message)
             return
 
         if isinstance(message, TurnSteerRejected):
@@ -1634,6 +1653,12 @@ class DatasetThreadStorage(ThreadStorage):
             return
 
         if isinstance(message, TurnEnded):
+            for message_id, queued in list(self._pending_user_turns.items()):
+                if (
+                    isinstance(queued.message, TurnSteer)
+                    and queued.message.turn_id == message.turn_id
+                ):
+                    self._pending_user_turns.pop(message_id)
             await self._flush_turn_active_items(
                 turn_id=message.turn_id,
                 reason="failed" if message.error is not None else "completed",
@@ -1728,6 +1753,7 @@ class DatasetThreadStorage(ThreadStorage):
         active.toolkit = message.toolkit
         active.tool = message.tool
         active.arguments = message.arguments
+        active.metadata.update(deepcopy(message.metadata))
         if isinstance(message, AgentToolCallStarted):
             active.stage = "started"
         elif isinstance(message, AgentToolCallInProgress):
@@ -1766,7 +1792,7 @@ class DatasetThreadStorage(ThreadStorage):
         *,
         source_message_id: str,
         turn_id: str | None,
-        accepted_message: TurnStartAccepted | TurnSteerAccepted,
+        accepted_message: TurnStartAccepted,
     ) -> None:
         queued = self._pending_user_turns.pop(source_message_id, None)
         pending_row = self._pending_user_turn_rows.pop(source_message_id, None)
@@ -1889,6 +1915,7 @@ class DatasetThreadStorage(ThreadStorage):
                 model=ended_message.model,
                 namespace=ended_message.namespace,
                 call_id=ended_message.call_id,
+                metadata=deepcopy(ended_message.metadata),
             )
 
         should_persist = (
@@ -1919,6 +1946,7 @@ class DatasetThreadStorage(ThreadStorage):
                     toolkit=active.toolkit,
                     tool=active.tool,
                     arguments=active.arguments,
+                    metadata=deepcopy(active.metadata),
                     provider=active.provider,
                     model=active.model,
                 )
@@ -1948,6 +1976,7 @@ class DatasetThreadStorage(ThreadStorage):
                 call_id=active.call_id,
                 toolkit=active.toolkit,
                 tool=active.tool,
+                metadata=deepcopy(active.metadata),
                 error=AgentError(
                     message=(
                         "Tool call was cancelled"
@@ -2045,6 +2074,15 @@ class DatasetThreadStorage(ThreadStorage):
         await self._append_message_row(message=completed_message)
         return True
 
+    async def _flush_turn_content_items(self, *, turn_id: str) -> None:
+        content_item_ids = [
+            item_id
+            for item_id, active in self._active_content_by_item_id.items()
+            if active.turn_id == turn_id
+        ]
+        for item_id in content_item_ids:
+            await self._flush_content_item(item_id=item_id, reason="completed")
+
     async def _flush_turn_active_items(
         self,
         *,
@@ -2052,14 +2090,7 @@ class DatasetThreadStorage(ThreadStorage):
         reason: Literal["completed", "cancelled", "failed"],
     ) -> None:
         await self._flush_turn_audio_transcriptions(turn_id=turn_id, reason=reason)
-
-        content_item_ids = [
-            item_id
-            for item_id, active in self._active_content_by_item_id.items()
-            if active.turn_id == turn_id
-        ]
-        for item_id in content_item_ids:
-            await self._flush_content_item(item_id=item_id, reason=reason)
+        await self._flush_turn_content_items(turn_id=turn_id)
 
         tool_item_ids = [
             item_id

@@ -1015,6 +1015,7 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 arguments=info.arguments,
                 argument_bytes=info.argument_bytes,
+                metadata={"provider_item_type": info.item_type},
                 provider=self.provider,
                 model=self.model,
             )
@@ -1045,6 +1046,7 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 arguments=info.arguments,
                 argument_bytes=info.argument_bytes,
+                metadata={"provider_item_type": info.item_type},
                 provider=self.provider,
                 model=self.model,
             )
@@ -1076,6 +1078,7 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 arguments=info.arguments,
                 argument_bytes=info.argument_bytes,
+                metadata={"provider_item_type": info.item_type},
                 provider=self.provider,
                 model=self.model,
             )
@@ -1166,6 +1169,7 @@ class _AgentMessageEmitter:
                 tool=info.tool,
                 result=info.result,
                 error=info.error,
+                metadata={"provider_item_type": info.item_type},
                 provider=self.provider,
                 model=self.model,
             )

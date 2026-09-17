@@ -687,6 +687,8 @@ def test_openai_event_publisher_normalizes_mcp_builtin_delta_lifecycle() -> None
         if isinstance(message, AgentToolCallStarted)
     )
     assert final_started.arguments == {"query": "meshagent"}
+    assert final_started.metadata == {"provider_item_type": "mcp_call"}
+    assert messages[-1].metadata == {"provider_item_type": "mcp_call"}
 
 
 def test_openai_event_publisher_normalizes_code_interpreter_delta_lifecycle() -> None:

@@ -80,6 +80,7 @@ class _BufferedToolCall:
     model: str | None = None
     argument_deltas: list[str] = field(default_factory=list)
     logs: list[dict[str, str]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def arguments_json(self) -> str:
         if self.argument_deltas:
@@ -254,6 +255,7 @@ class AccumulatingAgentEventReader(ABC):
                 model=message.model,
                 argument_deltas=[] if existing is None else existing.argument_deltas,
                 logs=[] if existing is None else existing.logs,
+                metadata=deepcopy(message.metadata),
             )
             return
 
@@ -269,6 +271,7 @@ class AccumulatingAgentEventReader(ABC):
                     arguments=None,
                     provider=message.provider,
                     model=message.model,
+                    metadata=deepcopy(message.metadata),
                 )
                 self._tool_calls_by_item_id[message.item_id] = item
             item.argument_deltas.append(message.delta)
@@ -286,6 +289,7 @@ class AccumulatingAgentEventReader(ABC):
                     arguments=None,
                     provider=message.provider,
                     model=message.model,
+                    metadata=deepcopy(message.metadata),
                 )
                 self._tool_calls_by_item_id[message.item_id] = item
             item.logs.extend([line.model_dump(mode="json") for line in message.lines])
@@ -468,6 +472,7 @@ class AccumulatingAgentEventReader(ABC):
                 arguments=None,
                 provider=message.provider,
                 model=message.model,
+                metadata=deepcopy(message.metadata),
             )
 
         self._append_tool_call(

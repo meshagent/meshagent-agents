@@ -77,6 +77,9 @@ from meshagent.agents.messages import (
     TurnStartAccepted,
     TurnSteer,
     TurnSteerAccepted,
+    TurnSteered,
+    TurnSteerRejected,
+    ThreadCleared,
     parse_agent_message,
 )
 from meshagent.api import DatasetJson, DatasetTableStats, Participant, RoomException
@@ -1971,54 +1974,224 @@ async def test_dataset_thread_storage_flushes_unended_text_on_successful_turn_en
 
 
 @pytest.mark.asyncio
-async def test_dataset_thread_storage_flushes_previous_turn_before_accepted_steer() -> (
+async def test_dataset_thread_storage_saves_steer_after_tool_completion_when_applied() -> (
     None
 ):
     room = _FakeRoom()
     storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
     await storage.start()
-
+    common = {"thread_id": storage.path, "turn_id": "turn-1"}
+    tool = {
+        **common,
+        "item_id": "sh_1",
+        "namespace": "openai.responses",
+        "call_id": "call_1",
+    }
     storage.push_message(
-        message=AgentTextContentDelta(
-            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
-            thread_id="dataset://threads/demo",
-            turn_id="turn-1",
-            item_id="text-1",
-            text="answer before steer",
+        message=AgentToolCallStarted(
+            type=AGENT_EVENT_TOOL_CALL_STARTED,
+            toolkit="openai",
+            tool="shell",
+            arguments={"action": {"commands": ["pwd"]}},
+            **tool,
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallLogDelta(
+            type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+            lines=[AgentToolCallLogLine(source="stdout", text="before steer")],
+            **tool,
         )
     )
     storage.push_message(
         message=TurnSteer(
             type=AGENT_MESSAGE_TURN_STEER,
-            thread_id="dataset://threads/demo",
             message_id="steer-1",
-            turn_id="turn-1",
             content=[{"type": "text", "text": "add this"}],
+            **common,
         ),
         sender=_participant("caller"),
     )
     storage.push_message(
         message=TurnSteerAccepted(
             type=AGENT_EVENT_TURN_STEER_ACCEPTED,
-            thread_id="dataset://threads/demo",
             source_message_id="steer-1",
-            turn_id="turn-1",
+            **common,
+        )
+    )
+    storage.push_message(
+        message=AgentToolCallLogDelta(
+            type=AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+            lines=[AgentToolCallLogLine(source="stdout", text="after acceptance")],
+            **tool,
+        )
+    )
+    await storage.flush()
+    assert [message.type for message in storage.agent_messages()] == [
+        AGENT_EVENT_TURN_STEER_ACCEPTED
+    ]
+    assert storage.unflushed_agent_messages() == []
+    # A queued steer must not reserve a sequence and block subsequent inserts.
+    assert len(room.datasets.rows[(("threads",), "demo")]) == 1
+
+    storage.push_message(
+        message=AgentToolCallEnded(
+            type=AGENT_EVENT_TOOL_CALL_ENDED,
+            toolkit="openai",
+            tool="shell",
+            result=TextContent(text="successful result"),
+            **tool,
+        )
+    )
+    storage.push_message(
+        message=AgentTextContentDelta(
+            type=AGENT_EVENT_TEXT_CONTENT_DELTA,
+            item_id="text-1",
+            text="answer before application",
+            **common,
+        )
+    )
+    await storage.flush()
+    assert not any(
+        isinstance(message, TurnSteer) for message in storage.agent_messages()
+    )
+    storage.push_message(
+        message=TurnSteered(
+            type="meshagent.agent.turn.steered",
+            source_message_id="steer-1",
+            **common,
         )
     )
     await storage.stop()
 
-    rows = room.datasets.rows[(("threads",), "demo")]
-    assert len(rows) == 3
-    first = _row_data(rows[0])
-    second = _row_data(rows[1])
-    third = _row_data(rows[2])
-    assert first["type"] == AGENT_EVENT_TEXT_CONTENT_DELTA
-    assert first["text"] == "answer before steer"
-    assert second["type"] == AGENT_MESSAGE_TURN_STEER
-    assert second["content"] == [{"type": "text", "text": "add this"}]
-    assert second["sender_name"] == "caller"
-    assert third["type"] == AGENT_EVENT_TURN_STEER_ACCEPTED
-    assert third["content"] == []
+    messages = storage.agent_messages()
+    assert [message.type for message in messages] == [
+        AGENT_EVENT_TURN_STEER_ACCEPTED,
+        AGENT_EVENT_TOOL_CALL_STARTED,
+        AGENT_EVENT_TOOL_CALL_LOG_DELTA,
+        AGENT_EVENT_TOOL_CALL_ENDED,
+        AGENT_EVENT_TEXT_CONTENT_DELTA,
+        AGENT_MESSAGE_TURN_STEER,
+        "meshagent.agent.turn.steered",
+    ]
+    logs = messages[2]
+    assert isinstance(logs, AgentToolCallLogDelta)
+    assert [line.text for line in logs.lines] == ["before steer", "after acceptance"]
+    ended = messages[3]
+    assert isinstance(ended, AgentToolCallEnded)
+    assert ended.error is None
+    assert isinstance(ended.result, TextContent)
+    assert ended.result.text == "successful result"
+    steer = messages[5]
+    assert isinstance(steer, TurnSteer)
+    assert steer.sender_name == "caller"
+    assert steer.content == [AgentTextContent(type="text", text="add this")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_request", [False, True])
+async def test_dataset_thread_storage_defers_accepted_steer_content_until_applied(
+    include_request: bool,
+) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    common = {"thread_id": storage.path, "turn_id": "turn-1"}
+    if include_request:
+        storage.push_message(
+            message=TurnSteer(
+                type=AGENT_MESSAGE_TURN_STEER,
+                message_id="steer-1",
+                content=[AgentTextContent(type="text", text="add this")],
+                **common,
+            ),
+            sender=_participant("caller"),
+        )
+    storage.push_message(
+        message=TurnSteerAccepted(
+            type=AGENT_EVENT_TURN_STEER_ACCEPTED,
+            source_message_id="steer-1",
+            content=[AgentTextContent(type="text", text="add this")],
+            sender_name="caller",
+            **common,
+        )
+    )
+    await storage.flush()
+    accepted = storage.agent_messages()[0]
+    assert isinstance(accepted, TurnSteerAccepted)
+    assert accepted.content == []
+    storage.push_message(
+        message=TurnSteered(
+            type="meshagent.agent.turn.steered",
+            source_message_id="steer-1",
+            **common,
+        )
+    )
+    await storage.stop()
+    steers = [
+        message
+        for message in storage.agent_messages()
+        if isinstance(message, TurnSteer)
+    ]
+    assert len(steers) == 1
+    assert steers[0].content == [AgentTextContent(type="text", text="add this")]
+    assert steers[0].sender_name == "caller"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup", ["rejected", "ended", "cleared", "stopped"])
+async def test_dataset_thread_storage_discards_unapplied_steer(cleanup: str) -> None:
+    room = _FakeRoom()
+    storage = DatasetThreadStorage(room=room, path="dataset://threads/demo")
+    await storage.start()
+    common = {"thread_id": storage.path, "turn_id": "turn-1"}
+    storage.push_message(
+        message=TurnSteer(
+            type=AGENT_MESSAGE_TURN_STEER,
+            message_id="steer-1",
+            content=[AgentTextContent(type="text", text="must not be replayed")],
+            **common,
+        )
+    )
+    storage.push_message(
+        message=TurnSteerAccepted(
+            type=AGENT_EVENT_TURN_STEER_ACCEPTED,
+            source_message_id="steer-1",
+            **common,
+        )
+    )
+    if cleanup == "rejected":
+        storage.push_message(
+            message=TurnSteerRejected(
+                type="meshagent.agent.turn.steer.rejected",
+                source_message_id="steer-1",
+                error=AgentError(message="rejected", code="rejected"),
+                **common,
+            )
+        )
+    elif cleanup == "ended":
+        storage.push_message(message=TurnEnded(type=AGENT_EVENT_TURN_ENDED, **common))
+    elif cleanup == "cleared":
+        storage.push_message(
+            message=ThreadCleared(
+                type="meshagent.agent.thread.cleared",
+                thread_id=storage.path,
+                source_message_id="clear-1",
+            )
+        )
+    if cleanup != "stopped":
+        storage.push_message(
+            message=TurnSteered(
+                type="meshagent.agent.turn.steered",
+                source_message_id="steer-1",
+                **common,
+            )
+        )
+    await storage.stop()
+    assert not any(
+        isinstance(message, TurnSteer) for message in storage.agent_messages()
+    )
+    assert storage.unflushed_agent_messages() == []
 
 
 @pytest.mark.asyncio
@@ -2105,6 +2278,7 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
             toolkit="shell",
             tool="exec",
             arguments={"cmd": "sleep 10"},
+            metadata={"provider_item_type": "shell_call"},
         )
     )
     storage.push_message(
@@ -2126,10 +2300,12 @@ async def test_dataset_thread_storage_drops_pending_tool_and_flushes_started_too
     assert data["call_id"] == "call-started"
     assert data["toolkit"] == "shell"
     assert data["tool"] == "exec"
+    assert data["metadata"] == {"provider_item_type": "shell_call"}
     tool_ended = _row_data(rows[1])
     assert tool_ended["type"] == AGENT_EVENT_TOOL_CALL_ENDED
     assert tool_ended["item_id"] == "started-tool"
     assert tool_ended["error"]["code"] == "failed"
+    assert tool_ended["metadata"] == {"provider_item_type": "shell_call"}
     error_event = _row_data(rows[2])
     assert error_event["type"] == AGENT_EVENT_THREAD_EVENT
     assert rows[2]["turn_id"] == "turn-1"
