@@ -1,4 +1,5 @@
 ## [0.55.0]
+- Concurrent first-use dataset catalog lookups no longer prevent persisted agent threads from starting.
 - Managed Monty tools now use the `managed_python` namespace, avoiding OpenAI's reserved `python` namespace.
 - Added managed-agent Python tool and HTTP connection models, including strict schema, URL, source, entrypoint, and duplicate-name validation.
 - Added local CLI execution for embedded Python tools with JSON input, live HTTP requests, captured logs, request summaries, and optional private-HTTP access for development.
